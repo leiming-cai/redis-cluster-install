@@ -1,0 +1,23 @@
+# Build artifacts
+*.o
+*.so
+*.a
+redis-8.8.0/
+src/redis-server
+src/redis-cli
+src/redis-sentinel
+
+# Local source tarball - regenerate from canonical source
+redis-*.tar.gz
+
+# Secrets (SSH password, cluster auth)
+secrets/
+
+# Logs
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
