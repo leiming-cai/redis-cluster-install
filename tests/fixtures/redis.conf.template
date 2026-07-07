@@ -1,0 +1,7 @@
+# Test fixture template
+port %PORT%
+requirepass %PASSWORD%
+masterauth %PASSWORD%
+node_name %NODE_NAME%
+bind %BIND_ADDR%
+daemonize yes
