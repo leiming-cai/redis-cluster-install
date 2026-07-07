@@ -1,0 +1,26 @@
+[Unit]
+Description=Redis %PORT% (%NODE_NAME%) — cluster node
+Documentation=https://redis.io/
+After=network.target
+
+[Service]
+Type=simple
+User=redis
+Group=redis
+ExecStart=/usr/local/bin/redis-server /etc/redis/cluster/redis-%PORT%.conf
+ExecStop=/usr/local/bin/redis-cli -a %PASSWORD% -p %PORT% shutdown nosave
+Restart=always
+RestartSec=3
+LimitNOFILE=10032
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
