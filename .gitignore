@@ -10,8 +10,11 @@ src/redis-sentinel
 # Local source tarball - regenerate from canonical source
 redis-*.tar.gz
 
-# Secrets (SSH password, cluster auth)
-secrets/
+# Secrets (SSH password, cluster auth) — directory is runtime-created
+# but .gitkeep is allowed so the dir exists on fresh clone
+secrets/*
+!secrets/.gitkeep
+!secrets/.gitignore
 
 # Logs
 *.log
@@ -21,3 +24,6 @@ secrets/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Agent runtime state (Sisyphus/Omo session bookkeeping)
+.omo/
