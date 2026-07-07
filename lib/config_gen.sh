@@ -13,9 +13,11 @@ render_redis_conf() {
 
     [ -f "$template" ] || { echo "config_gen: template not found: $template" >&2; return 1; }
 
-    sed -e "s/%PORT%/$port/g" \
-        -e "s/%PASSWORD%/$password/g" \
-        -e "s/%NODE_NAME%/$node_name/g" \
-        -e "s/%BIND_ADDR%/$bind_addr/g" \
+    # Use | as sed delimiter (values must not contain |).
+    # Currently safe: gen_password emits [A-Za-z0-9], bind_addr is IP, node_name is hardcoded.
+    sed -e "s|%PORT%|$port|g" \
+        -e "s|%PASSWORD%|$password|g" \
+        -e "s|%NODE_NAME%|$node_name|g" \
+        -e "s|%BIND_ADDR%|$bind_addr|g" \
         "$template"
 }
