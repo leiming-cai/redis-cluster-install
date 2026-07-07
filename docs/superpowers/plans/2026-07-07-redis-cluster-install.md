@@ -20,7 +20,7 @@
 | `status.sh` | Reads `secrets/cluster_password.txt`, runs `redis-cli --cluster check`, prints role table. |
 | `uninstall.sh` | Stops services, backs up data dir, removes configs/users; `--force` to actually delete. |
 | `add-node.sh` | Installs a new instance on a new node and joins it to the cluster. |
-| `lib/common.sh` | `log_info/warn/error`, color codes, `die()`, `trap` on EXIT. |
+| `lib/common.sh` | `log_info/warn/error/ok`, color codes, `die()`, `ensure_dirs`, `require_cmd` |
 | `lib/prompt.sh` | `read_secret`, `read_required`, `read_default` (interactive only, never writes to disk). |
 | `lib/ssh.sh` | `ssh_run`, `ssh_copy`, `ssh_check` (wraps sshpass). |
 | `lib/config_gen.sh` | `render_redis_conf PORT PASSWORD` from template. |

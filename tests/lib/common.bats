@@ -8,9 +8,10 @@ load_lib common
     [[ "$output" == *"hello"* ]]
 }
 
-@test "log_warn prints [WARN] prefix" {
+@test "log_warn prints [WARN] prefix to stderr" {
     run log_warn "careful"
     [[ "$output" == *"[WARN]"* ]]
+    [[ "${stderr}" == *"careful"* ]]
 }
 
 @test "log_error prints [ERROR] prefix to stderr" {

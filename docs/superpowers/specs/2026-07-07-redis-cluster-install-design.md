@@ -60,7 +60,7 @@
 | 组件                         | 职责                                                | 入口                |
 | -------------------------- | ------------------------------------------------- | ----------------- |
 | `install.sh`               | 主入口:配置加载 → 推包 → 编译 → 装 systemd → 启服务 → 集群创建            | 主脚本               |
-| `lib/common.sh`            | 日志、颜色、错误退出、`trap` 钩子                                | source            |
+| `lib/common.sh`            | 日志、颜色、错误退出(`die` / `ensure_dirs` / `require_cmd`)         | source            |
 | `lib/prompt.sh`            | 交互读取 SSH IP/端口/用户/密码的封装                              | source            |
 | `lib/ssh.sh`               | `ssh_run`、`ssh_copy`、`ssh_check` 等薄包装(sshpass)     | source            |
 | `lib/config_gen.sh`        | 用 `config/redis.conf.template` 渲染每个实例的 `redis.conf` | source            |

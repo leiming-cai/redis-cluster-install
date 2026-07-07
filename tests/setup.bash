@@ -1,5 +1,5 @@
 # Common bats setup. Sourced by every test file.
-# Adds the repo's lib/ to a safe lookup path.
+# Exposes $REPO_ROOT and a load_lib helper for relative lib sourcing.
 setup() {
     REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 }
