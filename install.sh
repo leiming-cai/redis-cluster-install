@@ -108,8 +108,9 @@ set -e
 command -v gcc    >/dev/null || { echo "missing gcc"; exit 11; }
 command -v make   >/dev/null || { echo "missing make"; exit 12; }
 command -v tar    >/dev/null || { echo "missing tar"; exit 13; }
-gcc_version=$(gcc -dumpversion | cut -d. -f1)
-[ "$gcc_version" -ge 11 ] 2>/dev/null || { echo "gcc $gcc_version too old, need >= 11"; exit 14; }
+command -v g++    >/dev/null || { echo "missing g++"; exit 16; }
+gcc_version=$(gcc -dumpversion 2>/dev/null | cut -d. -f1) || { echo "gcc -dumpversion failed"; exit 17; }
+[ "$gcc_version" -ge 11 ] || { echo "gcc $gcc_version too old, need >= 11"; exit 14; }
 ulimit -n | awk '{ if ($1 < 10001) { print "ulimit -n too low: " $1; exit 15; } }'
 echo "toolchain OK"
 REMOTE
@@ -151,20 +152,29 @@ log_ok "Build complete on both nodes"
 log_info "[7] Creating redis user and directories..."
 provision_dirs() {
     local user="$1" pass="$2" host="$3" port="$4"
-    ssh_run "$user" "$pass" "$host" "$port" bash -s <<'REMOTE'
+    shift 4
+    local ports=("$@")
+    # Build a per-port mkdir on the remote via a heredoc
+    local mkdir_block=""
+    for p in "${ports[@]}"; do
+        mkdir_block+="mkdir -p /var/lib/redis/cluster/${p}"$'\n'
+        mkdir_block+="mkdir -p /var/run/redis/cluster/${p}"$'\n'
+    done
+    ssh_run "$user" "$pass" "$host" "$port" bash -s <<REMOTE
 set -e
 id redis >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin redis
 mkdir -p /etc/redis/cluster
 mkdir -p /var/lib/redis/cluster
 mkdir -p /var/log/redis/cluster
 mkdir -p /var/run/redis/cluster
+${mkdir_block}
 chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis /etc/redis
 echo "dirs OK"
 REMOTE
 }
-provision_dirs "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" &
+provision_dirs "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" "${A_PORTS[@]}" &
 pid_a=$!
-provision_dirs "$B_USER" "$B_PASS" "$B_HOST" "$B_PORT" &
+provision_dirs "$B_USER" "$B_PASS" "$B_HOST" "$B_PORT" "${B_PORTS[@]}" &
 pid_b=$!
 wait "$pid_a" || die "dirs on A failed"
 wait "$pid_b" || die "dirs on B failed"
@@ -232,10 +242,14 @@ start_services "$B_USER" "$B_PASS" "$B_HOST" "$B_PORT" "${B_PORTS[@]}" || die "s
 verify_ping() {
     local user="$1" pass="$2" host="$3" port="$4" p
     for p in "${@:5}"; do
-        ssh_run "$user" "$pass" "$host" "$port" \
-            "/usr/local/bin/redis-cli -a '$CLUSTER_PASS' -p $p PING" \
-            | grep -q PONG \
-            || { echo "ping failed on $host:$p" >&2; return 1; }
+        if ! ssh_run "$user" "$pass" "$host" "$port" \
+                "/usr/local/bin/redis-cli -a '$CLUSTER_PASS' -p $p PING" \
+                | grep -qx PONG; then
+            log_warn "Last 50 lines of redis-$p.log on $host:"
+            ssh_run "$user" "$pass" "$host" "$port" \
+                "tail -n 50 /var/log/redis/cluster/redis-${p}.log" >&2 || true
+            die "PING failed on $host:$p — see log above"
+        fi
     done
 }
 verify_ping "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" "${A_PORTS[@]}" || die "PING on A failed"
@@ -244,8 +258,11 @@ log_ok "All 6 instances responding to PING"
 
 # === Step 12: Check if cluster already created ===
 log_info "[12] Checking cluster state..."
-existing_info=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" \
-    "/usr/local/bin/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" || true)
+if ! existing_info=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" \
+        "/usr/local/bin/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" 2>/dev/null); then
+    log_warn "Cannot reach A:6379 for cluster info; assuming cluster uninitialized"
+    existing_info=""
+fi
 # Use a tmpfile for safe parsing
 if echo "$existing_info" > /tmp/cluster_info_$$ && is_cluster_healthy < /tmp/cluster_info_$$; then
     log_ok "Cluster already healthy, skipping create"
@@ -274,8 +291,10 @@ fi
 
 # === Step 13: Final health check ===
 log_info "[13] Verifying cluster health..."
-final=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" \
-    "/usr/local/bin/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" || true)
+if ! final=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" \
+        "/usr/local/bin/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" 2>/dev/null); then
+    die "Cannot reach A:6379 for final cluster health check"
+fi
 if echo "$final" > /tmp/cluster_final_$$ && is_cluster_healthy < /tmp/cluster_final_$$; then
     rm -f /tmp/cluster_final_$$
     log_ok "Cluster is healthy"
