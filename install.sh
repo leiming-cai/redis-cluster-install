@@ -132,6 +132,10 @@ build_remote() {
     local user="$1" pass="$2" host="$3" port="$4"
     ssh_run "$user" "$pass" "$host" "$port" bash -s <<'REMOTE'
 set -e
+if [ -x /usr/local/bin/redis-server ] && [ -x /usr/local/bin/redis-cli ]; then
+    echo "already installed, skipping build"
+    exit 0
+fi
 cd /tmp
 tar xzf redis-8.8.0.tar.gz
 cd redis-8.8.0
@@ -230,6 +234,11 @@ log_info "[11] Starting services on both nodes..."
 start_services() {
     local user="$1" pass="$2" host="$3" port="$4" p
     for p in "${@:5}"; do
+        # Skip if already active (idempotent re-run)
+        if ssh_run "$user" "$pass" "$host" "$port" "systemctl is-active redis-${p}" 2>/dev/null | grep -qx active; then
+            log_info "  $host:$p already active, skipping start"
+            continue
+        fi
         ssh_run "$user" "$pass" "$host" "$port" \
             "systemctl daemon-reload && systemctl enable redis-${p} && systemctl restart redis-${p}" \
             || { echo "start failed on $host:$p" >&2; return 1; }
@@ -301,6 +310,14 @@ if echo "$final" > /tmp/cluster_final_$$ && is_cluster_healthy < /tmp/cluster_fi
 else
     rm -f /tmp/cluster_final_$$
     die "cluster health check failed:\n$final"
+fi
+
+# === Optional: SELinux hint for RHEL-family ===
+selinux_hint=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" "getenforce 2>/dev/null || true" 2>/dev/null || true)
+if echo "$selinux_hint" | grep -q Enforcing; then
+    log_warn "SELinux is enforcing on node A. If writes fail, run on each node:"
+    log_warn "  semanage fcontext -a -t redis_var_lib_t '/var/lib/redis/cluster(/.*)?'"
+    log_warn "  restorecon -R /var/lib/redis/cluster"
 fi
 
 # === Step 14: Print summary card ===

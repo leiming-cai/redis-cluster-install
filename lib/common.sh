@@ -45,3 +45,16 @@ require_cmd() {
         command -v "$c" >/dev/null 2>&1 || die "missing required command: $c"
     done
 }
+
+# file_exists PATH
+# Returns 0 if PATH exists (regular file, directory, anything), else 1.
+file_exists() {
+    [ -e "$1" ]
+}
+
+# remote_file_exists USER PASS HOST PORT PATH
+# Returns 0 if PATH exists on remote host, else 1.
+remote_file_exists() {
+    local user="$1" pass="$2" host="$3" port="$4" path="$5"
+    ssh_run "$user" "$pass" "$host" "$port" "test -e '$path'"
+}
