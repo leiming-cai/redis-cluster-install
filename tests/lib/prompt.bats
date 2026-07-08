@@ -72,13 +72,22 @@ setup() {
     type read_secret | grep -q "function"
 }
 
-@test "PROMPT_NO_TTY=1 routes to stdin (not /dev/tty)" {
-    # This test verifies the test-mode flag works; no /dev/tty needed
+@test "_read_from helper exists" {
+    type _read_from | grep -q "function"
+}
+
+@test "_tty_check helper exists" {
+    type _tty_check | grep -q "function"
+}
+
+@test "PROMPT_NO_TTY=1 makes read_default use stdin" {
+    # When PROMPT_NO_TTY=1, even with no pipe input the function should
+    # consume stdin (the test's empty echo), not block on /dev/tty.
     run bash -c '
         source "'"$BATS_TEST_DIRNAME"'/../../lib/common.sh"
         source "'"$BATS_TEST_DIRNAME"'/../../lib/prompt.sh"
         export PROMPT_NO_TTY=1
-        _prompt_fd
+        echo "from-stdin" | read_default "x" "fallback"
     '
-    [ "$output" = "0" ]
+    [ "$output" = "from-stdin" ]
 }

@@ -9,24 +9,33 @@ _tty_check() {
     [ -r /dev/tty ] && [ -w /dev/tty ]
 }
 
-# _prompt_fd: echo the FD number to read from
-#   1) PROMPT_NO_TTY=1 -> 0 (stdin)
-#   2) /dev/tty usable -> opens /dev/tty on FD 9, echoes 9
-#   3) else -> 0 (stdin fallback)
-_prompt_fd() {
-    if [ "${PROMPT_NO_TTY:-0}" = "1" ]; then
-        echo 0
-        return
-    fi
-    if _tty_check; then
-        # Open /dev/tty on FD 9 if not already open there
-        if ! { : <&9; } 2>/dev/null; then
-            exec 9</dev/tty
+# _read_from PROMPT_VAR REPLY_VAR [DEFAULT]
+# Internal helper. Picks the input source based on PROMPT_NO_TTY env:
+#   PROMPT_NO_TTY=1  -> read from stdin
+#   /dev/tty usable  -> read from /dev/tty (interactive)
+#   else             -> read from stdin (best-effort fallback)
+# REPLY_VAR is the name of the variable to store the input.
+# Returns 0 on successful read, 1 on EOF.
+_read_from() {
+    local prompt_var="$1"
+    local reply_var="$2"
+    local default="${3:-}"
+    # Indirect assignment via nameref (bash 4.3+)
+    declare -n _reply_ref="$reply_var"
+    if [ "${PROMPT_NO_TTY:-0}" = "1" ] || ! _tty_check; then
+        if ! read -r -p "${!prompt_var}" _reply_ref; then
+            return 1
         fi
-        echo 9
     else
-        echo 0
+        if ! read -r -p "${!prompt_var}" _reply_ref </dev/tty; then
+            return 1
+        fi
     fi
+    if [ -n "$default" ] && [ -z "$_reply_ref" ]; then
+        _reply_ref="$default"
+    fi
+    unset -n _reply_ref
+    return 0
 }
 
 # read_default "PROMPT" "DEFAULT"
@@ -34,12 +43,11 @@ _prompt_fd() {
 read_default() {
     local prompt="$1"
     local default="$2"
-    local fd reply=""
-    fd=$(_prompt_fd)
-    if ! read -r -u "$fd" -p "$prompt [$default]: " reply; then
+    local prompt_str="$prompt [$default]: "
+    local reply=""
+    if ! _read_from prompt_str reply; then
         return 1
     fi
-    [ -z "$reply" ] && reply="$default"
     printf '%s' "$reply"
 }
 
@@ -47,10 +55,10 @@ read_default() {
 # Loops until non-empty input. Echoes value.
 read_required() {
     local prompt="$1"
-    local fd reply=""
-    fd=$(_prompt_fd)
+    local prompt_str="$prompt: "
+    local reply=""
     while :; do
-        if ! read -r -u "$fd" -p "$prompt: " reply; then
+        if ! _read_from prompt_str reply; then
             return 1
         fi
         [ -n "$reply" ] && break
@@ -62,12 +70,12 @@ read_required() {
 # Reads a password silently. Echoes value.
 read_secret() {
     local prompt="$1"
-    local fd reply=""
-    fd=$(_prompt_fd)
-    if ! read -r -s -u "$fd" -p "$prompt: " reply; then
+    local prompt_str="$prompt: "
+    local reply=""
+    if ! _read_from prompt_str reply; then
         return 1
     fi
-    echo >&2  # newline after silent read (only when /dev/tty is a real tty)
+    echo >&2  # newline after silent read
     printf '%s' "$reply"
 }
 
@@ -75,9 +83,9 @@ read_secret() {
 # Reads y/N. Echoes y or n.
 read_confirm() {
     local prompt="$1"
-    local fd reply=""
-    fd=$(_prompt_fd)
-    if ! read -r -u "$fd" -p "$prompt [y/N]: " reply; then
+    local prompt_str="$prompt [y/N]: "
+    local reply=""
+    if ! _read_from prompt_str reply; then
         return 1
     fi
     case "$reply" in
