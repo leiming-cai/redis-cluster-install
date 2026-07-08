@@ -105,13 +105,88 @@ verify_remote() {
     local user="$1" pass="$2" host="$3" port="$4"
     ssh_run "$user" "$pass" "$host" "$port" bash -s <<'REMOTE'
 set -e
-command -v gcc    >/dev/null || { echo "missing gcc"; exit 11; }
 command -v make   >/dev/null || { echo "missing make"; exit 12; }
 command -v tar    >/dev/null || { echo "missing tar"; exit 13; }
-command -v g++    >/dev/null || { echo "missing g++"; exit 16; }
-gcc_version=$(gcc -dumpversion 2>/dev/null | cut -d. -f1) || { echo "gcc -dumpversion failed"; exit 17; }
-[ "$gcc_version" -ge 11 ] || { echo "gcc $gcc_version too old, need >= 11"; exit 14; }
 ulimit -n | awk '{ if ($1 < 10001) { print "ulimit -n too low: " $1; exit 15; } }'
+
+# --- GCC 11+ detection ---
+# Search a list of common locations/variants in order of preference.
+# Redis 8 requires GCC 11+ (uses __builtin_cpu_supports and modern CFLAGS).
+gcc_ok=0
+for gcc_candidate in \
+    gcc-11 \
+    gcc-12 \
+    gcc-13 \
+    gcc-14 \
+    /opt/rh/gcc-toolset-11/root/bin/gcc \
+    /opt/rh/devtoolset-11/root/bin/gcc \
+    /opt/rh/gcc-toolset-12/root/bin/gcc \
+    /opt/rh/devtoolset-12/root/bin/gcc \
+    gcc; do
+    if command -v "$gcc_candidate" >/dev/null 2>&1 || [ -x "$gcc_candidate" ]; then
+        gcc_version=$("$gcc_candidate" -dumpversion 2>/dev/null | cut -d. -f1) || continue
+        if [ "${gcc_version:-0}" -ge 11 ] 2>/dev/null; then
+            # Pick matching g++ if possible
+            case "$gcc_candidate" in
+                gcc-*)  cxx_candidate="${gcc_candidate}g++" ;;  # gcc-11 -> g++-11
+                /opt/rh/*gcc-toolset-11/*) cxx_candidate="/opt/rh/gcc-toolset-11/root/bin/g++" ;;
+                /opt/rh/*devtoolset-11/*)  cxx_candidate="/opt/rh/devtoolset-11/root/bin/g++" ;;
+                /opt/rh/*gcc-toolset-12/*) cxx_candidate="/opt/rh/gcc-toolset-12/root/bin/g++" ;;
+                /opt/rh/*devtoolset-12/*)  cxx_candidate="/opt/rh/devtoolset-12/root/bin/g++" ;;
+                *)       cxx_candidate="g++" ;;
+            esac
+            if command -v "$cxx_candidate" >/dev/null 2>&1 || [ -x "$cxx_candidate" ]; then
+                echo "  using CC=$gcc_candidate (version $gcc_version), CXX=$cxx_candidate"
+            else
+                echo "  using CC=$gcc_candidate (version $gcc_version) — g++ not found, may break C++ builds"
+                cxx_candidate="g++"
+            fi
+            # Persist for later build steps in this session
+            echo "export CC=$gcc_candidate"     > /tmp/.redis-cluster-build-env
+            echo "export CXX=$cxx_candidate"    >> /tmp/.redis-cluster-build-env
+            gcc_ok=1
+            break
+        fi
+    fi
+done
+
+if [ "$gcc_ok" != "1" ]; then
+    found_gcc=$(command -v gcc 2>/dev/null || echo "not found")
+    found_ver=""
+    if [ -x "$found_gcc" ]; then
+        found_ver=$("$found_gcc" -dumpversion 2>/dev/null)
+    fi
+    echo "ERROR: GCC 11+ required (Redis 8 build dependency)"
+    echo "       Found: ${found_gcc}${found_ver:+ (version $found_ver)}"
+    echo ""
+    echo "Install GCC 11+ on this node:"
+    if command -v dnf >/dev/null 2>&1; then
+        echo "  # Fedora / RHEL 8+ (dnf)"
+        echo "  sudo dnf install -y gcc-toolset-11"
+        echo "  # or for older Fedora: sudo dnf install -y gcc11 gcc11-c++"
+    elif command -v yum >/dev/null 2>&1; then
+        echo "  # RHEL 7 / CentOS 7 (yum)"
+        echo "  sudo yum install -y centos-release-scl"
+        echo "  sudo yum install -y devtoolset-11"
+        echo "  # devtoolset installs to /opt/rh/devtoolset-11/ — install.sh will auto-detect it."
+    elif command -v apt >/dev/null 2>&1; then
+        echo "  # Debian / Ubuntu (apt)"
+        echo "  sudo apt install -y gcc-11 g++-11"
+        echo "  # gcc-11 installs to /usr/bin/gcc-11 — install.sh will auto-detect it."
+    elif command -v apk >/dev/null 2>&1; then
+        echo "  # Alpine (apk) — use edge or v3.19+; current gcc typically 13+"
+        echo "  sudo apk add gcc g++ musl-dev"
+    else
+        echo "  # Unknown package manager — install GCC 11+ via your OS package manager."
+    fi
+    echo ""
+    echo "After installing, re-run install.sh — it will auto-detect the new compiler."
+    exit 14
+fi
+
+command -v "$CXX" >/dev/null 2>&1 || command -v "g++" >/dev/null 2>&1 || {
+    echo "missing g++ (required for C++ build)"; exit 16;
+}
 echo "toolchain OK"
 REMOTE
 }
@@ -136,10 +211,15 @@ if [ -x /usr/local/bin/redis-server ] && [ -x /usr/local/bin/redis-cli ]; then
     echo "already installed, skipping build"
     exit 0
 fi
+# Source the build env if step 4 wrote it (gives us CC/CXX when gcc-11 etc. was found)
+if [ -f /tmp/.redis-cluster-build-env ]; then
+    . /tmp/.redis-cluster-build-env
+    echo "  using CC=${CC:-cc} CXX=${CXX:-c++}"
+fi
 cd /tmp
 tar xzf redis-8.8.0.tar.gz
 cd redis-8.8.0
-make -C src BUILD_TLS=no USE_SYSTEMD=no -j"$(nproc)"
+make -C src BUILD_TLS=no USE_SYSTEMD=no CC="${CC:-gcc}" CXX="${CXX:-g++}" -j"$(nproc)"
 make -C src install PREFIX=/usr/local
 echo "build OK"
 REMOTE
