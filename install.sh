@@ -32,6 +32,8 @@ CONF_TEMPLATE="$REPO_ROOT/config/redis.conf.template"
 SERVICE_TEMPLATE="$REPO_ROOT/config/redis-cluster.service.template"
 SECRETS_DIR="$REPO_ROOT/secrets"
 PASSWORD_FILE="$SECRETS_DIR/cluster_password.txt"
+REDIS_PREFIX="${REDIS_PREFIX:-/opt/software/redis}"   # install root; bin/ ends up under here
+REDIS_BIN="$REDIS_PREFIX/bin"
 
 # A machine (3 instances)
 A_HOST="" A_PORT="22" A_USER="" A_PASS=""
@@ -250,7 +252,7 @@ _sudo() {
         sudo "$@"
     fi
 }
-if [ -x /usr/local/bin/redis-server ] && [ -x /usr/local/bin/redis-cli ]; then
+if [ -x "$REDIS_BIN/redis-server" ] && [ -x "$REDIS_BIN/redis-cli" ]; then
     echo "already installed, skipping build"
     exit 0
 fi
@@ -263,7 +265,7 @@ cd /tmp
 tar xzf redis-8.8.0.tar.gz
 cd redis-8.8.0
 make -C src BUILD_TLS=no USE_SYSTEMD=no CC="${CC:-gcc}" CXX="${CXX:-g++}" -j"$(nproc)"
-_sudo make -C src install PREFIX=/usr/local
+_sudo make -C src install PREFIX="$REDIS_PREFIX"
 echo "build OK"
 REMOTE
 }
@@ -439,7 +441,7 @@ verify_ping() {
     local user="$1" pass="$2" host="$3" port="$4" p
     for p in "${@:5}"; do
         if ! ssh_run "$user" "$pass" "$host" "$port" \
-                "/usr/local/bin/redis-cli -a '$CLUSTER_PASS' -p $p PING" \
+                "$REDIS_BIN/redis-cli -a '$CLUSTER_PASS' -p $p PING" \
                 | grep -qx PONG; then
             log_warn "Last 50 lines of redis-$p.log on $host:"
             ssh_run "$user" "$pass" "$host" "$port" \
@@ -455,7 +457,7 @@ log_ok "All 6 instances responding to PING"
 # === Step 12: Check if cluster already created ===
 log_info "[12] Checking cluster state..."
 if ! existing_info=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" \
-        "/usr/local/bin/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" 2>/dev/null); then
+        "$REDIS_BIN/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" 2>/dev/null); then
     log_warn "Cannot reach A:6379 for cluster info; assuming cluster uninitialized"
     existing_info=""
 fi
@@ -480,7 +482,7 @@ else
     else
         log_warn "redis-cli not on control machine; running create from node A"
         ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" \
-            "/usr/local/bin/redis-cli --cluster create $(printf '%s ' "${create_args[@]}") --cluster-replicas 1 --cluster-yes -a '$CLUSTER_PASS'" \
+            "$REDIS_BIN/redis-cli --cluster create $(printf '%s ' "${create_args[@]}") --cluster-replicas 1 --cluster-yes -a '$CLUSTER_PASS'" \
             || die "redis-cli --cluster create from A failed"
     fi
 fi
@@ -488,7 +490,7 @@ fi
 # === Step 13: Final health check ===
 log_info "[13] Verifying cluster health..."
 if ! final=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" \
-        "/usr/local/bin/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" 2>/dev/null); then
+        "$REDIS_BIN/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" 2>/dev/null); then
     die "Cannot reach A:6379 for final cluster health check"
 fi
 if echo "$final" > /tmp/cluster_final_$$ && is_cluster_healthy < /tmp/cluster_final_$$; then
