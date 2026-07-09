@@ -51,9 +51,23 @@ _sudo() {
     fi
 }
 _sudo mkdir -p /etc/redis/cluster
-_sudo tee /etc/redis/cluster/auth.conf >/dev/null <<<"$AUTH_CONTENT"
-_sudo chown redis:redis /etc/redis/cluster/auth.conf
-_sudo chmod 600 /etc/redis/cluster/auth.conf
+# Use 'install' (avoids stdin-collision between <<< and sudo -S password)
+_sudo_write_file() {
+    local content="$1" dst="$2" mode="$3" ownerg="${4:-redis:redis}"
+    local src; src=$(mktemp)
+    printf '%s' "$content" > "$src" || { rm -f "$src"; return 1; }
+    local rc=0
+    if sudo -n true 2>/dev/null; then
+        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" 2>/dev/null || rc=$?
+    else
+        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
+    fi
+    rm -f "$src"
+    return $rc
+}
+_sudo_write_file "$AUTH_CONTENT" /etc/redis/cluster/auth.conf 600
 REMOTE
 
 # Push the redis.conf
@@ -73,9 +87,23 @@ _sudo() {
     fi
 }
 _sudo mkdir -p /etc/redis/cluster
-_sudo tee "/etc/redis/cluster/redis-${PORT}.conf" >/dev/null <<<"$CONF_CONTENT"
-_sudo chown redis:redis "/etc/redis/cluster/redis-${PORT}.conf"
-_sudo chmod 640 "/etc/redis/cluster/redis-${PORT}.conf"
+# Use 'install' (avoids stdin-collision between <<< and sudo -S password)
+_sudo_write_file() {
+    local content="$1" dst="$2" mode="$3" ownerg="${4:-redis:redis}"
+    local src; src=$(mktemp)
+    printf '%s' "$content" > "$src" || { rm -f "$src"; return 1; }
+    local rc=0
+    if sudo -n true 2>/dev/null; then
+        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" 2>/dev/null || rc=$?
+    else
+        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
+    fi
+    rm -f "$src"
+    return $rc
+}
+_sudo_write_file "$CONF_CONTENT" "/etc/redis/cluster/redis-${PORT}.conf" 640
 REMOTE
 
 # Push the systemd unit
@@ -94,8 +122,23 @@ _sudo() {
         sudo "$@"
     fi
 }
-_sudo tee "/etc/systemd/system/redis-${PORT}.service" >/dev/null <<<"$UNIT_CONTENT"
-_sudo chmod 644 "/etc/systemd/system/redis-${PORT}.service"
+# Use 'install' (avoids stdin-collision between <<< and sudo -S password)
+_sudo_write_file() {
+    local content="$1" dst="$2" mode="$3" ownerg="${4:-redis:redis}"
+    local src; src=$(mktemp)
+    printf '%s' "$content" > "$src" || { rm -f "$src"; return 1; }
+    local rc=0
+    if sudo -n true 2>/dev/null; then
+        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" 2>/dev/null || rc=$?
+    else
+        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
+    fi
+    rm -f "$src"
+    return $rc
+}
+_sudo_write_file "$UNIT_CONTENT" "/etc/systemd/system/redis-${PORT}.service" 644 root:root
 REMOTE
 
 # Ensure the per-port data dir exists and start the service
