@@ -72,14 +72,14 @@ prompt_credentials() {
     log_info "Configure SSH access to node A (3 instances: 6379, 6380, 6381)"
     A_HOST=$(read_default "  A host or IP" "")
     [ -n "$A_HOST" ] || die "A host is required"
-    A_USER=$(read_default "  A SSH user" "root")
+    A_USER=$(read_default "  A SSH user" "$(whoami)")
     A_PORT=$(read_default "  A SSH port" "22")
     A_PASS=$(read_secret "  A SSH password")
 
     log_info "Configure SSH access to node B (3 instances: 6382, 6383, 6384)"
     B_HOST=$(read_default "  B host or IP" "")
     [ -n "$B_HOST" ] || die "B host is required"
-    B_USER=$(read_default "  B SSH user" "root")
+    B_USER=$(read_default "  B SSH user" "$(whoami)")
     B_PORT=$(read_default "  B SSH port" "22")
     B_PASS=$(read_secret "  B SSH password")
 
@@ -199,6 +199,33 @@ verify_remote "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" || die "node A toolchain c
 verify_remote "$B_USER" "$B_PASS" "$B_HOST" "$B_PORT" || die "node B toolchain check failed"
 log_ok "Toolchain verified on both nodes"
 
+# === Step 4.5: Verify sudo access (if SSH user is not root) ===
+log_info "[4.5] Verifying sudo access on remotes..."
+verify_sudo() {
+    local user="$1" pass="$2" host="$3" port="$4"
+    # root user always has sudo
+    if ssh_run "$user" "$pass" "$host" "$port" "id -u" 2>/dev/null | grep -qx 0; then
+        log_info "  $user@$host: root user, sudo is implicit"
+        return 0
+    fi
+    # Try passwordless sudo
+    if ssh_run "$user" "$pass" "$host" "$port" "sudo -n true" 2>/dev/null; then
+        log_info "  $user@$host: passwordless sudo available"
+        return 0
+    fi
+    # Try with SSH password piped
+    if printf '%s\n' "$pass" | SSHPASS="$pass" sshpass -e \
+            ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
+            -p "$port" "${user}@${host}" "sudo -S -p '' true" 2>/dev/null; then
+        log_info "  $user@$host: sudo with password (will use SSH password)"
+        return 0
+    fi
+    die "  $user@$host: sudo unavailable. Either configure NOPASSWD in /etc/sudoers (recommended), or ensure the sudo password matches the SSH password."
+}
+verify_sudo "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT"
+verify_sudo "$B_USER" "$B_PASS" "$B_HOST" "$B_PORT"
+log_ok "sudo access verified on both nodes"
+
 # === Step 5: scp tarball to both nodes ===
 log_info "[5] Copying $TARBALL to both nodes..."
 [ -f "$TARBALL" ] || die "tarball not found: $TARBALL"
@@ -210,8 +237,19 @@ log_ok "Tarball copied"
 log_info "[6] Building Redis on both nodes..."
 build_remote() {
     local user="$1" pass="$2" host="$3" port="$4"
-    ssh_run "$user" "$pass" "$host" "$port" bash -s <<'REMOTE'
+    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" <<'REMOTE'
 set -e
+SUDO_PASS="$1"
+# _sudo: try non-interactive first, fall back to -S with password
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
 if [ -x /usr/local/bin/redis-server ] && [ -x /usr/local/bin/redis-cli ]; then
     echo "already installed, skipping build"
     exit 0
@@ -225,7 +263,7 @@ cd /tmp
 tar xzf redis-8.8.0.tar.gz
 cd redis-8.8.0
 make -C src BUILD_TLS=no USE_SYSTEMD=no CC="${CC:-gcc}" CXX="${CXX:-g++}" -j"$(nproc)"
-make -C src install PREFIX=/usr/local
+_sudo make -C src install PREFIX=/usr/local
 echo "build OK"
 REMOTE
 }
@@ -246,18 +284,26 @@ provision_dirs() {
     # Build a per-port mkdir on the remote via a heredoc
     local mkdir_block=""
     for p in "${ports[@]}"; do
-        mkdir_block+="mkdir -p /var/lib/redis/cluster/${p}"$'\n'
-        mkdir_block+="mkdir -p /var/run/redis/cluster/${p}"$'\n'
+        mkdir_block+="_sudo mkdir -p /var/lib/redis/cluster/${p}"$'\n'
+        mkdir_block+="_sudo mkdir -p /var/run/redis/cluster/${p}"$'\n'
     done
-    ssh_run "$user" "$pass" "$host" "$port" bash -s <<REMOTE
+    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" <<REMOTE
 set -e
-id redis >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin redis
-mkdir -p /etc/redis/cluster
-mkdir -p /var/lib/redis/cluster
-mkdir -p /var/log/redis/cluster
-mkdir -p /var/run/redis/cluster
+SUDO_PASS="$1"
+PORTS="$2"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+id redis >/dev/null 2>&1 || _sudo useradd --system --no-create-home --shell /usr/sbin/nologin redis
+_sudo mkdir -p /etc/redis/cluster /var/lib/redis/cluster /var/log/redis/cluster /var/run/redis/cluster
 ${mkdir_block}
-chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis /etc/redis
+_sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis /etc/redis
 echo "dirs OK"
 REMOTE
 }
@@ -273,10 +319,25 @@ log_ok "Directories provisioned"
 log_info "[8] Pushing cluster auth file..."
 push_auth() {
     local user="$1" pass="$2" host="$3" port="$4"
-    # Use a here-doc to stream a single line via ssh, then chown on remote.
-    SSHPASS="$pass" sshpass -e ssh -o StrictHostKeyChecking=accept-new -p "$port" "${user}@${host}" \
-        "bash -c 'mkdir -p /etc/redis/cluster && cat > /etc/redis/cluster/auth.conf && chown redis:redis /etc/redis/cluster/auth.conf && chmod 600 /etc/redis/cluster/auth.conf'" \
-        <<<"$CLUSTER_PASS"
+    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$CLUSTER_PASS" <<'REMOTE'
+set -e
+SUDO_PASS="$1"
+AUTH_CONTENT="$2"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+_sudo mkdir -p /etc/redis/cluster
+_sudo tee /etc/redis/cluster/auth.conf >/dev/null <<<"$AUTH_CONTENT"
+_sudo chown redis:redis /etc/redis/cluster/auth.conf
+_sudo chmod 600 /etc/redis/cluster/auth.conf
+echo "auth file deployed"
+REMOTE
 }
 push_auth "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" || die "auth file to A failed"
 push_auth "$B_USER" "$B_PASS" "$B_HOST" "$B_PORT" || die "auth file to B failed"
@@ -289,9 +350,26 @@ render_and_push() {
     for p in "${@:5}"; do
         local out
         out=$(render_redis_conf "$CONF_TEMPLATE" "$p" "$CLUSTER_PASS" "node-${p}" "0.0.0.0")
-        SSHPASS="$pass" sshpass -e ssh -o StrictHostKeyChecking=accept-new -p "$port" "${user}@${host}" \
-            "cat > /etc/redis/cluster/redis-${p}.conf && chown redis:redis /etc/redis/cluster/redis-${p}.conf && chmod 640 /etc/redis/cluster/redis-${p}.conf" \
-            <<<"$out"
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" "$out" <<'REMOTE'
+set -e
+SUDO_PASS="$1"
+PORT="$2"
+CONF_CONTENT="$3"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+_sudo mkdir -p /etc/redis/cluster
+_sudo tee "/etc/redis/cluster/redis-${PORT}.conf" >/dev/null <<<"$CONF_CONTENT"
+_sudo chown "redis:redis" "/etc/redis/cluster/redis-${PORT}.conf"
+_sudo chmod 640 "/etc/redis/cluster/redis-${PORT}.conf"
+echo "  rendered redis-${PORT}.conf"
+REMOTE
     done
 }
 render_and_push "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" "${A_PORTS[@]}" || die "config render/push to A failed"
@@ -305,9 +383,24 @@ push_units() {
     for p in "${@:5}"; do
         local out
         out=$(render_systemd_unit "$SERVICE_TEMPLATE" "$p" "node-${p}" "$CLUSTER_PASS")
-        SSHPASS="$pass" sshpass -e ssh -o StrictHostKeyChecking=accept-new -p "$port" "${user}@${host}" \
-            "cat > /etc/systemd/system/redis-${p}.service" \
-            <<<"$out"
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" "$out" <<'REMOTE'
+set -e
+SUDO_PASS="$1"
+PORT="$2"
+UNIT_CONTENT="$3"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+_sudo tee "/etc/systemd/system/redis-${PORT}.service" >/dev/null <<<"$UNIT_CONTENT"
+_sudo chmod 644 "/etc/systemd/system/redis-${PORT}.service"
+echo "  rendered redis-${PORT}.service"
+REMOTE
     done
 }
 push_units "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" "${A_PORTS[@]}" || die "units to A failed"
@@ -319,14 +412,23 @@ log_info "[11] Starting services on both nodes..."
 start_services() {
     local user="$1" pass="$2" host="$3" port="$4" p
     for p in "${@:5}"; do
-        # Skip if already active (idempotent re-run)
-        if ssh_run "$user" "$pass" "$host" "$port" "systemctl is-active redis-${p}" 2>/dev/null | grep -qx active; then
-            log_info "  $host:$p already active, skipping start"
-            continue
-        fi
-        ssh_run "$user" "$pass" "$host" "$port" \
-            "systemctl daemon-reload && systemctl enable redis-${p} && systemctl restart redis-${p}" \
-            || { echo "start failed on $host:$p" >&2; return 1; }
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" <<'REMOTE'
+set -e
+SUDO_PASS="$1"
+PORT="$2"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+_sudo systemctl daemon-reload
+_sudo systemctl enable "redis-${PORT}"
+_sudo systemctl restart "redis-${PORT}"
+REMOTE
     done
 }
 start_services "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" "${A_PORTS[@]}" || die "start on A failed"
