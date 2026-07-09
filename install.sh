@@ -111,13 +111,17 @@ ulimit -n | awk '{ if ($1 < 10001) { print "ulimit -n too low: " $1; exit 15; } 
 
 # --- GCC 11+ detection ---
 # Search a list of common locations/variants in order of preference.
-# Redis 8 requires GCC 11+ (uses __builtin_cpu_supports and modern CFLAGS).
+# Redis 8 requires GCC 7+ (uses __builtin_cpu_supports and C11 features).
 gcc_ok=0
 for gcc_candidate in \
-    gcc-11 \
-    gcc-12 \
-    gcc-13 \
     gcc-14 \
+    gcc-13 \
+    gcc-12 \
+    gcc-11 \
+    gcc-10 \
+    gcc-9 \
+    gcc-8 \
+    gcc-7 \
     /opt/rh/gcc-toolset-11/root/bin/gcc \
     /opt/rh/devtoolset-11/root/bin/gcc \
     /opt/rh/gcc-toolset-12/root/bin/gcc \
@@ -125,7 +129,7 @@ for gcc_candidate in \
     gcc; do
     if command -v "$gcc_candidate" >/dev/null 2>&1 || [ -x "$gcc_candidate" ]; then
         gcc_version=$("$gcc_candidate" -dumpversion 2>/dev/null | cut -d. -f1) || continue
-        if [ "${gcc_version:-0}" -ge 11 ] 2>/dev/null; then
+        if [ "${gcc_version:-0}" -ge 7 ] 2>/dev/null; then
             # Pick matching g++ if possible
             case "$gcc_candidate" in
                 gcc-*)  cxx_candidate="${gcc_candidate}g++" ;;  # gcc-11 -> g++-11
@@ -156,10 +160,10 @@ if [ "$gcc_ok" != "1" ]; then
     if [ -x "$found_gcc" ]; then
         found_ver=$("$found_gcc" -dumpversion 2>/dev/null)
     fi
-    echo "ERROR: GCC 11+ required (Redis 8 build dependency)"
+    echo "ERROR: GCC 7+ required (Redis 8 build dependency)"
     echo "       Found: ${found_gcc}${found_ver:+ (version $found_ver)}"
     echo ""
-    echo "Install GCC 11+ on this node:"
+    echo "Install GCC 7+ on this node:"
     if command -v dnf >/dev/null 2>&1; then
         echo "  # Fedora / RHEL 8+ (dnf)"
         echo "  sudo dnf install -y gcc-toolset-11"
@@ -171,13 +175,14 @@ if [ "$gcc_ok" != "1" ]; then
         echo "  # devtoolset installs to /opt/rh/devtoolset-11/ — install.sh will auto-detect it."
     elif command -v apt >/dev/null 2>&1; then
         echo "  # Debian / Ubuntu (apt)"
-        echo "  sudo apt install -y gcc-11 g++-11"
-        echo "  # gcc-11 installs to /usr/bin/gcc-11 — install.sh will auto-detect it."
+        echo "  sudo apt install -y gcc-7 g++-7"
+        echo "  # gcc-7 installs to /usr/bin/gcc-7 — install.sh will auto-detect it."
+        echo "  # (gcc-8/9/10/11 all work too — pick whichever your distro provides)"
     elif command -v apk >/dev/null 2>&1; then
-        echo "  # Alpine (apk) — use edge or v3.19+; current gcc typically 13+"
+        echo "  # Alpine (apk) — main repo gcc is typically 12+"
         echo "  sudo apk add gcc g++ musl-dev"
     else
-        echo "  # Unknown package manager — install GCC 11+ via your OS package manager."
+        echo "  # Unknown package manager — install GCC 7+ via your OS package manager."
     fi
     echo ""
     echo "After installing, re-run install.sh — it will auto-detect the new compiler."
