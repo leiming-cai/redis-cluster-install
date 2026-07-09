@@ -283,13 +283,7 @@ provision_dirs() {
     local user="$1" pass="$2" host="$3" port="$4"
     shift 4
     local ports=("$@")
-    # Build a per-port mkdir on the remote via a heredoc
-    local mkdir_block=""
-    for p in "${ports[@]}"; do
-        mkdir_block+="_sudo mkdir -p /var/lib/redis/cluster/${p}"$'\n'
-        mkdir_block+="_sudo mkdir -p /var/run/redis/cluster/${p}"$'\n'
-    done
-    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" <<REMOTE
+    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "${ports[*]}" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
 PORTS="$2"
@@ -304,7 +298,10 @@ _sudo() {
 }
 id redis >/dev/null 2>&1 || _sudo useradd --system --no-create-home --shell /usr/sbin/nologin redis
 _sudo mkdir -p /etc/redis/cluster /var/lib/redis/cluster /var/log/redis/cluster /var/run/redis/cluster
-${mkdir_block}
+# Per-port subdirs
+for p in $PORTS; do
+    _sudo mkdir -p "/var/lib/redis/cluster/$p" "/var/run/redis/cluster/$p"
+done
 _sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis /etc/redis
 echo "dirs OK"
 REMOTE
