@@ -239,10 +239,15 @@ log_ok "Tarball copied"
 log_info "[6] Building Redis on both nodes..."
 build_remote() {
     local user="$1" pass="$2" host="$3" port="$4"
-    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" <<'REMOTE'
+    # IMPORTANT: pass REDIS_PREFIX so the install PREFIX on the remote
+    # matches the expected location. Without this, `make install` would
+    # install to /usr/local (default PREFIX), but verify_ping looks for
+    # the binary at $REDIS_BIN.
+    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$REDIS_PREFIX" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
-# _sudo: try non-interactive first, fall back to -S with password
+REDIS_PREFIX="$2"
+REDIS_BIN="$REDIS_PREFIX/bin"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -267,6 +272,8 @@ cd redis-8.8.0
 make -C src BUILD_TLS=no USE_SYSTEMD=no CC="${CC:-gcc}" CXX="${CXX:-g++}" -j"$(nproc)"
 _sudo make -C src install PREFIX="$REDIS_PREFIX"
 echo "build OK"
+echo "  installed to $REDIS_BIN"
+ls "$REDIS_BIN" | head -3
 REMOTE
 }
 build_remote "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" &
