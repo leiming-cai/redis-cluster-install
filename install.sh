@@ -56,17 +56,24 @@ case "${1:-}" in
         ;;
 esac
 
-# === Step 1: Generate cluster password ===
+# === Step 1: Determine cluster password ===
+# Order of precedence:
+#   1. CLUSTER_PASSWORD env var (set inline for a one-off run)
+#   2. secrets/cluster_password.txt (persistent)
+#   3. Default: sac888 (simple, no random generation by request)
 mkdir -p "$SECRETS_DIR"
 chmod 700 "$SECRETS_DIR"
-if [ -f "$PASSWORD_FILE" ]; then
+if [ -n "${CLUSTER_PASSWORD:-}" ]; then
+    CLUSTER_PASS="$CLUSTER_PASSWORD"
+    log_info "Using cluster password from CLUSTER_PASSWORD env var"
+elif [ -f "$PASSWORD_FILE" ]; then
     CLUSTER_PASS=$(cat "$PASSWORD_FILE")
     log_info "Reusing existing cluster password from $PASSWORD_FILE"
 else
-    CLUSTER_PASS=$(gen_password 32)
+    CLUSTER_PASS="sac888"
     printf '%s' "$CLUSTER_PASS" > "$PASSWORD_FILE"
     chmod 600 "$PASSWORD_FILE"
-    log_ok "Generated new cluster password"
+    log_ok "Using default cluster password 'sac888' (saved to $PASSWORD_FILE)"
 fi
 
 # === Step 2: Interactive prompt for SSH credentials ===
