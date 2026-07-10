@@ -309,13 +309,15 @@ _sudo mkdir -p /etc/redis/cluster /var/lib/redis/cluster /var/run/redis/cluster
 # cluster-config-file + logfile both live under /opt/software/redis (the
 # install prefix), so all redis-managed state is in one place.
 _sudo mkdir -p /opt/software/redis/cluster /opt/software/redis/log
-# Per-port subdirs — explicit one-mkdir-per-port (no loop), so a single
-# failure can't mask the others. With debug output to stdout.
-for p in $PORTS; do
-    echo "  creating dirs for port $p..."
-    _sudo mkdir -p "/var/lib/redis/cluster/$p"   && echo "    OK: /var/lib/redis/cluster/$p"   || echo "    FAIL: /var/lib/redis/cluster/$p"
-    _sudo mkdir -p "/var/run/redis/cluster/$p"    && echo "    OK: /var/run/redis/cluster/$p"    || echo "    FAIL: /var/run/redis/cluster/$p"
-    _sudo mkdir -p "/opt/software/redis/cluster/$p" && echo "    OK: /opt/software/redis/cluster/$p" || echo "    FAIL: /opt/software/redis/cluster/$p"
+# Per-port subdirs — xargs-driven (not a for loop) so output from each
+# mkdir is its own line and a failure in one doesn't skip the others.
+# Use printf | xargs | sh to spawn one shell per port.
+echo "$PORTS" | tr ' ' '\n' | while read -r p; do
+    [ -z "$p" ] && continue
+    _sudo mkdir -p "/var/lib/redis/cluster/$p"   || echo "    FAIL: /var/lib/redis/cluster/$p"
+    _sudo mkdir -p "/var/run/redis/cluster/$p"    || echo "    FAIL: /var/run/redis/cluster/$p"
+    _sudo mkdir -p "/opt/software/redis/cluster/$p" || echo "    FAIL: /opt/software/redis/cluster/$p"
+    [ -d "/var/lib/redis/cluster/$p" ] && [ -d "/opt/software/redis/cluster/$p" ] && echo "    OK port $p"
 done
 _sudo chown -R redis:redis /var/lib/redis /var/run/redis /etc/redis /opt/software/redis/cluster /opt/software/redis/log
 # Verify: every per-port data dir must exist
