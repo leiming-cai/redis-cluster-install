@@ -318,10 +318,16 @@ log_ok "Directories provisioned"
 log_info "[8] Pushing cluster auth file..."
 push_auth() {
     local user="$1" pass="$2" host="$3" port="$4"
-    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$CLUSTER_PASS" <<'REMOTE'
+    # SCP the content to a remote temp file (avoids multi-line shell args).
+    local local_tmpf
+    local_tmpf=$(mktemp)
+    printf '%s' "$CLUSTER_PASS" > "$local_tmpf"
+    ssh_copy "$user" "$pass" "$host" "$port" "$local_tmpf" "/tmp/redis-cluster-auth.conf" || { rm -f "$local_tmpf"; die "scp auth to $host failed"; }
+    rm -f "$local_tmpf"
+
+    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
-AUTH_CONTENT="$2"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -332,14 +338,10 @@ _sudo() {
     fi
 }
 _sudo mkdir -p /etc/redis/cluster
-# Use primitive cp + chown + chmod instead of `install` (some `install` builds
-# misbehave on multi-line content with sudo password piping).
-TMPF=$(mktemp)
-printf '%s' "$AUTH_CONTENT" > "$TMPF"
-_sudo cp "$TMPF" /etc/redis/cluster/auth.conf
+_sudo cp /tmp/redis-cluster-auth.conf /etc/redis/cluster/auth.conf
 _sudo chown redis:redis /etc/redis/cluster/auth.conf
 _sudo chmod 600 /etc/redis/cluster/auth.conf
-rm -f "$TMPF"
+rm -f /tmp/redis-cluster-auth.conf
 echo "auth file deployed"
 REMOTE
 }
@@ -348,17 +350,25 @@ push_auth "$B_USER" "$B_PASS" "$B_HOST" "$B_PORT" || die "auth file to B failed"
 log_ok "Auth file deployed"
 
 # === Step 9: Render per-instance redis.conf ===
+# IMPORTANT: multi-line content MUST travel as a file (via scp), NOT as a
+# positional argument to bash. Some sshd/shell combinations split multi-line
+# args on newlines, causing bash to interpret the file content as commands.
 log_info "[9] Rendering 6 instance configs..."
 render_and_push() {
     local user="$1" pass="$2" host="$3" port="$4" p
     for p in "${@:5}"; do
-        local out
-        out=$(render_redis_conf "$CONF_TEMPLATE" "$p" "$CLUSTER_PASS" "node-${p}" "0.0.0.0")
-        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" "$out" <<'REMOTE'
+        # Render locally, then SCP the file to the remote /tmp
+        local local_tmpf
+        local_tmpf=$(mktemp)
+        render_redis_conf "$CONF_TEMPLATE" "$p" "$CLUSTER_PASS" "node-${p}" "0.0.0.0" > "$local_tmpf"
+        ssh_copy "$user" "$pass" "$host" "$port" "$local_tmpf" "/tmp/redis-${p}.conf" \
+            || { rm -f "$local_tmpf"; die "scp redis-${p}.conf to $host failed"; }
+        rm -f "$local_tmpf"
+
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
 PORT="$2"
-CONF_CONTENT="$3"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -368,16 +378,11 @@ _sudo() {
         sudo "$@"
     fi
 }
-
-# Drop the config into /tmp as the SSH user (no sudo needed), then sudo-cp
-# to /etc/redis/cluster. Splits the write into primitive commands instead of
-# relying on `install` (which behaved weirdly on some targets).
-TMPF=$(mktemp)
-printf '%s' "$CONF_CONTENT" > "$TMPF"
-_sudo cp "$TMPF" "/etc/redis/cluster/redis-${PORT}.conf"
+_sudo mkdir -p /etc/redis/cluster
+_sudo cp "/tmp/redis-${PORT}.conf" "/etc/redis/cluster/redis-${PORT}.conf"
 _sudo chown redis:redis "/etc/redis/cluster/redis-${PORT}.conf"
 _sudo chmod 640 "/etc/redis/cluster/redis-${PORT}.conf"
-rm -f "$TMPF"
+rm -f "/tmp/redis-${PORT}.conf"
 echo "  rendered redis-${PORT}.conf"
 REMOTE
     done
@@ -391,13 +396,17 @@ log_info "[10] Rendering and pushing systemd units..."
 push_units() {
     local user="$1" pass="$2" host="$3" port="$4" p
     for p in "${@:5}"; do
-        local out
-        out=$(render_systemd_unit "$SERVICE_TEMPLATE" "$p" "node-${p}" "$CLUSTER_PASS")
-        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" "$out" <<'REMOTE'
+        local local_tmpf
+        local_tmpf=$(mktemp)
+        render_systemd_unit "$SERVICE_TEMPLATE" "$p" "node-${p}" "$CLUSTER_PASS" > "$local_tmpf"
+        ssh_copy "$user" "$pass" "$host" "$port" "$local_tmpf" "/tmp/redis-${p}.service" \
+            || { rm -f "$local_tmpf"; die "scp redis-${p}.service to $host failed"; }
+        rm -f "$local_tmpf"
+
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
 PORT="$2"
-UNIT_CONTENT="$3"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -407,11 +416,9 @@ _sudo() {
         sudo "$@"
     fi
 }
-TMPF=$(mktemp)
-printf '%s' "$UNIT_CONTENT" > "$TMPF"
-_sudo cp "$TMPF" "/etc/systemd/system/redis-${PORT}.service"
+_sudo cp "/tmp/redis-${PORT}.service" "/etc/systemd/system/redis-${PORT}.service"
 _sudo chmod 644 "/etc/systemd/system/redis-${PORT}.service"
-rm -f "$TMPF"
+rm -f "/tmp/redis-${PORT}.service"
 echo "  rendered redis-${PORT}.service"
 REMOTE
     done

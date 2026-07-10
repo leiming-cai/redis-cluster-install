@@ -36,11 +36,21 @@ CLUSTER_PASS=$(cat "$PASSWORD_FILE")
 
 log_info "Adding $NEW_HOST:$NEW_PORT to cluster (joining via $EXIST_HOST:$EXIST_PORT)..."
 
-# Push the auth file
-ssh_run "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" bash -s "$NEW_PASS" "$CLUSTER_PASS" <<'REMOTE'
+# IMPORTANT: all file content travels via scp (single-line paths), never as
+# positional args to bash. Multi-line args via ssh trigger a parser bug on
+# some sshd versions where newlines in args get re-injected as stdin to
+# the bash script — which then interprets the file content as commands.
+
+# === Push auth.conf via scp ===
+local_tmpf=$(mktemp)
+printf '%s' "$CLUSTER_PASS" > "$local_tmpf"
+ssh_copy "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" "$local_tmpf" "/tmp/redis-cluster-auth.conf" \
+    || { rm -f "$local_tmpf"; die "scp auth.conf to $NEW_HOST failed"; }
+rm -f "$local_tmpf"
+
+ssh_run "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" bash -s "$NEW_PASS" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
-AUTH_CONTENT="$2"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -51,22 +61,23 @@ _sudo() {
     fi
 }
 _sudo mkdir -p /etc/redis/cluster
-# Use primitive cp + chown + chmod (some `install` builds misbehave)
-TMPF=$(mktemp)
-printf '%s' "$AUTH_CONTENT" > "$TMPF"
-_sudo cp "$TMPF" /etc/redis/cluster/auth.conf
+_sudo cp /tmp/redis-cluster-auth.conf /etc/redis/cluster/auth.conf
 _sudo chown redis:redis /etc/redis/cluster/auth.conf
 _sudo chmod 600 /etc/redis/cluster/auth.conf
-rm -f "$TMPF"
+rm -f /tmp/redis-cluster-auth.conf
 REMOTE
 
-# Push the redis.conf
-out=$(render_redis_conf "$REPO_ROOT/config/redis.conf.template" "$NEW_PORT" "$CLUSTER_PASS" "node-${NEW_PORT}" "0.0.0.0")
-ssh_run "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" bash -s "$NEW_PASS" "$NEW_PORT" "$out" <<'REMOTE'
+# === Push redis.conf via scp ===
+local_tmpf=$(mktemp)
+render_redis_conf "$REPO_ROOT/config/redis.conf.template" "$NEW_PORT" "$CLUSTER_PASS" "node-${NEW_PORT}" "0.0.0.0" > "$local_tmpf"
+ssh_copy "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" "$local_tmpf" "/tmp/redis-${NEW_PORT}.conf" \
+    || { rm -f "$local_tmpf"; die "scp redis.conf to $NEW_HOST failed"; }
+rm -f "$local_tmpf"
+
+ssh_run "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" bash -s "$NEW_PASS" "$NEW_PORT" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
 PORT="$2"
-CONF_CONTENT="$3"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -77,22 +88,23 @@ _sudo() {
     fi
 }
 _sudo mkdir -p /etc/redis/cluster
-# Use primitive cp + chown + chmod
-TMPF=$(mktemp)
-printf '%s' "$CONF_CONTENT" > "$TMPF"
-_sudo cp "$TMPF" "/etc/redis/cluster/redis-${PORT}.conf"
+_sudo cp "/tmp/redis-${PORT}.conf" "/etc/redis/cluster/redis-${PORT}.conf"
 _sudo chown redis:redis "/etc/redis/cluster/redis-${PORT}.conf"
 _sudo chmod 640 "/etc/redis/cluster/redis-${PORT}.conf"
-rm -f "$TMPF"
+rm -f "/tmp/redis-${PORT}.conf"
 REMOTE
 
-# Push the systemd unit
-unit=$(render_systemd_unit "$REPO_ROOT/config/redis-cluster.service.template" "$NEW_PORT" "node-${NEW_PORT}" "$CLUSTER_PASS")
-ssh_run "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" bash -s "$NEW_PASS" "$NEW_PORT" "$unit" <<'REMOTE'
+# === Push systemd unit via scp ===
+local_tmpf=$(mktemp)
+render_systemd_unit "$REPO_ROOT/config/redis-cluster.service.template" "$NEW_PORT" "node-${NEW_PORT}" "$CLUSTER_PASS" > "$local_tmpf"
+ssh_copy "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" "$local_tmpf" "/tmp/redis-${NEW_PORT}.service" \
+    || { rm -f "$local_tmpf"; die "scp systemd unit to $NEW_HOST failed"; }
+rm -f "$local_tmpf"
+
+ssh_run "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" bash -s "$NEW_PASS" "$NEW_PORT" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
 PORT="$2"
-UNIT_CONTENT="$3"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -102,15 +114,12 @@ _sudo() {
         sudo "$@"
     fi
 }
-# Use primitive cp + chmod (systemd units are root-owned by default)
-TMPF=$(mktemp)
-printf '%s' "$UNIT_CONTENT" > "$TMPF"
-_sudo cp "$TMPF" "/etc/systemd/system/redis-${PORT}.service"
+_sudo cp "/tmp/redis-${PORT}.service" "/etc/systemd/system/redis-${PORT}.service"
 _sudo chmod 644 "/etc/systemd/system/redis-${PORT}.service"
-rm -f "$TMPF"
+rm -f "/tmp/redis-${PORT}.service"
 REMOTE
 
-# Ensure the per-port data dir exists and start the service
+# === Start the service ===
 ssh_run "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" bash -s "$NEW_PASS" "$NEW_PORT" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
@@ -131,15 +140,16 @@ _sudo systemctl enable "redis-${PORT}"
 _sudo systemctl restart "redis-${PORT}"
 REMOTE
 
-# Join the cluster
-ssh_run "$EXIST_USER" "$EXIST_PASS" "$EXIST_HOST" "$EXIST_SSH_PORT" bash -s "$EXIST_PASS" "$CLUSTER_PASS" "$NEW_HOST" "$NEW_PORT" "$EXIST_HOST" "$EXIST_PORT" <<'REMOTE'
+# === Join the cluster (redis-cli --cluster add-node) ===
+# This is a SINGLE-LINE arg, safe to pass as a positional argument.
+ssh_run "$EXIST_USER" "$EXIST_PASS" "$EXIST_HOST" "$EXIST_SSH_PORT" bash -s "$EXIST_PASS" "$NEW_HOST" "$NEW_PORT" "$EXIST_HOST" "$EXIST_PORT" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
-CLUSTER_PASS="$2"
-NEW_HOST="$3"
-NEW_PORT="$4"
-EXIST_HOST="$5"
-EXIST_PORT="$6"
+NEW_HOST="$2"
+NEW_PORT="$3"
+EXIST_HOST="$4"
+EXIST_PORT="$5"
+REDIS_BIN=${REDIS_PREFIX:-/opt/software/redis}/bin
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -149,9 +159,8 @@ _sudo() {
         sudo "$@"
     fi
 }
-# redis-cli lives wherever install.sh put it (default /opt/software/redis/bin)
-REDIS_BIN=${REDIS_PREFIX:-/opt/software/redis}/bin
-_sudo "$REDIS_BIN/redis-cli" -a "$CLUSTER_PASS" --cluster add-node "$NEW_HOST:$NEW_PORT" "$EXIST_HOST:$EXIST_PORT"
+# Pass password via -a (single short string) — no multi-line content here.
+_sudo "$REDIS_BIN/redis-cli" -a "$(cat /etc/redis/cluster/auth.conf 2>/dev/null || echo '')" --cluster add-node "$NEW_HOST:$NEW_PORT" "$EXIST_HOST:$EXIST_PORT"
 REMOTE
 
 log_ok "Node $NEW_HOST:$NEW_PORT added. Use 'redis-cli --cluster rebalance' to redistribute slots."
