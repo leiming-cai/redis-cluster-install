@@ -462,7 +462,7 @@ start_services "$B_USER" "$B_PASS" "$B_HOST" "$B_PORT" "${B_PORTS[@]}" || die "s
 
 # Verify each instance is responding
 verify_ping() {
-    local user="$1" pass="$2" host="$3$" port="$4" p
+    local user="$1" pass="$2" host="$3" port="$4" p
     for p in "${@:5}"; do
         if ssh_run "$user" "$pass" "$host" "$port" \
                 "$REDIS_BIN/redis-cli -a '$CLUSTER_PASS' -p $p PING" \
@@ -483,14 +483,14 @@ _sudo() {
         sudo "$@"
     fi
 }
-echo "==== systemctl status redis-\${PORT}.service ===="
-_sudo systemctl status "redis-\${PORT}.service" --no-pager 2>&1 || true
+echo "==== systemctl status redis-$PORT.service ===="
+_sudo systemctl status "redis-$PORT.service" --no-pager 2>&1 || true
 echo ""
-echo "==== last 30 journalctl lines for redis-\${PORT}.service ===="
-_sudo journalctl -u "redis-\${PORT}.service" -n 30 --no-pager 2>&1 || true
+echo "==== last 30 journalctl lines for redis-$PORT.service ===="
+_sudo journalctl -u "redis-$PORT.service" -n 30 --no-pager 2>&1 || true
 echo ""
-echo "==== /etc/redis/cluster/redis-\${PORT}.conf ===="
-_sudo cat "/etc/redis/cluster/redis-\${PORT}.conf" 2>&1 || true
+echo "==== /etc/redis/cluster/redis-$PORT.conf ===="
+_sudo cat "/etc/redis/cluster/redis-$PORT.conf" 2>&1 || true
 echo ""
 echo "==== /opt/software/redis/bin/ contents ===="
 ls -la /opt/software/redis/bin/ 2>&1 || true
