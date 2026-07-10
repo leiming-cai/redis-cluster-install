@@ -11,7 +11,7 @@ tcp-keepalive 300
 
 # Cluster
 cluster-enabled yes
-cluster-config-file /var/lib/redis/cluster/%PORT%/nodes.conf
+cluster-config-file /opt/software/redis/cluster/%PORT%/nodes.conf
 cluster-node-timeout 15000
 cluster-migration-barrier 1
 cluster-require-full-coverage yes
@@ -55,7 +55,7 @@ maxmemory-policy allkeys-lru
 
 # Logging
 loglevel notice
-logfile /var/log/redis/cluster/redis-%PORT%.log
+logfile /opt/software/redis/log/redis-%PORT%.log
 
 # Slow log
 slowlog-log-slower-than 10000

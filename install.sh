@@ -304,18 +304,23 @@ _sudo() {
     fi
 }
 id redis >/dev/null 2>&1 || _sudo useradd --system --no-create-home --shell /usr/sbin/nologin redis
-_sudo mkdir -p /etc/redis/cluster /var/lib/redis/cluster /var/log/redis/cluster /var/run/redis/cluster
-# Per-port subdirs (loop explicitly with one mkdir call per port, not bundled,
-# so we can verify each one was created)
+# Top-level dirs (config, data, run)
+_sudo mkdir -p /etc/redis/cluster /var/lib/redis/cluster /var/run/redis/cluster
+# cluster-config-file + logfile both live under /opt/software/redis (the
+# install prefix), so all redis-managed state is in one place.
+_sudo mkdir -p /opt/software/redis/cluster /opt/software/redis/log
+# Per-port subdirs (one mkdir per port, not bundled, so a failure in
+# one doesn't skip the others)
 for p in $PORTS; do
     _sudo mkdir -p "/var/lib/redis/cluster/$p"
     _sudo mkdir -p "/var/run/redis/cluster/$p"
+    _sudo mkdir -p "/opt/software/redis/cluster/$p"
 done
-_sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis /etc/redis
+_sudo chown -R redis:redis /var/lib/redis /var/run/redis /etc/redis /opt/software/redis/cluster /opt/software/redis/log
 # Verify: every per-port data dir must exist
 missing=""
 for p in $PORTS; do
-    if [ ! -d "/var/lib/redis/cluster/$p" ]; then
+    if [ ! -d "/var/lib/redis/cluster/$p" ] || [ ! -d "/opt/software/redis/cluster/$p" ]; then
         missing="$missing $p"
     fi
 done
@@ -323,6 +328,8 @@ if [ -n "$missing" ]; then
     echo "ERROR: missing data dirs for ports:$missing" >&2
     echo "Current /var/lib/redis/cluster/ contents:" >&2
     ls -la /var/lib/redis/cluster/ >&2
+    echo "Current /opt/software/redis/cluster/ contents:" >&2
+    ls -la /opt/software/redis/cluster/ >&2
     exit 1
 fi
 echo "dirs OK"
