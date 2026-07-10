@@ -437,10 +437,9 @@ log_ok "systemd units rendered"
 # === Step 11: Start services ===
 log_info "[11] Starting services on both nodes..."
 start_services() {
-    local user="$1" pass="$2" host="$3$" port="$4" p
+    local user="$1" pass="$2" host="$3" port="$4" p
     for p in "${@:5}"; do
         ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" <<'REMOTE'
-set -e
 SUDO_PASS="$1"
 PORT="$2"
 _sudo() {
@@ -455,16 +454,6 @@ _sudo() {
 _sudo systemctl daemon-reload
 _sudo systemctl enable "redis-${PORT}"
 _sudo systemctl restart "redis-${PORT}"
-# Surface failure: if the unit is not active after restart, dump the last
-# 20 lines of journalctl so we know WHY (config error, permission, etc.).
-sleep 1
-if ! _sudo systemctl is-active --quiet "redis-${PORT}"; then
-    echo "==== redis-${PORT}.service FAILED to start on $HOSTNAME ===="
-    _sudo journalctl -u "redis-${PORT}" -n 20 --no-pager >&2
-    echo "==== /etc/redis/cluster/redis-${PORT}.conf ===="
-    cat "/etc/redis/cluster/redis-${PORT}.conf" >&2
-    exit 1
-fi
 REMOTE
     done
 }
@@ -473,16 +462,40 @@ start_services "$B_USER" "$B_PASS" "$B_HOST" "$B_PORT" "${B_PORTS[@]}" || die "s
 
 # Verify each instance is responding
 verify_ping() {
-    local user="$1" pass="$2" host="$3" port="$4" p
+    local user="$1" pass="$2" host="$3$" port="$4" p
     for p in "${@:5}"; do
-        if ! ssh_run "$user" "$pass" "$host" "$port" \
+        if ssh_run "$user" "$pass" "$host" "$port" \
                 "$REDIS_BIN/redis-cli -a '$CLUSTER_PASS' -p $p PING" \
                 | grep -qx PONG; then
-            log_warn "Last 50 lines of redis-$p.log on $host:"
-            ssh_run "$user" "$pass" "$host" "$port" \
-                "tail -n 50 /var/log/redis/cluster/redis-${p}.log" >&2 || true
-            die "PING failed on $host:$p — see log above"
+            continue
         fi
+        # Service didn't respond — surface the real reason
+        log_error "redis-cli PING failed on $host:$p — fetching diagnostics..."
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" <<'REMOTE' >&2
+SUDO_PASS="$1"
+PORT="$2"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+echo "==== systemctl status redis-\${PORT}.service ===="
+_sudo systemctl status "redis-\${PORT}.service" --no-pager 2>&1 || true
+echo ""
+echo "==== last 30 journalctl lines for redis-\${PORT}.service ===="
+_sudo journalctl -u "redis-\${PORT}.service" -n 30 --no-pager 2>&1 || true
+echo ""
+echo "==== /etc/redis/cluster/redis-\${PORT}.conf ===="
+_sudo cat "/etc/redis/cluster/redis-\${PORT}.conf" 2>&1 || true
+echo ""
+echo "==== /opt/software/redis/bin/ contents ===="
+ls -la /opt/software/redis/bin/ 2>&1 || true
+REMOTE
+        die "redis on $host:$p failed to start — see diagnostics above"
     done
 }
 verify_ping "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" "${A_PORTS[@]}" || die "PING on A failed"
