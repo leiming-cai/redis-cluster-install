@@ -437,7 +437,7 @@ log_ok "systemd units rendered"
 # === Step 11: Start services ===
 log_info "[11] Starting services on both nodes..."
 start_services() {
-    local user="$1" pass="$2" host="$3" port="$4" p
+    local user="$1" pass="$2" host="$3$" port="$4" p
     for p in "${@:5}"; do
         ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" <<'REMOTE'
 set -e
@@ -455,6 +455,16 @@ _sudo() {
 _sudo systemctl daemon-reload
 _sudo systemctl enable "redis-${PORT}"
 _sudo systemctl restart "redis-${PORT}"
+# Surface failure: if the unit is not active after restart, dump the last
+# 20 lines of journalctl so we know WHY (config error, permission, etc.).
+sleep 1
+if ! _sudo systemctl is-active --quiet "redis-${PORT}"; then
+    echo "==== redis-${PORT}.service FAILED to start on $HOSTNAME ===="
+    _sudo journalctl -u "redis-${PORT}" -n 20 --no-pager >&2
+    echo "==== /etc/redis/cluster/redis-${PORT}.conf ===="
+    cat "/etc/redis/cluster/redis-${PORT}.conf" >&2
+    exit 1
+fi
 REMOTE
     done
 }
