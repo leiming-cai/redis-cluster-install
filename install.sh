@@ -309,12 +309,13 @@ _sudo mkdir -p /etc/redis/cluster /var/lib/redis/cluster /var/run/redis/cluster
 # cluster-config-file + logfile both live under /opt/software/redis (the
 # install prefix), so all redis-managed state is in one place.
 _sudo mkdir -p /opt/software/redis/cluster /opt/software/redis/log
-# Per-port subdirs (one mkdir per port, not bundled, so a failure in
-# one doesn't skip the others)
+# Per-port subdirs — explicit one-mkdir-per-port (no loop), so a single
+# failure can't mask the others. With debug output to stdout.
 for p in $PORTS; do
-    _sudo mkdir -p "/var/lib/redis/cluster/$p"
-    _sudo mkdir -p "/var/run/redis/cluster/$p"
-    _sudo mkdir -p "/opt/software/redis/cluster/$p"
+    echo "  creating dirs for port $p..."
+    _sudo mkdir -p "/var/lib/redis/cluster/$p"   && echo "    OK: /var/lib/redis/cluster/$p"   || echo "    FAIL: /var/lib/redis/cluster/$p"
+    _sudo mkdir -p "/var/run/redis/cluster/$p"    && echo "    OK: /var/run/redis/cluster/$p"    || echo "    FAIL: /var/run/redis/cluster/$p"
+    _sudo mkdir -p "/opt/software/redis/cluster/$p" && echo "    OK: /opt/software/redis/cluster/$p" || echo "    FAIL: /opt/software/redis/cluster/$p"
 done
 _sudo chown -R redis:redis /var/lib/redis /var/run/redis /etc/redis /opt/software/redis/cluster /opt/software/redis/log
 # Verify: every per-port data dir must exist
