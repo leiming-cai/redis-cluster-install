@@ -47,7 +47,11 @@ aof-use-rdb-preamble yes
 
 # Limits
 maxmemory-policy allkeys-lru
-ulimit nofile 10032
+# NOTE: file descriptor limit (ulimit -n >= 10001) is set via systemd's
+# LimitNOFILE in config/redis-cluster.service.template, NOT here.
+# Putting 'ulimit nofile N' in redis.conf makes Redis 8 abort with
+# "Unresolved Configuration(s) Detected" — it's a shell builtin, not a
+# Redis directive.
 
 # Logging
 loglevel notice
