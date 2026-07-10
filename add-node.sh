@@ -51,23 +51,13 @@ _sudo() {
     fi
 }
 _sudo mkdir -p /etc/redis/cluster
-# Use 'install' (avoids stdin-collision between <<< and sudo -S password)
-_sudo_write_file() {
-    local content="$1" dst="$2" mode="$3" ownerg="${4:-redis:redis}"
-    local src; src=$(mktemp)
-    printf '%s' "$content" > "$src" || { rm -f "$src"; return 1; }
-    local rc=0
-    if sudo -n true 2>/dev/null; then
-        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
-    elif [ -n "$SUDO_PASS" ]; then
-        echo "$SUDO_PASS" | sudo -S -p '' install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" 2>/dev/null || rc=$?
-    else
-        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
-    fi
-    rm -f "$src"
-    return $rc
-}
-_sudo_write_file "$AUTH_CONTENT" /etc/redis/cluster/auth.conf 600
+# Use primitive cp + chown + chmod (some `install` builds misbehave)
+TMPF=$(mktemp)
+printf '%s' "$AUTH_CONTENT" > "$TMPF"
+_sudo cp "$TMPF" /etc/redis/cluster/auth.conf
+_sudo chown redis:redis /etc/redis/cluster/auth.conf
+_sudo chmod 600 /etc/redis/cluster/auth.conf
+rm -f "$TMPF"
 REMOTE
 
 # Push the redis.conf
@@ -87,23 +77,13 @@ _sudo() {
     fi
 }
 _sudo mkdir -p /etc/redis/cluster
-# Use 'install' (avoids stdin-collision between <<< and sudo -S password)
-_sudo_write_file() {
-    local content="$1" dst="$2" mode="$3" ownerg="${4:-redis:redis}"
-    local src; src=$(mktemp)
-    printf '%s' "$content" > "$src" || { rm -f "$src"; return 1; }
-    local rc=0
-    if sudo -n true 2>/dev/null; then
-        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
-    elif [ -n "$SUDO_PASS" ]; then
-        echo "$SUDO_PASS" | sudo -S -p '' install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" 2>/dev/null || rc=$?
-    else
-        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
-    fi
-    rm -f "$src"
-    return $rc
-}
-_sudo_write_file "$CONF_CONTENT" "/etc/redis/cluster/redis-${PORT}.conf" 640
+# Use primitive cp + chown + chmod
+TMPF=$(mktemp)
+printf '%s' "$CONF_CONTENT" > "$TMPF"
+_sudo cp "$TMPF" "/etc/redis/cluster/redis-${PORT}.conf"
+_sudo chown redis:redis "/etc/redis/cluster/redis-${PORT}.conf"
+_sudo chmod 640 "/etc/redis/cluster/redis-${PORT}.conf"
+rm -f "$TMPF"
 REMOTE
 
 # Push the systemd unit
@@ -122,23 +102,12 @@ _sudo() {
         sudo "$@"
     fi
 }
-# Use 'install' (avoids stdin-collision between <<< and sudo -S password)
-_sudo_write_file() {
-    local content="$1" dst="$2" mode="$3" ownerg="${4:-redis:redis}"
-    local src; src=$(mktemp)
-    printf '%s' "$content" > "$src" || { rm -f "$src"; return 1; }
-    local rc=0
-    if sudo -n true 2>/dev/null; then
-        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
-    elif [ -n "$SUDO_PASS" ]; then
-        echo "$SUDO_PASS" | sudo -S -p '' install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" 2>/dev/null || rc=$?
-    else
-        sudo install -o "${ownerg%:*}" -g "${ownerg#*:}" -m "$mode" "$src" "$dst" || rc=$?
-    fi
-    rm -f "$src"
-    return $rc
-}
-_sudo_write_file "$UNIT_CONTENT" "/etc/systemd/system/redis-${PORT}.service" 644 root:root
+# Use primitive cp + chmod (systemd units are root-owned by default)
+TMPF=$(mktemp)
+printf '%s' "$UNIT_CONTENT" > "$TMPF"
+_sudo cp "$TMPF" "/etc/systemd/system/redis-${PORT}.service"
+_sudo chmod 644 "/etc/systemd/system/redis-${PORT}.service"
+rm -f "$TMPF"
 REMOTE
 
 # Ensure the per-port data dir exists and start the service
