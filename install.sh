@@ -290,10 +290,15 @@ provision_dirs() {
     local user="$1" pass="$2" host="$3" port="$4"
     shift 4
     local ports=("$@")
-    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "${ports[*]}" <<'REMOTE'
+    # IMPORTANT: pass each port as a SEPARATE arg (not "${ports[*]}" which
+    # would be a single space-separated string — ssh's command encoding
+    # loses the quoting on some sshd versions and the remote shell splits
+    # on whitespace, so we'd only get the FIRST port as $2).
+    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "${ports[@]}" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
-PORTS="$2"
+shift   # discard $1 (pass); remaining args are the ports
+# All ports are now $1, $2, $3, ... — loop them via "$@"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -309,10 +314,9 @@ _sudo mkdir -p /etc/redis/cluster /var/lib/redis/cluster /var/run/redis/cluster
 # cluster-config-file + logfile both live under /opt/software/redis (the
 # install prefix), so all redis-managed state is in one place.
 _sudo mkdir -p /opt/software/redis/cluster /opt/software/redis/log
-# Per-port subdirs — xargs-driven (not a for loop) so output from each
-# mkdir is its own line and a failure in one doesn't skip the others.
-# Use printf | xargs | sh to spawn one shell per port.
-echo "$PORTS" | tr ' ' '\n' | while read -r p; do
+# Per-port subdirs. With shift above, $@ is now the port list. Each
+# iteration does the 3 mkdirs independently and prints an OK line.
+for p in "$@"; do
     [ -z "$p" ] && continue
     _sudo mkdir -p "/var/lib/redis/cluster/$p"   || echo "    FAIL: /var/lib/redis/cluster/$p"
     _sudo mkdir -p "/var/run/redis/cluster/$p"    || echo "    FAIL: /var/run/redis/cluster/$p"
@@ -322,7 +326,7 @@ done
 _sudo chown -R redis:redis /var/lib/redis /var/run/redis /etc/redis /opt/software/redis/cluster /opt/software/redis/log
 # Verify: every per-port data dir must exist
 missing=""
-for p in $PORTS; do
+for p in "$@"; do
     if [ ! -d "/var/lib/redis/cluster/$p" ] || [ ! -d "/opt/software/redis/cluster/$p" ]; then
         missing="$missing $p"
     fi
