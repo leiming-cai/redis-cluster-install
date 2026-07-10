@@ -305,11 +305,26 @@ _sudo() {
 }
 id redis >/dev/null 2>&1 || _sudo useradd --system --no-create-home --shell /usr/sbin/nologin redis
 _sudo mkdir -p /etc/redis/cluster /var/lib/redis/cluster /var/log/redis/cluster /var/run/redis/cluster
-# Per-port subdirs
+# Per-port subdirs (loop explicitly with one mkdir call per port, not bundled,
+# so we can verify each one was created)
 for p in $PORTS; do
-    _sudo mkdir -p "/var/lib/redis/cluster/$p" "/var/run/redis/cluster/$p"
+    _sudo mkdir -p "/var/lib/redis/cluster/$p"
+    _sudo mkdir -p "/var/run/redis/cluster/$p"
 done
 _sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis /etc/redis
+# Verify: every per-port data dir must exist
+missing=""
+for p in $PORTS; do
+    if [ ! -d "/var/lib/redis/cluster/$p" ]; then
+        missing="$missing $p"
+    fi
+done
+if [ -n "$missing" ]; then
+    echo "ERROR: missing data dirs for ports:$missing" >&2
+    echo "Current /var/lib/redis/cluster/ contents:" >&2
+    ls -la /var/lib/redis/cluster/ >&2
+    exit 1
+fi
 echo "dirs OK"
 REMOTE
 }
