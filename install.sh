@@ -565,18 +565,28 @@ else
 fi
 
 # === Step 13: Final health check ===
+# Right after `redis-cli --cluster create`, masters may still be doing
+# bus handshakes — cluster_state can briefly read "fail" even though
+# all 16384 slots are assigned and no slots are in pfail/fail. Retry a
+# few times with backoff before giving up.
 log_info "[13] Verifying cluster health..."
-if ! final=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" \
-        "$REDIS_BIN/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" 2>/dev/null); then
-    die "Cannot reach A:6379 for final cluster health check"
-fi
-if echo "$final" > /tmp/cluster_final_$$ && is_cluster_healthy < /tmp/cluster_final_$$; then
+for attempt in 1 2 3 4 5; do
+    if ! final=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" \
+            "$REDIS_BIN/redis-cli -a '$CLUSTER_PASS' -p 6379 cluster info" 2>/dev/null); then
+        die "Cannot reach A:6379 for final cluster health check"
+    fi
+    if echo "$final" > /tmp/cluster_final_$$ && is_cluster_healthy < /tmp/cluster_final_$$; then
+        rm -f /tmp/cluster_final_$$
+        log_ok "Cluster is healthy (attempt $attempt)"
+        break
+    fi
     rm -f /tmp/cluster_final_$$
-    log_ok "Cluster is healthy"
-else
-    rm -f /tmp/cluster_final_$$
-    die "cluster health check failed:\n$final"
-fi
+    log_warn "cluster health check attempt $attempt/5 not yet ready; sleeping 3s"
+    if [ "$attempt" = "5" ]; then
+        die "cluster health check failed after 5 attempts:\n$final"
+    fi
+    sleep 3
+done
 
 # === Optional: SELinux hint for RHEL-family ===
 selinux_hint=$(ssh_run "$A_USER" "$A_PASS" "$A_HOST" "$A_PORT" "getenforce 2>/dev/null || true" 2>/dev/null || true)
