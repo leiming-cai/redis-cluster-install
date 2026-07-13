@@ -27,3 +27,6 @@ Thumbs.db
 
 # Agent runtime state (Sisyphus/Omo session bookkeeping)
 .omo/
+
+# Stray debug / npm artifacts
+package-lock.json
