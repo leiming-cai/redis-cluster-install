@@ -1,5 +1,8 @@
 # Redis 集群安装脚本
 
+[![CI](https://github.com/leiming-cai/redis-cluster-install/actions/workflows/ci.yml/badge.svg)](https://github.com/leiming-cai/redis-cluster-install/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 一套 Bash 脚本,在两台 Linux 机器上部署 6 节点 Redis 8.8.0 集群(3 主 + 3 从),
 采用 SSH 密码认证,Redis 从本地源码包编译安装。
 

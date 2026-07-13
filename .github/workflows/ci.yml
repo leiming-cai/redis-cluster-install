@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  bats:
+    name: Unit tests (bats)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bats + sshpass
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bats sshpass
+
+      - name: Run unit tests
+        run: |
+          # bats tests/*.bats tests/lib/*.bats
+          find tests -name '*.bats' -print0 | xargs -0 bats
+
+      - name: Bash syntax check
+        run: |
+          for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh lib/*.sh; do
+            bash -n "$f"
+          done
