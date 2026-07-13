@@ -3,6 +3,8 @@
 一套 Bash 脚本,在两台 Linux 机器上部署 6 节点 Redis 8.8.0 集群(3 主 + 3 从),
 采用 SSH 密码认证,Redis 从本地源码包编译安装。
 
+**作者**:[leiming-cai](https://github.com/leiming-cai) · 邮箱 boboclmomi@163.com
+
 ## 前提条件
 
 **控制机**(运行这些脚本的机器):
@@ -53,7 +55,7 @@ bash uninstall.sh --force     # 实际执行删除
 | `add-node.sh` | 向已有集群添加新实例(扩容) |
 | `lib/` | 工具库:`common.sh`、`password.sh`、`prompt.sh`、`ssh.sh`、`config_gen.sh`、`systemd.sh`、`cluster.sh` |
 | `config/` | `redis.conf.template`、`redis-cluster.service.template` |
-| `secrets/cluster_password.txt` | 自动生成的 `requirepass` / `masterauth`(权限 0600) |
+| `secrets/cluster_password.txt` | 集群密码(默认 `sac888`,可被 `CLUSTER_PASSWORD` 环境变量覆盖;权限 0600) |
 | `tests/` | bats 单元测试 |
 | `scripts/smoke-test.sh` | Docker 端到端集成测试 |
 | `docs/superpowers/specs/2026-07-07-redis-cluster-install-design.md` | 设计文档 |
@@ -72,7 +74,7 @@ bash scripts/smoke-test.sh
 
 - 一共 6 个实例:A 机(6379、6380、6381),B 机(6382、6383、6384)
 - 角色由 `redis-cli --cluster create --cluster-replicas 1` 自动分配
-- 6 个实例共享同一个 `requirepass`(自动生成,32 字符)
+- 6 个实例共享同一个 `requirepass`(默认 `sac888`,可被 `CLUSTER_PASSWORD` 环境变量覆盖)
 - 持久化:RDB(默认触发点)+ AOF(`appendfsync everysec`)
 
 ## 已知限制
