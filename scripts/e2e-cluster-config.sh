@@ -15,6 +15,14 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Paths handed to `docker build -f` and `docker run -v` are resolved by the
+# DAEMON, not by whatever machine this script happens to run on. When the
+# script runs inside a runner container (the repo's host has no usable bash),
+# REPO_ROOT is that container's view of the repo, which the daemon cannot
+# resolve. Set E2E_HOST_REPO to the daemon-visible path in that case.
+HOST_REPO="${E2E_HOST_REPO:-$REPO_ROOT}"
+
 WORK="$(mktemp -d)"
 NET=rc-cfg-net
 PASS='E2eClusterPw'
@@ -34,8 +42,8 @@ trap cleanup EXIT
 command -v docker >/dev/null || fail "docker not found"
 
 log "Building images"
-docker build -q -f "$REPO_ROOT/tests/fixtures/Dockerfile.node.e2e"   -t rc-e2e-node:local   "$REPO_ROOT" >/dev/null
-docker build -q -f "$REPO_ROOT/tests/fixtures/Dockerfile.control.e2e" -t rc-e2e-control:local "$REPO_ROOT" >/dev/null
+docker build -q -f "$HOST_REPO/tests/fixtures/Dockerfile.node.e2e"   -t rc-e2e-node:local   "$HOST_REPO" >/dev/null
+docker build -q -f "$HOST_REPO/tests/fixtures/Dockerfile.control.e2e" -t rc-e2e-control:local "$HOST_REPO" >/dev/null
 
 log "Starting nodes"
 docker network create "$NET" >/dev/null
@@ -66,15 +74,24 @@ ssh_root() {
 
 # run_config — run cluster-config.sh from a control container against the
 # current nodes. Usage: run_config LOGFILE [extra args...]
+#
+# cluster.conf travels as an environment variable rather than a bind mount:
+# a mount source must be a path the daemon can see, and WORK lives in this
+# script's own filesystem, which the daemon cannot (see HOST_REPO above).
 run_config() {
     local logfile="$1"; shift
     docker run --rm --network "$NET" \
         -e PROMPT_NO_TTY=1 \
         -e NODE_A_SSH_USER=root -e NODE_A_HOST="$A_IP" -e NODE_A_SSH_PORT=22 -e NODE_A_SSH_PASS="$NODE_PW" \
         -e NODE_B_SSH_USER=root -e NODE_B_HOST="$B_IP" -e NODE_B_SSH_PORT=22 -e NODE_B_SSH_PASS="$NODE_PW" \
-        -v "$REPO_ROOT:/repo" -v "$WORK:/work" \
-        rc-e2e-control:local bash -c "bash /repo/cluster-config.sh --config /work/cluster.conf $*" \
-        2>&1 | tee "$logfile"
+        -e CLUSTER_CONF \
+        -v "$HOST_REPO:/repo" \
+        rc-e2e-control:local bash -c '
+            set -e
+            mkdir -p /work
+            printf "%s\n" "$CLUSTER_CONF" > /work/cluster.conf
+            exec bash /repo/cluster-config.sh --config /work/cluster.conf "$@"
+        ' _ "$@" 2>&1 | tee "$logfile"
     return "${PIPESTATUS[0]}"
 }
 
@@ -118,6 +135,10 @@ host     = $B_IP
 ssh_port = 22
 ports    = 6382,6383,6384
 CONF
+
+# Exported so `docker run -e CLUSTER_CONF` forwards it by name, keeping the
+# multi-line value out of any shell word-splitting or quoting path.
+export CLUSTER_CONF="$(cat "$WORK/cluster.conf")"
 
 log "Running cluster-config.sh"
 run_config "$WORK/install.log" || fail "cluster-config.sh exited non-zero"
