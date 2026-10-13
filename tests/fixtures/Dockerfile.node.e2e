@@ -1,0 +1,29 @@
+# E2E node fixture — one Redis Cluster node with a real sshd + systemd.
+#
+# Built from the daocloud mirror: Docker Hub is unreachable from this host.
+#
+# systemd needs /sys/fs/cgroup mounted rw and --privileged; the driver script
+# supplies both. Redis itself is NOT built from source — the 2 vCPU / 2 GB this
+# runs on cannot survive the LTO build. The driver installs the distro package
+# and copies its binaries into $REDIS_PREFIX/bin, which is exactly the
+# pre-provisioned state cluster-config.sh expects.
+FROM docker.m.daocloud.io/library/ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        openssh-server systemd systemd-sysv sudo build-essential \
+        gcc g++ make tar curl ca-certificates procps net-tools iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Root password + password auth: the whole deployment runs over sshpass.
+RUN echo 'root:TestPw123!' | chpasswd && \
+    mkdir -p /var/run/sshd && \
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+RUN echo '* soft nofile 65535' >> /etc/security/limits.conf && \
+    echo '* hard nofile 65535' >> /etc/security/limits.conf
+
+VOLUME ["/sys/fs/cgroup"]
+CMD ["/sbin/init"]
