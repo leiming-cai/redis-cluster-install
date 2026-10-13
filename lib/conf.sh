@@ -72,15 +72,25 @@ conf_die() {
 # conf_record_unknown KEY
 # Unknown keys are tolerated (typos must not be silently swallowed, but they
 # must not abort the run either). They are collected and printed once by the
-# caller after parsing completes.
+# caller after parsing completes, so a key is recorded AT MOST ONCE: a single
+# typo repeated in every node group must not produce one warning line per
+# group. First occurrence wins, which keeps the list in file order.
 conf_record_unknown() {
     local key="$1"
+    local seen
     [ -n "$key" ] || return 0
-    if [ -z "$CONF_UNKNOWN_KEYS" ]; then
-        CONF_UNKNOWN_KEYS="$key"
-    else
+    if [ -n "$CONF_UNKNOWN_KEYS" ]; then
+        # The here-string scopes the redirect to this loop, so it cannot
+        # consume the config file that parse_conf is still reading.
+        while IFS= read -r seen; do
+            if [ "$seen" = "$key" ]; then
+                return 0
+            fi
+        done <<< "$CONF_UNKNOWN_KEYS"
         CONF_UNKNOWN_KEYS="$CONF_UNKNOWN_KEYS
 $key"
+    else
+        CONF_UNKNOWN_KEYS="$key"
     fi
 }
 
@@ -148,13 +158,35 @@ parse_conf() {
         case "$trimmed" in
             \[*\]*)
                 _conf_flush_node
-                local label="${trimmed#\[}"
-                label="${label%\]}"
-                label="$(conf_trim "$label")"
-                label="${label#node.}"
+                local section label
+                section="$(conf_trim "${trimmed#\[}")"
+                section="${section%\]}"
+                section="$(conf_trim "$section")"
+                # [node.NAME] is the ONLY section form (spec 3.1, 3.2 rule 3).
+                # The prefix is what binds a group to its env-var namespace
+                # (spec 4.1: [node.a] -> NODE_A_*), so every other spelling
+                # must be rejected rather than quietly mapped somewhere else.
+                # Under the old `${section#node.}` strip a typo'd [nodes.a]
+                # became NODE_NODES_A and a bare [a] became NODE_A, so the
+                # operator's NODE_A_SSH_USER was silently never read.
+                case "$section" in
+                    node.*) ;;
+                    *) die "$file:$lineno: invalid section name '[$section]'; expected [node.NAME] (e.g. [node.a])" ;;
+                esac
+                label="$(conf_trim "${section#node.}")"
                 if [ -z "$label" ]; then
-                    die "$file:$lineno: empty section name; expected [node.NAME]"
+                    die "$file:$lineno: empty section name; expected [node.NAME] (e.g. [node.a])"
                 fi
+                # Whitespace inside a name is never deliberate, and conf_envkey
+                # folds every non-alphanumeric character to '_', so [node.a b]
+                # and [node.a-b] would claim the same NODE_A_B namespace.
+                # Other punctuation stays legal — spec 4.1 requires
+                # worker-1 -> NODE_WORKER_1.
+                case "$label" in
+                    *[[:space:]]*)
+                        die "$file:$lineno: invalid section name '[$section]': the node name must not contain whitespace"
+                        ;;
+                esac
                 cur=$((cur + 1))
                 CONF_NODE_GROUP[$cur]="$label"
                 CONF_NODE_ENVKEY[$cur]="$(conf_envkey "$label")"

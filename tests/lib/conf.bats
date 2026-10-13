@@ -374,6 +374,205 @@ EOF
 prot" ]
 }
 
+@test "a typo'd section prefix is rejected instead of silently changing the env prefix" {
+    # [nodes.a] used to parse clean and become group "nodes.a" -> env key
+    # NODE_NODES_A (spec 4.1 binds [node.a] to NODE_A_*). The operator then
+    # exported NODE_A_SSH_USER, it was silently never read, and the failure
+    # surfaced much later as an SSH prompt. A misspelled section must not
+    # take effect; it must be named and rejected.
+    write_conf <<'EOF'
+cluster_password = pw
+[nodes.a]
+host  = 10.0.0.1
+ports = 6379,6380,6381
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383
+[node.c]
+host  = 10.0.0.3
+ports = 6383
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[nodes.a]"* ]]
+    # The message must show the correct form, not just reject.
+    [[ "$output" == *"[node.NAME]"* ]]
+}
+
+@test "a section name without the node. prefix is rejected" {
+    # Spec 3.1/3.2 define [node.X] as the only section form, and spec 4.1
+    # derives NODE_<X>_... from it. [a] accidentally produced the same
+    # NODE_A prefix as [node.a], but it is undefined in the spec and the
+    # near-misses ([nod.a], [nodea]) do not. Reject the whole class.
+    write_conf <<'EOF'
+cluster_password = pw
+[a]
+host  = 10.0.0.1
+ports = 6379,6380,6381
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383
+[node.c]
+host  = 10.0.0.3
+ports = 6383
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[a]"* ]]
+    [[ "$output" == *"[node.NAME]"* ]]
+}
+
+@test "the node. prefix is case-sensitive" {
+    # [Node.a] folded to NODE_NODE_A under the old `${label#node.}` strip.
+    write_conf <<'EOF'
+cluster_password = pw
+[Node.a]
+host  = 10.0.0.1
+ports = 6379,6380,6381
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383
+[node.c]
+host  = 10.0.0.3
+ports = 6383
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[Node.a]"* ]]
+    [[ "$output" == *"[node.NAME]"* ]]
+}
+
+@test "a section name containing whitespace is rejected" {
+    # conf_envkey folds every non-alphanumeric character to '_', so [node.a b]
+    # silently produced NODE_A_B. Whitespace in a section name is never
+    # intentional and collides with [node.a-b], so it is a hard error.
+    # (Non-whitespace punctuation stays legal: spec 4.1 requires worker-1 ->
+    # NODE_WORKER_1, which the "stores nodes in file order" test covers.)
+    write_conf <<'EOF'
+cluster_password = pw
+[node.a b]
+host  = 10.0.0.1
+ports = 6379,6380,6381
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383
+[node.c]
+host  = 10.0.0.3
+ports = 6383
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[node.a b]"* ]]
+    [[ "$output" == *"whitespace"* ]]
+}
+
+@test "parse_conf dies on an empty section name and names the expected form" {
+    write_conf <<'EOF'
+cluster_password = pw
+[node.]
+host  = 10.0.0.1
+ports = 6379,6380,6381
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"empty section name"* ]]
+    [[ "$output" == *"[node.NAME]"* ]]
+}
+
+@test "surrounding whitespace inside the brackets is tolerated" {
+    # Leniency that cannot change meaning: [ node.a ] trims to the same
+    # section as [node.a], so it must not be lumped in with the rejected
+    # internal-whitespace case above.
+    write_conf <<'EOF'
+cluster_password = pw
+[ node.a ]
+host  = 10.0.0.1
+ports = 6379,6380,6381
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383
+[node.c]
+host  = 10.0.0.3
+ports = 6383
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_NODE_COUNT" -eq 3 ]
+    [ "${CONF_NODE_GROUP[1]}" = "a" ]
+    [ "${CONF_NODE_ENVKEY[1]}" = "NODE_A" ]
+}
+
+@test "a value containing a bracket is not mistaken for a section header" {
+    # The header pattern used to be \[*\]* — "contains a ]" — so
+    # `cluster_password = pa]ss` was swallowed as a section named
+    # "cluster_password = pa" and the password silently gained a "]".
+    write_conf <<'EOF'
+cluster_password = pa]ss
+[node.a]
+host  = 10.0.0.1
+ports = 6379,6380,6381
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383
+[node.c]
+host  = 10.0.0.3
+ports = 6383
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_PASSWORD" = "pa]ss" ]
+    [ "$CONF_NODE_COUNT" -eq 3 ]
+    [ "${CONF_NODE_GROUP[1]}" = "a" ]
+}
+
+@test "a repeated unknown key is collected only once" {
+    # One typo repeated in every node group used to print N identical warning
+    # lines, which reads like a parser bug rather than one mistyped key.
+    write_conf <<'EOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+foo   = 1
+[node.b]
+host  = h2
+ports = 6382,6383
+foo   = 2
+[node.c]
+host  = h3
+ports = 6383
+foo   = 3
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_UNKNOWN_KEYS" = "foo" ]
+}
+
+@test "deduping unknown keys keeps first-seen order" {
+    write_conf <<'EOF'
+cluster_password = pw
+zzz = 1
+aaa = 2
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+bar = 3
+[node.b]
+host  = h2
+ports = 6382,6383
+bar = 4
+aaa = 5
+[node.c]
+host  = h3
+ports = 6383
+zzz = 6
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_UNKNOWN_KEYS" = "zzz
+aaa
+bar" ]
+}
+
 @test "parse_conf does not execute shell code in the config" {
     write_conf <<'EOF'
 cluster_password = pw
