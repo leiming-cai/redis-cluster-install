@@ -129,22 +129,42 @@ ports    = 6382,6383,6384
    再以逗号拼回规范化后的串存入 `CONF_NODE_PORTS[i]`。
    （规范化是为了让 `ports = 6379, 6380 , 6381` 这类写法等价于紧凑形式。）
 6. 必填键缺失 → `die`，错误信息含**文件名 + 键名**
-7. 节点总数下限校验见 §3.4 → 违反则 `die` 并说明原因
+7. 实例数下限校验见 §3.4 → 违反则 `die` 并说明原因
 8. **未知键忽略**，键名收集进 `CONF_UNKNOWN_KEYS`，解析完成后由主脚本一次性打印提示
 
-### 3.4 节点数下限校验
+### 3.4 实例数下限校验
 
-`redis-cli --cluster create --cluster-replicas 1` 要求 **master 数 ≥ 3**。
-master 数由节点总数与 `replicas` 共同决定：
+`redis-cli --cluster create` 要求 **master 数 ≥ 3**。
+
+**注意计数单位是「实例数」，不是「节点组数」。** 一个 `[node.x]` 组里可以配
+多个端口，每个端口就是一个集群实例，因此必须先把所有组的端口数累加：
 
 ```
-replicas = CONF_REPLICAS            # 默认 1
-master 数 = ceil(节点总数 / (1 + replicas))
+CONF_TOTAL_INSTANCES = Σ(每组的端口个数)
+replicas   = CONF_REPLICAS                      # 默认 1
+master 数  = ceil(CONF_TOTAL_INSTANCES / (1 + replicas))
 ```
 
-本脚本固定 `replicas=1`（沿用 `install.sh` 的 3 主 3 从设定），
-因此要求 **节点总数 ≥ 3**。不满足时 `die`，信息中给出实际节点数、
-推导出的 master 数，以及「`--cluster create` 至少需要 3 个 master」的原因。
+本脚本固定 `replicas=1`，故约束为：
+
+```
+CONF_TOTAL_INSTANCES ≥ 5        （即 ceil(5/2)=3 个 master，满足下限）
+```
+
+举例：
+
+| 节点组 | 每组端口 | 实例总数 | master 数 | 结果 |
+|---|---|---|---|---|
+| a + b | 3 + 3 | 6 | 3 | 通过（3 主 3 从，标准布局） |
+| a + b | 3 + 2 | 5 | 3 | 通过（3 主 2 从） |
+| a + b | 3 + 1 | 4 | 2 | **拒绝** |
+| a + b | 1 + 1 | 2 | 1 | **拒绝** |
+
+不满足时 `die`，信息中给出实例总数、推导出的 master 数，以及
+「`redis-cli --cluster create` 至少需要 3 个 master」的原因。
+
+> 常见陷阱：只数节点组会把标准的「A 机 3 实例 + B 机 3 实例」误判为
+> 只有 2 组、1 个 master 而错误拒绝。校验必须基于实例总数。
 
 > 注：§4.6 健康判定中的「已知节点数」阈值与此无关 —— 那是 create **之后**
 > 对 Redis 上报值的校验（`is_cluster_healthy` 属 `lib/cluster.sh`，
@@ -409,7 +429,7 @@ docker run --rm --network rc-net -v "$PWD:/repo" -v "$PWD/verify:/v" \
 2. [ ] `bats tests/lib/conf.bats` 全部通过（≥10 项）
 3. [ ] `bats tests/cluster_config_render.bats` 全部通过（≥5 项）
 4. [ ] 配置缺键时报错信息含文件名与键名
-5. [ ] 节点总数 < 3 时报错，信息含实际节点数与推导出的 master 数
+5. [ ] 实例数推导出 master 数 < 3 时报错，信息含实例总数与 master 数
 6. [ ] 未知键被忽略，且执行时打印一次提示
 7. [ ] 环境变量齐备时不产生任何交互提问
 8. [ ] E2E：6 实例 PING 全部 PONG
