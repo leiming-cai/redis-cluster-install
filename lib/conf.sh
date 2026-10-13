@@ -5,6 +5,11 @@
 # file. It only splits lines on the first '=' and assigns the result, so a
 # config file containing shell code has no effect beyond its literal text.
 #
+# It also refuses, loudly, anything it would otherwise carry forward as a
+# wrong value: a section name holding a bracket, a '#' after a value, a ports
+# or ssh_port element that is not a number in 1-65535. A config that parses
+# clean is a config whose values mean what they say.
+#
 # Outputs (see spec §3.2):
 #   CONF_REDIS_PREFIX CONF_PASSWORD CONF_BIND_ADDR CONF_REPLICAS
 #   CONF_NODE_COUNT CONF_TOTAL_INSTANCES
@@ -32,17 +37,50 @@ conf_normalise_ports() {
     local raw="$1"
     local out=""
     local p
-    local old_ifs="$IFS"
-    IFS=','
-    # shellcheck disable=SC2206
-    local -a raw_parts=($raw)
-    IFS="$old_ifs"
+    local -a raw_parts=()
+    # Split on commas and NOTHING else. The old `IFS=',' local -a x=($raw)`
+    # left the value unquoted, so it went through word splitting AND pathname
+    # expansion: `ports = *` became the file listing of the current directory
+    # and the parse result depended on $PWD. `read -a` does neither.
+    if [ -n "$raw" ]; then
+        IFS=',' read -r -a raw_parts <<< "$raw"
+    fi
     for p in "${raw_parts[@]}"; do
         p="$(conf_trim "$p")"
         [ -n "$p" ] || continue
         if [ -n "$out" ]; then out="$out,$p"; else out="$p"; fi
     done
     printf '%s' "$out"
+}
+
+# conf_count_ports "6379,6380,6381" -> 3
+# Counts comma-separated elements. Same no-glob rule as conf_normalise_ports:
+# CONF_NODE_PORTS holds only digits by the time this runs, but the split must
+# not depend on the caller's working directory either way.
+conf_count_ports() {
+    local raw="$1"
+    local -a parts=()
+    [ -n "$raw" ] || { printf '0'; return 0; }
+    IFS=',' read -r -a parts <<< "$raw"
+    printf '%d' "${#parts[@]}"
+}
+
+# conf_is_valid_port STRING
+# Succeeds only for a decimal integer in 1-65535. Anything else — letters,
+# spaces (a space-separated list that was never split), signs, 0, 65536+ —
+# is rejected, because the value is turned straight into a
+# redis-<port>.service unit name and an ssh target.
+conf_is_valid_port() {
+    local p="$1"
+    case "$p" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    # Strip leading zeros before comparing: `[ 0080 -ge 1 ]` would be read as
+    # octal by some shells, and a 20-digit string must not overflow.
+    local digits="${p#"${p%%[!0]*}"}"
+    [ -n "$digits" ] || return 1          # 0, 00, 000... are not ports
+    [ "${#digits}" -le 5 ] || return 1     # longer than 5 digits => > 65535
+    [ "$digits" -ge 1 ] && [ "$digits" -le 65535 ]
 }
 
 # conf_envkey "worker-1" -> "NODE_WORKER_1"
@@ -67,6 +105,36 @@ conf_envkey() {
 conf_die() {
     local file="$1" line="$2" key="$3"
     die "$file:$line: missing or invalid key '$key'"
+}
+
+# conf_reject_inline_comment FILE LINE TEXT KEY
+# Spec 3.2 rule 1 defines WHOLE-LINE comments and nothing else: a line is
+# skipped when its first non-blank character is '#'. It never says a trailing
+# '# ...' is stripped off a value, so
+#     cluster_password = pw  # the password
+# stored the literal string "pw  # the password" as the cluster password, and
+#     ports = 6379,6380,6381  # three
+# stored "6381  # three" as a port — which the renderer turns into the unit
+# name redis-6381  # three.service.
+#
+# Cutting the value at the '#' instead of refusing it would be worse: '#' is
+# a legal password character, so silently truncating would deploy a cluster
+# running on a password the operator never chose. Refusing is explicit and the
+# message says where comments go.
+conf_reject_inline_comment() {
+    local file="$1" line="$2" text="$3" key="$4"
+    case "$text" in
+        *#*) ;;
+        *) return 0 ;;
+    esac
+    if [ "$key" = "cluster_password" ]; then
+        # Name the key but never the value: spec 3.3 keeps the password out of
+        # everything but memory, and a parse error is exactly the kind of text
+        # that gets pasted into a ticket or a CI log. The line number already
+        # points at the offending line.
+        die "$file:$line: unexpected '#' after the value of key 'cluster_password' (the value itself is not shown here); '#' may only start a comment on its own line; inline comments are not supported"
+    fi
+    die "$file:$line: unexpected '#' in: $text -- '#' may only start a comment on its own line; inline comments are not supported"
 }
 
 # conf_record_unknown KEY
@@ -124,12 +192,19 @@ parse_conf() {
     # "am I inside a node group, and which one"
     local in_node=0
     local cur=0
+    # Line number of the [node.X] header that opened the current group.
+    # _conf_flush_node only runs once the NEXT header (or EOF) has been read,
+    # so $lineno has already advanced past the group that is broken: "node.a
+    # has no host" used to be reported against the line holding [node.b].
+    # Pointing the operator at an unrelated line sends them to the wrong place.
+    local group_lineno=0
     local pending_host="" pending_ports="" pending_ssh_port=""
 
     _conf_flush_node() {
         [ "$in_node" = "1" ] || return 0
+        local group="${CONF_NODE_GROUP[$cur]}"
         if [ -z "$pending_host" ]; then
-            conf_die "$file" "$lineno" "host (in [node.${CONF_NODE_GROUP[$cur]}])"
+            conf_die "$file" "$group_lineno" "host (in [node.$group])"
         fi
         # Normalise BEFORE the required-key check (spec 3.2 rule 5). A raw
         # value such as `ports = , ,` is non-empty yet yields an empty list,
@@ -137,11 +212,29 @@ parse_conf() {
         local norm_ports
         norm_ports="$(conf_normalise_ports "$pending_ports")"
         if [ -z "$norm_ports" ]; then
-            conf_die "$file" "$lineno" "ports (in [node.${CONF_NODE_GROUP[$cur]}])"
+            conf_die "$file" "$group_lineno" "ports (in [node.$group])"
+        fi
+        # Every element must be a port number. Without this the instance count
+        # in spec 3.4 is computed from whatever the operator typed: a
+        # space-separated `ports = 6379 6380 6381` counts as ONE instance (so
+        # five such groups clear the 3-master floor) and `ports = abc,def,ghi`
+        # counts as THREE. Both sail through every other check and surface
+        # much later as a redis-6379 6380 6381.service unit name.
+        local part
+        local -a norm_parts=()
+        IFS=',' read -r -a norm_parts <<< "$norm_ports"
+        for part in "${norm_parts[@]}"; do
+            if ! conf_is_valid_port "$part"; then
+                die "$file:$group_lineno: invalid value for key 'ports (in [node.$group])': '$part' is not a TCP port; ports must be a comma-separated list of integers in 1-65535, e.g. '6379,6380,6381'"
+            fi
+        done
+        local ssh_port="${pending_ssh_port:-22}"
+        if ! conf_is_valid_port "$ssh_port"; then
+            die "$file:$group_lineno: invalid value for key 'ssh_port (in [node.$group])': '$ssh_port' is not a port; expected an integer in 1-65535"
         fi
         CONF_NODE_HOST[$cur]="$pending_host"
         CONF_NODE_PORTS[$cur]="$norm_ports"
-        CONF_NODE_SSH_PORT[$cur]="${pending_ssh_port:-22}"
+        CONF_NODE_SSH_PORT[$cur]="$ssh_port"
         pending_host=""; pending_ports=""; pending_ssh_port=""
     }
 
@@ -157,6 +250,10 @@ parse_conf() {
         # Section header
         case "$trimmed" in
             \[*\]*)
+                # Before the header is split up: "[node.a]  # the first node"
+                # would otherwise fold the comment into the node label and the
+                # group would claim a NODE_A___THE_FIRST_NODE namespace.
+                conf_reject_inline_comment "$file" "$lineno" "$trimmed" "section name"
                 _conf_flush_node
                 local section label
                 section="$(conf_trim "${trimmed#\[}")"
@@ -187,6 +284,21 @@ parse_conf() {
                         die "$file:$lineno: invalid section name '[$section]': the node name must not contain whitespace"
                         ;;
                 esac
+                # A bracket INSIDE the name is always a mistake, never layout.
+                # The header pattern only requires a '[' and a ']' somewhere on
+                # the line, so [node.a]] became the group "a]" (prefix
+                # NODE_A_) and [node.a][node.b] — what a hand-written config
+                # looks like after losing one newline — became a SINGLE group
+                # "a][node.b" (prefix NODE_A__NODE_B), silently deleting
+                # node.b while the instance count still cleared spec 3.4.
+                # Whitespace OUTSIDE the brackets was trimmed above and stays
+                # legal ([ node.a ] == [node.a]); only brackets inside the
+                # name are refused.
+                case "$label" in
+                    *'['*|*']'*)
+                        die "$file:$lineno: invalid section name '[$section]': the node name must not contain '[' or ']'; a section header is '[node.NAME]' alone on its line — '[node.a][node.b]' means a newline was lost between two groups"
+                        ;;
+                esac
                 cur=$((cur + 1))
                 CONF_NODE_GROUP[$cur]="$label"
                 CONF_NODE_ENVKEY[$cur]="$(conf_envkey "$label")"
@@ -208,6 +320,7 @@ parse_conf() {
                 fi
 
                 in_node=1
+                group_lineno="$lineno"
                 continue
                 ;;
         esac
@@ -221,6 +334,8 @@ parse_conf() {
         key="$(conf_trim "${trimmed%%=*}")"
         value="$(conf_trim "${trimmed#*=}")"
         [ -n "$key" ] || die "$file:$lineno: empty key"
+
+        conf_reject_inline_comment "$file" "$lineno" "$trimmed" "$key"
 
         if [ "$in_node" = "1" ]; then
             case "$key" in
@@ -261,15 +376,10 @@ parse_conf() {
     # 6 instances. Counting groups would compute ceil(2/2)=1 master and wrongly
     # reject the canonical layout.
     CONF_TOTAL_INSTANCES=0
-    local n _ifs_save
-    local -a _pl=()
+    local n n_ports
     for (( n = 1; n <= CONF_NODE_COUNT; n++ )); do
-        _ifs_save="$IFS"
-        IFS=','
-        # shellcheck disable=SC2206
-        _pl=(${CONF_NODE_PORTS[$n]})
-        IFS="$_ifs_save"
-        CONF_TOTAL_INSTANCES=$(( CONF_TOTAL_INSTANCES + ${#_pl[@]} ))
+        n_ports="$(conf_count_ports "${CONF_NODE_PORTS[$n]}")"
+        CONF_TOTAL_INSTANCES=$(( CONF_TOTAL_INSTANCES + n_ports ))
     done
 
     # masters = ceil(instances / (1 + replicas)); replicas is fixed at 1 here.
