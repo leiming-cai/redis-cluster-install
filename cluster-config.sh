@@ -285,8 +285,17 @@ _sudo mkdir -p "/var/lib/redis/cluster/$PORT"
 _sudo mkdir -p "/var/run/redis/cluster/$PORT"
 _sudo mkdir -p "$REDIS_PREFIX/cluster/$PORT"
 _sudo mkdir -p "$REDIS_PREFIX/log"
-_sudo chown -R redis:redis /etc/redis/cluster /var/lib/redis/cluster \
-    /var/run/redis/cluster "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
+# Chown the PARENT trees, not just the cluster subdirectories. apt ships
+# /etc/redis as 0770 redis:redis with the setgid bit, so if the redis user is
+# ever recreated (container rebuild, restore from backup) it gets a new uid and
+# that parent stays behind owned by a dangling one. Chowning only
+# /etc/redis/cluster looks correct — the files really do end up owned by the
+# new redis at 0640 — yet the service still dies with
+#   "Fatal error, can't open config file ...: Permission denied"
+# because it cannot traverse the 0770 parent to reach them. Owning the
+# parent is a no-op when the uid has not changed.
+_sudo chown -R redis:redis /etc/redis /var/lib/redis /var/run/redis \
+    "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
 
 # Confirm what we just created, in the same round trip. `set -e` already
 # catches a mkdir that failed outright; this catches the quieter cases —

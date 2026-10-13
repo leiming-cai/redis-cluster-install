@@ -112,7 +112,19 @@ provision() {
     out="$(ssh_root "$host" bash -s 2>&1 <<PRE
 set -e
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
+# apt-get update against the public archive fails intermittently from here
+# ("Clearsigned file isn't valid, got 'NOSPLIT'"), usually after a few of
+# these containers have hammered it. Retry rather than fail the whole run.
+_n=1
+until apt-get update -qq; do
+    if [ "\$_n" -ge 3 ]; then
+        echo "provision: apt-get update failed \$_n times" >&2
+        exit 1
+    fi
+    echo "provision: apt-get update attempt \$_n failed, retrying" >&2
+    _n=\$((_n + 1))
+    sleep 5
+done
 apt-get install -y -qq --no-install-recommends redis-server redis-tools
 mkdir -p $PREFIX/bin $PREFIX/cluster $PREFIX/log /etc/redis/cluster \\
          /var/lib/redis/cluster /var/run/redis/cluster
@@ -211,7 +223,15 @@ echo "  idempotency OK"
 # binaries and no redis user was reported as passing. This case is the
 # regression guard for exactly that.
 log "Preflight rejects a node whose redis user is missing"
-ssh_root "$B_IP" "userdel redis" >/dev/null 2>&1
+# -f is required: the redis instances are running AS this user, and plain
+# `userdel` refuses with "user redis is currently used by process N". With
+# the user left in place, preflight would correctly pass and this case would
+# assert nothing at all — a green result for entirely the wrong reason.
+ssh_root "$B_IP" "userdel -f redis" || fail "could not delete the redis user on B"
+if ssh_root "$B_IP" "id -u redis" >/dev/null 2>&1; then
+    fail "the redis user still exists on B; this case would prove nothing"
+fi
+echo "  redis user removed from B"
 rc=0
 run_config "$WORK/preflight.log" >/dev/null 2>&1 || rc=$?
 [ "$rc" -ne 0 ] || fail "preflight passed even though the redis user was deleted"
@@ -226,15 +246,20 @@ run_config "$WORK/recover.log" || fail "could not recover after restoring the re
 echo "  recovered"
 
 log "DoD5: kill a master, expect promotion"
-victim_id="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -h $A_IP -p 6379 cluster nodes" \
-    | grep ",$A_IP:6379@" | awk '{print $1}')"
+# `cluster nodes` prints "<id> <ip:port@bus-port[,hostname]> <flags> ...".
+# The address is field 2 and the comma (when a hostname is shown) comes AFTER
+# the @bus-port, so matching on ",$IP:port@" never hits anything. Match the
+# address with index() — a literal substring test, not a regex where the dots
+# in the IP would be wildcards.
+victim_id="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6379 cluster nodes" \
+    | awk -v a="$A_IP:6379@" 'index($2, a) {print $1; exit}')"
 [ -n "$victim_id" ] || fail "could not find the victim's node id"
 echo "  victim node id=$victim_id"
 ssh_root "$A_IP" "systemctl stop redis-6379"
 promoted=0
 for _ in $(seq 1 12); do
     sleep 5
-    if ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -h $A_IP -p 6380 cluster nodes" \
+    if ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 cluster nodes" \
         | awk -v v="$victim_id" '$1==v && $3 ~ /master/ {found=1} END{exit !found}'; then
         promoted=1
         break
@@ -245,6 +270,6 @@ echo "  promotion OK"
 
 ssh_root "$A_IP" "systemctl start redis-6379"
 sleep 8
-ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -h $A_IP -p 6380 cluster info" | grep "cluster_state:ok"
+ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 cluster info" | grep "cluster_state:ok"
 
 log "E2E PASSED"
