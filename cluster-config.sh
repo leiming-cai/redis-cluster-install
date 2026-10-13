@@ -439,4 +439,112 @@ for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
 done
 log_ok "redis.conf and systemd units deployed on all nodes"
 
-die "not implemented yet: start, cluster create and health check (see spec section 4)"
+# === Start and verify ===
+
+# ping_instance USER PASS HOST SSH_PORT REDIS_PORT
+# Returns 0 only when the instance answers PING with exactly PONG.
+ping_instance() {
+    local user="$1" pass="$2" host="$3" ssh_port="$4" redis_port="$5"
+    local out
+    # The cluster password travels as a positional argument, never inside the
+    # remote command string. lib/conf.sh only requires cluster_password to be
+    # non-empty — it does not restrict the characters — so interpolating it
+    # into `redis-cli -a '...'` would hand a password containing ' ; $(...) or
+    # a backtick straight to the remote shell, on a host where this same
+    # script runs sudo. 2>/dev/null drops redis-cli's "-a is insecure" notice
+    # so it cannot pollute the PONG comparison.
+    out="$(ssh_run "$user" "$pass" "$host" "$ssh_port" \
+        bash -s "$CONF_PASSWORD" "$redis_port" "$REDIS_BIN" 2>/dev/null <<'PING'
+set -u
+CLUSTER_PASS="$1"
+PORT="$2"
+REDIS_BIN="$3"
+"$REDIS_BIN/redis-cli" -a "$CLUSTER_PASS" -p "$PORT" PING
+PING
+    )" || return 1
+    [ "$(conf_trim "$out")" = "PONG" ]
+}
+
+start_and_verify() {
+    local i="$1"
+    local user="${CRED_USER[$i]}" pass="${CRED_PASS[$i]}"
+    local host="${CRED_HOST[$i]}" port="${CRED_SSH_PORT[$i]}"
+
+    # Split on commas and NOTHING else — see the note in lib/conf.sh about the
+    # unquoted `IFS=',' local -a x=($raw)` form going through pathname
+    # expansion and making the result depend on $PWD.
+    local -a port_list=()
+    IFS=',' read -r -a port_list <<< "${CONF_NODE_PORTS[$i]}"
+
+    local p rc
+    for p in "${port_list[@]}"; do
+        # The remote script runs under `set -e`, so a failed systemctl comes
+        # back non-zero. Check it rather than letting the PING probe below be
+        # the only thing that notices — it cannot tell "unit failed to start"
+        # apart from "unit started but redis is not accepting connections".
+        rc=0
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" "$REDIS_PREFIX" <<'STARTREMOTE' || rc=$?
+set -e
+SUDO_PASS="$1"
+PORT="$2"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+# Directories and ownership already handled by create_dirs (step 5).
+_sudo systemctl daemon-reload
+_sudo systemctl enable "redis-$PORT"
+_sudo systemctl restart "redis-$PORT"
+STARTREMOTE
+        [ "$rc" -eq 0 ] || die "starting redis-$p.service on $host failed"
+    done
+
+    # PING every instance; on failure dump the same diagnostics install.sh uses
+    # (this is what pinpointed the D8 read-only-filesystem bug).
+    for p in "${port_list[@]}"; do
+        if ping_instance "$user" "$pass" "$host" "$port" "$p"; then
+            continue
+        fi
+        log_error "PING failed on $host:$p — collecting diagnostics..."
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" "$REDIS_PREFIX" <<'DIAG' >&2
+SUDO_PASS="$1"
+PORT="$2"
+REDIS_PREFIX="$3"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+echo "==== systemctl status redis-$PORT.service ===="
+_sudo systemctl status "redis-$PORT.service" --no-pager 2>&1 || true
+echo ""
+echo "==== journalctl -u redis-$PORT.service -n 30 ===="
+_sudo journalctl -u "redis-$PORT.service" -n 30 --no-pager 2>&1 || true
+echo ""
+echo "==== /etc/redis/cluster/redis-$PORT.conf ===="
+_sudo cat "/etc/redis/cluster/redis-$PORT.conf" 2>&1 || true
+echo ""
+echo "==== $REDIS_PREFIX/bin/ ===="
+ls -la "$REDIS_PREFIX/bin/" 2>&1 || true
+DIAG
+        die "redis on $host:$p failed to start — see diagnostics above"
+    done
+    log_info "  ${CONF_NODE_GROUP[$i]}: all instances responding to PING"
+}
+
+log_info "[8/9] Starting instances..."
+for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
+    start_and_verify "$i"
+done
+log_ok "All instances responding to PING"
+
+die "not implemented yet: cluster create and health check (see spec section 4)"
