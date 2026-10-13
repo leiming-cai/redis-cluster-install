@@ -86,6 +86,9 @@ EOF
 }
 
 @test "parse_conf honours an explicit ssh_port" {
+    # 5 instances in total: the master-count rule (spec 3.4) rejects anything
+    # under 5 instances with replicas=1, so a 1-port-per-group fixture would
+    # never reach the ssh_port assertion.
     write_conf <<'EOF'
 cluster_password = pw
 [node.a]
@@ -120,4 +123,162 @@ EOF
     [ "$CONF_PASSWORD" = "pw" ]
     [ "${CONF_NODE_HOST[1]}" = "10.0.0.1" ]
     [ "${CONF_NODE_PORTS[1]}" = "6379,6380,6381" ]
+}
+
+@test "parse_conf dies when cluster_password is missing" {
+    write_conf <<'EOF'
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cluster_password"* ]]
+}
+
+@test "parse_conf dies when a node group has no host" {
+    write_conf <<'EOF'
+cluster_password = pw
+[node.a]
+ports = 6379
+[node.b]
+host  = h2
+ports = 6380
+[node.c]
+host  = h3
+ports = 6381
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"host"* ]]
+}
+
+@test "parse_conf dies when a node group has no ports" {
+    write_conf <<'EOF'
+cluster_password = pw
+[node.a]
+host = h1
+[node.b]
+host  = h2
+ports = 6380
+[node.c]
+host  = h3
+ports = 6381
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ports"* ]]
+}
+
+@test "parse_conf dies on a malformed line without an equals sign" {
+    write_conf <<'EOF'
+cluster_password = pw
+this line has no equals
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no equals"* ]]
+}
+
+@test "parse_conf dies when too few instances are configured for 3 masters" {
+    write_conf <<'EOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379
+[node.b]
+host  = h2
+ports = 6380
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"at least 3 masters"* ]]
+    [[ "$output" == *"2 instance(s)"* ]]
+}
+
+@test "parse_conf counts INSTANCES not node groups for the master threshold" {
+    # Two groups but six ports: the canonical "A:6379-6381 + B:6382-6384"
+    # layout must be accepted. Counting groups would compute ceil(2/2)=1
+    # master and wrongly reject it.
+    write_conf <<'EOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383,6384
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_NODE_COUNT" -eq 2 ]
+    [ "$CONF_TOTAL_INSTANCES" -eq 6 ]
+}
+
+@test "parse_conf dies when the config file does not exist" {
+    run parse_conf "$CONF_TMP/nope.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "parse_conf splits on the FIRST equals so values may contain equals" {
+    write_conf <<'EOF'
+cluster_password = pa=ss=word
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_PASSWORD" = "pa=ss=word" ]
+}
+
+@test "parse_conf collects unknown keys instead of failing" {
+    write_conf <<'EOF'
+cluster_password = pw
+ssh_prot = 22
+[node.a]
+host   = h1
+prot   = 6379
+ports  = 6379,6380
+[node.b]
+host  = h2
+ports = 6381,6382
+[node.c]
+host  = h3
+ports = 6383
+EOF
+    # Called directly (not via `run`) so the CONF_* globals stay in scope;
+    # reaching the assertions below proves parsing succeeded, since die() exits.
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_UNKNOWN_KEYS" = "ssh_prot
+prot" ]
+}
+
+@test "parse_conf does not execute shell code in the config" {
+    write_conf <<'EOF'
+cluster_password = pw
+INJECTED = $(touch /tmp/conf-pwned-$$)
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383
+EOF
+    # No `run`: `run` captures output in a command substitution, which would
+    # discard the CONF_* globals this test inspects.
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ ! -e "/tmp/conf-pwned-$$" ]
+    [[ "$CONF_UNKNOWN_KEYS" == *"INJECTED"* ]]
 }
