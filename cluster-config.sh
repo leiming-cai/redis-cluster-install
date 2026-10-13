@@ -189,4 +189,125 @@ if [ "$PRINT_CREDENTIALS" = "1" ]; then
     exit 0
 fi
 
-die "not implemented yet: preflight and deployment (see spec section 4)"
+# === Preflight ===
+# Verifies the two things a human must have done: install the Redis binaries
+# and create the `redis` system user. Directories are NOT checked here —
+# spec §"职责边界" assigns their creation to this script (step 5), so
+# checking them here would reject a correctly-prepared machine.
+preflight_node() {
+    local i="$1"
+    local user="${CRED_USER[$i]}" pass="${CRED_PASS[$i]}"
+    local host="${CRED_HOST[$i]}" port="${CRED_SSH_PORT[$i]}"
+
+    log_info "  preflight ${CONF_NODE_GROUP[$i]} ($user@$host:$port)"
+
+    ssh_check "$user" "$pass" "$host" "$port" \
+        || die "cannot reach $user@$host:$port (check host, port and password)"
+
+    # The remote script only echoes MISSING_* markers and always exits 0, so a
+    # non-zero status from ssh_run means a transport failure, not a missing
+    # prerequisite. Capture output with `if ! report=$(...)` so that `set -e`
+    # does not abort before the report is inspected.
+    local report
+    if ! report="$(ssh_run "$user" "$pass" "$host" "$port" bash -s "$REDIS_PREFIX" <<'PREFLIGHT'
+set -u
+REDIS_PREFIX="$1"
+for b in "$REDIS_PREFIX/bin/redis-server" "$REDIS_PREFIX/bin/redis-cli"; do
+    [ -x "$b" ] || echo "MISSING_BIN: $b"
+done
+id redis >/dev/null 2>&1 || echo "MISSING_USER: redis"
+PREFLIGHT
+)"; then
+        log_error "could not run the preflight command on ${CONF_NODE_GROUP[$i]} ($host)"
+        [ -n "$report" ] && printf '%s\n' "$report" >&2
+        die "SSH to $user@$host:$port worked for 'true' but failed for the preflight script.
+       Check that the login shell on $host accepts a script on stdin."
+    fi
+
+    # A non-empty report IS the failure signal. The remote script deliberately
+    # exits 0 and communicates purely through these markers, so testing
+    # ssh_run's exit status alone would make preflight a no-op: a node with no
+    # Redis binaries and no redis user would be reported as passing.
+    if [ -n "$(conf_trim "$report")" ]; then
+        log_error "preflight failed on ${CONF_NODE_GROUP[$i]} ($host):"
+        printf '%s\n' "$report" >&2
+        die "fix the items above on $host, then re-run.
+       Install Redis binaries into $REDIS_PREFIX/bin/ and create the 'redis'
+       system user; this script creates directories but does not install
+       software or create users."
+    fi
+}
+
+log_info "[3/9] Verifying pre-provisioned state on all nodes..."
+for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
+    preflight_node "$i"
+done
+log_ok "Preflight passed on all nodes"
+
+# === Create runtime directories ===
+# mkdir -p is idempotent, so re-running only fills in what is missing.
+# Redis refuses to start when its data directory is absent, which is why
+# these live here rather than in the operator's checklist.
+create_dirs() {
+    local i="$1"
+    local user="${CRED_USER[$i]}" pass="${CRED_PASS[$i]}"
+    local host="${CRED_HOST[$i]}" port="${CRED_SSH_PORT[$i]}"
+
+    # Split on commas and NOTHING else. `IFS=',' local -a x=($raw)` would
+    # leave the value unquoted and send it through pathname expansion, so
+    # the result would depend on $PWD — see the note in lib/conf.sh.
+    local -a port_list=()
+    IFS=',' read -r -a port_list <<< "${CONF_NODE_PORTS[$i]}"
+
+    local p rc
+    for p in "${port_list[@]}"; do
+        # Each ssh_run's status must be checked: the remote script runs under
+        # `set -e`, so a failed mkdir returns non-zero. Without this the loop
+        # would sail past a node whose directories were never created.
+        rc=0
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" "$REDIS_PREFIX" <<'DIRS' || rc=$?
+set -e
+SUDO_PASS="$1"
+PORT="$2"
+REDIS_PREFIX="$3"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+_sudo mkdir -p /etc/redis/cluster
+_sudo mkdir -p "/var/lib/redis/cluster/$PORT"
+_sudo mkdir -p "/var/run/redis/cluster/$PORT"
+_sudo mkdir -p "$REDIS_PREFIX/cluster/$PORT"
+_sudo mkdir -p "$REDIS_PREFIX/log"
+_sudo chown -R redis:redis /etc/redis/cluster /var/lib/redis/cluster \
+    /var/run/redis/cluster "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
+
+# Confirm what we just created, in the same round trip. `set -e` already
+# catches a mkdir that failed outright; this catches the quieter cases —
+# a path that exists but is not a directory, or a directory the chown could
+# not reach. Verifying here rather than in a second pass keeps this to one
+# SSH connection per port instead of two.
+for d in /etc/redis/cluster "/var/lib/redis/cluster/$PORT" \
+         "/var/run/redis/cluster/$PORT" "$REDIS_PREFIX/cluster/$PORT" \
+         "$REDIS_PREFIX/log"; do
+    [ -d "$d" ] || { echo "MISSING_DIR: $d" >&2; exit 1; }
+done
+DIRS
+        if [ "$rc" -ne 0 ]; then
+            die "creating the runtime directories for port $p on $host failed"
+        fi
+    done
+}
+
+log_info "[4/9] Creating runtime directories..."
+for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
+    create_dirs "$i"
+done
+log_ok "Runtime directories created on all nodes"
+
+die "not implemented yet: deploy and start (see spec section 4)"
