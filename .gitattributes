@@ -4,4 +4,3 @@
 *.bats           text eol=lf
 *.template       text eol=lf
 *.md             text eol=lf
-cluster.conf*    text eol=lf
