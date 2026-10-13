@@ -203,6 +203,115 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"at least 3 masters"* ]]
     [[ "$output" == *"2 instance(s)"* ]]
+    # spec 6.1 / DoD 5: the message must also name the derived master count.
+    # 2 instances with replicas=1 -> ceil(2/2) = 1 master.
+    [[ "$output" == *"only 1 master(s)"* ]]
+}
+
+@test "parse_conf dies at 4 instances and names the derived master count" {
+    # spec 3.4 table row "a + b | 3 + 1 | 4 | 2 | 拒绝": 4 instances is one
+    # short of the 5 needed, and the message must report 2 masters.
+    write_conf <<'EOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6383
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"4 instance(s)"* ]]
+    [[ "$output" == *"only 2 master(s)"* ]]
+    [[ "$output" == *"at least 3 masters"* ]]
+}
+
+@test "a replicas key in the config cannot bypass the 3-master floor" {
+    # `replicas` is not a config key (spec 3.1 top-level table) and replicas is
+    # fixed at 1 (spec 3.4). Honouring it let `replicas = 0` turn 3 instances
+    # into 3 masters and slip straight past the floor.
+    write_conf <<'EOF'
+cluster_password = pw
+replicas = 0
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"3 instance(s)"* ]]
+    [[ "$output" == *"only 2 master(s)"* ]]
+}
+
+@test "a replicas key is collected as an unknown key and CONF_REPLICAS stays 1" {
+    # spec 3.2 rule 8: unsupported keys are ignored and surfaced via
+    # CONF_UNKNOWN_KEYS, not silently applied.
+    write_conf <<'EOF'
+cluster_password = pw
+replicas = 7
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383,6384
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_REPLICAS" -eq 1 ]
+    [ "$CONF_UNKNOWN_KEYS" = "replicas" ]
+    [ "$CONF_TOTAL_INSTANCES" -eq 6 ]
+}
+
+@test "parse_conf dies when a ports list normalises to nothing" {
+    # `ports = , ,` is a non-empty raw value but normalises to an empty list,
+    # so the group would contribute zero instances. Spec 3.2 rule 5 requires
+    # normalising before the required-key check.
+    write_conf <<'EOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = , ,
+[node.b]
+host  = h2
+ports = 6379,6380,6381,6382,6383,6384
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ports"* ]]
+    [[ "$output" == *"node.a"* ]]
+}
+
+@test "parse_conf skips blank lines and comment lines" {
+    write_conf <<'EOF'
+#cluster.conf - top of file comment
+
+# blank lines above and below this one
+
+   # indented comment, still a comment
+	# tab-indented comment, also a comment
+#
+cluster_password    =    pw
+# a comment that looks like a section header
+[node.a]
+# comment inside a node group
+host     = 10.0.0.1
+ports    = 6379 , 6380 ,6381
+
+   # trailing comment before the next section
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383,6384
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_PASSWORD" = "pw" ]
+    [ "$CONF_NODE_COUNT" -eq 2 ]
+    [ "$CONF_TOTAL_INSTANCES" -eq 6 ]
+    [ "${CONF_NODE_HOST[1]}" = "10.0.0.1" ]
+    [ "${CONF_NODE_PORTS[1]}" = "6379,6380,6381" ]
+    [ "${CONF_NODE_HOST[2]}" = "10.0.0.2" ]
+    # No comment or blank line leaked into the unknown-key list.
+    [ -z "$CONF_UNKNOWN_KEYS" ]
 }
 
 @test "parse_conf counts INSTANCES not node groups for the master threshold" {

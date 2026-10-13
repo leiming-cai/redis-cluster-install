@@ -99,6 +99,8 @@ parse_conf() {
     CONF_REDIS_PREFIX="/opt/software/redis"
     CONF_PASSWORD=""
     CONF_BIND_ADDR="0.0.0.0"
+    # Fixed constant, NOT configurable (spec 3.4). Kept as parser output so a
+    # future 2-replica topology need not change the parser's contract.
     CONF_REPLICAS=1
     CONF_NODE_COUNT=0
     CONF_TOTAL_INSTANCES=0
@@ -119,11 +121,16 @@ parse_conf() {
         if [ -z "$pending_host" ]; then
             conf_die "$file" "$lineno" "host (in [node.${CONF_NODE_GROUP[$cur]}])"
         fi
-        if [ -z "$pending_ports" ]; then
+        # Normalise BEFORE the required-key check (spec 3.2 rule 5). A raw
+        # value such as `ports = , ,` is non-empty yet yields an empty list,
+        # which would silently register a zero-instance node group.
+        local norm_ports
+        norm_ports="$(conf_normalise_ports "$pending_ports")"
+        if [ -z "$norm_ports" ]; then
             conf_die "$file" "$lineno" "ports (in [node.${CONF_NODE_GROUP[$cur]}])"
         fi
         CONF_NODE_HOST[$cur]="$pending_host"
-        CONF_NODE_PORTS[$cur]="$(conf_normalise_ports "$pending_ports")"
+        CONF_NODE_PORTS[$cur]="$norm_ports"
         CONF_NODE_SSH_PORT[$cur]="${pending_ssh_port:-22}"
         pending_host=""; pending_ports=""; pending_ssh_port=""
     }
@@ -174,11 +181,15 @@ parse_conf() {
                 *)        conf_record_unknown "$key" ;;
             esac
         else
+            # `replicas` is deliberately NOT a key here: spec 3.1 has no such
+            # top-level key and spec 3.4 fixes replicas at 1. Honouring a
+            # config-supplied value let `replicas = 0` push 3 instances past
+            # the 3-master floor. It now falls through to the unknown-key
+            # branch so the operator is told the key is not supported.
             case "$key" in
                 redis_prefix)     CONF_REDIS_PREFIX="$value" ;;
                 cluster_password) CONF_PASSWORD="$value" ;;
                 bind_addr)        CONF_BIND_ADDR="$value" ;;
-                replicas)         CONF_REPLICAS="$value" ;;
                 *)                conf_record_unknown "$key" ;;
             esac
         fi
