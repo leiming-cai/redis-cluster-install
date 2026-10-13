@@ -21,7 +21,8 @@
 | | install.sh | cluster-config.sh |
 |---|---|---|
 | 源码编译 | ✅ 步骤 6 | ❌ 不做 |
-| useradd / 建目录 | ✅ 步骤 7 | ❌ 不做（第 4 步只校验） |
+| useradd 建 `redis` 用户 | ✅ 步骤 7 | ❌ 不做（第 4 步校验） |
+| 建运行时目录 | ✅ 步骤 7 | ✅ 做（见下方职责边界） |
 | 渲染配置 / unit | ✅ 步骤 9–10 | ✅ |
 | 启动 + PING | ✅ 步骤 11 | ✅ |
 | 建集群 + 健康检查 | ✅ 步骤 12–14 | ✅ |
@@ -30,16 +31,44 @@
 任意批量的机器上重复使用（每次读不同的 `cluster.conf`），而 `install.sh`
 保持「一条龙」定位不变。两者共享的资产是 lib 与模板，不是代码路径。
 
+### 职责边界：脚本建目录，但不建用户、不装二进制
+
+「Redis 已装好」的准确含义是**两件事由人工完成**，其余由脚本负责：
+
+| 事项 | 责任方 | 说明 |
+|---|---|---|
+| 编译安装 Redis 二进制 | **人工** | 脚本第 4 步校验 `$REDIS_PREFIX/bin/redis-server` 可执行 |
+| 创建 `redis` 系统用户 | **人工** | 脚本第 4 步校验存在 |
+| 创建运行时目录 | **脚本** | 第 5 步 `mkdir -p` 全部目录并 `chown redis:redis` |
+
+脚本创建的目录（与 `install.sh` 步骤 7 完全一致）：
+
+```
+/etc/redis/cluster                      配置目录
+/var/lib/redis/cluster/<port>           RDB + AOF 数据目录（每端口一个）
+/var/run/redis/cluster/<port>           pid / 运行时文件（每端口一个）
+$REDIS_PREFIX/cluster/<port>            nodes.conf（每端口一个）
+$REDIS_PREFIX/log                       日志目录
+```
+
+**为什么让脚本建目录**：① `mkdir -p` 幂等，重复执行无害；② 手工建目录容易漏
+per-port 子目录，而 Redis 在数据目录缺失时会直接拒绝启动（D8 缺陷即此类）；
+③ 目录 + 属主是一体的，分给两方做反而更容易留下 `root` 属主的目录导致
+Redis 无法写入。
+
+**脚本不创建用户**：创建系统用户属于「安装」范畴，且不同发行版的
+`useradd` 参数不一致（`--system` / `-r`），交由人工更可控。
+
 ### 前置条件
 
 **配置脚本侧**（控制机）：Bash 4+、`sshpass`、`redis-cli`。
 不新增任何依赖 —— 这是「Bash 4+ 即可」定位的延续。
 
-**目标节点侧**：由人工预先准备，脚本在第 4 步校验：
-- `$REDIS_PREFIX/bin/redis-server` 与 `redis-cli` 存在且可执行
-- `redis` 系统用户存在
-- 目录存在：`/etc/redis/cluster`、`/var/lib/redis/cluster`、
-  `/var/run/redis/cluster`、`$REDIS_PREFIX/cluster`、`$REDIS_PREFIX/log`
+**目标节点侧**：人工完成两件事，其余由脚本负责：
+
+- **必须人工准备**：Redis 二进制已安装到 `$REDIS_PREFIX/bin/`；`redis` 系统用户已存在
+- **脚本负责创建**：上表列出的全部运行时目录
+- **需人工放行**：防火墙的 `6379-6384/tcp` 与 `16379-16384/tcp`（cluster-bus）
 
 ---
 
@@ -186,18 +215,19 @@ CONF_TOTAL_INSTANCES ≥ 5        （即 ceil(5/2)=3 个 master，满足下限�
 
 ## 4. 执行流程
 
-主流程 8 步。
+主流程 9 步。
 
 | 步 | 动作 | 关键点 |
 |---|---|---|
 | 1 | 解析 `cluster.conf` | 缺键即 `die`，报出文件名 + 键名 |
 | 2 | 解析 CLI | `--config FILE` / `--help`；默认 `./cluster.conf` |
 | 3 | 收集 SSH 凭证 | **环境变量优先**，仅问缺失项 |
-| 4 | 连通性与前置校验 | `ssh_check` + 校验二进制/用户/目录 |
-| 5 | 下发 `auth.conf` | 内容 `REDIS_PASSWORD=<密码>`，`redis:redis 0600` |
-| 6 | 渲染并下发配置 + unit | 每节点 N 份 `redis.conf` + N 份 `redis-<port>.service` |
-| 7 | 启动 + PING 验证 | `systemctl enable --now`，逐实例 PING |
-| 8 | `--cluster create` + 健康检查 | 已健康则跳过 create |
+| 4 | 连通性与前置校验 | `ssh_check` + 校验二进制与 `redis` 用户 |
+| 5 | 创建运行时目录 | `mkdir -p` 五类目录 + `chown redis:redis` |
+| 6 | 下发 `auth.conf` | 内容 `REDIS_PASSWORD=<密码>`，`redis:redis 0600` |
+| 7 | 渲染并下发配置 + unit | 每节点 N 份 `redis.conf` + N 份 `redis-<port>.service` |
+| 8 | 启动 + PING 验证 | `systemctl enable --now`，逐实例 PING |
+| 9 | `--cluster create` + 健康检查 | 已健康则跳过 create |
 
 ### 4.1 第 3 步：凭证收集
 
@@ -239,13 +269,29 @@ NODE_B_SSH_USER / NODE_B_HOST / NODE_B_SSH_PORT / NODE_B_SSH_PASS
 - `ssh_check` 连通性（`ConnectTimeout=5`）
 - `$REDIS_PREFIX/bin/redis-server` 与 `redis-cli` 存在且可执行
 - `redis` 系统用户存在
-- 五个目录存在：`/etc/redis/cluster`、`/var/lib/redis/cluster`、
-  `/var/run/redis/cluster`、`$REDIS_PREFIX/cluster`、`$REDIS_PREFIX/log`
 
 任一缺失 → `die`，明确指出**哪个节点、缺哪一项、应如何创建**。
-不代为创建（不在本脚本职责内）。
+目录不在校验列表内 —— 由脚本自己在第 5 步创建。
 
-### 4.3 第 5 步：auth.conf
+### 4.3 第 5 步：创建运行时目录
+
+对每个节点的每个端口执行（与 `install.sh` 步骤 7 的目录集合一致）：
+
+```bash
+_sudo mkdir -p /etc/redis/cluster
+_sudo mkdir -p "/var/lib/redis/cluster/$PORT"
+_sudo mkdir -p "/var/run/redis/cluster/$PORT"
+_sudo mkdir -p "$REDIS_PREFIX/cluster/$PORT"
+_sudo mkdir -p "$REDIS_PREFIX/log"
+_sudo chown -R redis:redis /etc/redis/cluster /var/lib/redis/cluster \
+    /var/run/redis/cluster "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
+```
+
+全部 `mkdir -p` 幂等；重复执行只会补齐缺失目录并重设属主。
+创建后校验每个 per-port 目录确实存在，不存在则 `die` 并列出缺失的端口
+（`install.sh` 的 `provision_dirs` 有同样的收尾校验）。
+
+### 4.4 第 6 步：auth.conf
 
 内容为单行 `REDIS_PASSWORD=<密码>`，与 `redis-cluster.service.template` 的
 `EnvironmentFile=/etc/redis/cluster/auth.conf` 对应，供 `ExecStop` 中的
@@ -255,7 +301,7 @@ NODE_B_SSH_USER / NODE_B_HOST / NODE_B_SSH_PORT / NODE_B_SSH_PASS
 `/tmp`，再 `cp` + `chown` + `chmod`**，不通过 SSH 位置参数传多行内容
 （某些 sshd 版本会把多行参数重新注入为 stdin 并被当作命令解释）。
 
-### 4.4 第 6 步：渲染下发
+### 4.5 第 7 步：渲染下发
 
 每个端口渲染两份文件并下发：
 
@@ -271,7 +317,7 @@ render_systemd_unit SERVICE_TEMPLATE PORT "node-PORT" PASSWORD REDIS_PREFIX
 `cluster-config-file`、`logfile`、`ExecStart` 会指向不同目录，
 在 `ProtectSystem=strict` 下导致 Redis 无法启动（见 `docs/VERIFICATION.md` D8）。
 
-### 4.5 第 7 步：启动与验证
+### 4.6 第 8 步：启动与验证
 
 ```bash
 systemctl daemon-reload
@@ -291,7 +337,7 @@ systemctl enable --now redis-<port>
 这套诊断在上一轮 E2E 中精确定位了 D8 缺陷
 （`Can't open the log file: Read-only file system`），保留。
 
-### 4.6 第 8 步：建集群与健康检查
+### 4.7 第 9 步：建集群与健康检查
 
 先查询首个节点的 `cluster info`；若 `is_cluster_healthy` 为真则跳过 create。
 
@@ -307,20 +353,20 @@ redis-cli --cluster create <所有 host:port> --cluster-replicas 1 --cluster-yes
 健康判定复用 `lib/cluster.sh` 的 `is_cluster_healthy`，直接沿用其既有阈值
 （不修改该库）。创建后最多重试 5 次、间隔 3 秒。
 
-### 4.7 并行与失败处理
+### 4.8 并行与失败处理
 
 - 多节点的下发动作**并行执行**（A、B 同时进行），任一节点失败即整体失败
 - `set -euo pipefail`，任一步失败立即退出
 - **不回滚**：已下发的配置与已启动的实例保留，便于用 `status.sh` 排查
   （沿用 `install.sh` 的既定策略）
 
-### 4.8 幂等性
+### 4.9 幂等性
 
 | 环节 | 重复执行的行为 |
 |---|---|
-| 第 5–6 步下发配置 | **覆盖并重启**，实例短暂抖动，数据不丢 |
-| 第 7 步启动 | `enable --now`，已运行则不重启 |
-| 第 8 步建集群 | 集群已健康则**跳过**，不破坏已有集群 |
+| 第 5–7 步建目录 / 下发配置 | **覆盖并重启**，实例短暂抖动，数据不丢 |
+| 第 8 步启动 | `enable --now`，已运行则不重启 |
+| 第 9 步建集群 | 集群已健康则**跳过**，不破坏已有集群 |
 
 第 5–6 步不做存在性检查是刻意选择，与 `install.sh` 行为一致 ——
 确保配置与模板始终同步，避免「改了模板却没生效」的隐性不一致。
@@ -411,12 +457,14 @@ docker run --rm --network rc-net -v "$PWD:/repo" -v "$PWD/verify:/v" \
 - `cluster-config.sh` 主脚本
 - `lib/conf.sh` 配置解析器
 - `cluster.conf.example` 配置模板
+- 创建全部运行时目录（`/etc/redis/cluster`、`/var/{lib,run}/redis/cluster/<port>`、
+  `$REDIS_PREFIX/cluster/<port>`、`$REDIS_PREFIX/log`）并设置 `redis` 属主
 - bats 单元测试 + 契约测试 + Docker E2E 脚本
 
 ### 不包含
 
-- 源码编译（由 `install.sh` 或人工负责）
-- `useradd` / 建目录（本脚本只校验）
+- 源码编译与二进制安装（由 `install.sh` 或人工负责；脚本只校验其存在）
+- `useradd` 创建 `redis` 系统用户（脚本只校验其存在）
 - 集群扩容（`add-node.sh` 职责）
 - TLS / ACL / Sentinel / 监控告警
 - Windows 原生支持（WSL / Git Bash）
@@ -438,3 +486,7 @@ docker run --rm --network rc-net -v "$PWD:/repo" -v "$PWD/verify:/v" \
 11. [ ] E2E：重复执行不报错且跳过 create
 12. [ ] E2E：停止 master 后 replica 在 30 秒内被提升
 13. [ ] `cluster.conf` 不被执行（配置中含 shell 代码不会运行）
+14. [ ] 脚本自行创建全部运行时目录并设置 `redis` 属主，重复执行不报错
+15. [ ] 缺 `redis` 用户或缺二进制时明确报错，且不尝试代为创建
+16. [ ] 配置含非法端口（非数字 / 越界 / 空格分隔）时报错并指出具体值
+17. [ ] 配置含行尾注释时报错，且密码不出现在错误信息中
