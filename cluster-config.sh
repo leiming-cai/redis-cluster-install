@@ -594,7 +594,10 @@ CLINFO
 
 cluster_info="$(cluster_info_from "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" "$FIRST_REDIS_PORT" || true)"
 
-if printf '%s\n' "$cluster_info" | is_cluster_healthy; then
+# Compare against the instance count this config actually declares, not a
+# hardcoded 6: conf.sh accepts a 5-instance layout (ceil(5/2) = 3 masters),
+# and such a cluster reports cluster_known_nodes:5.
+if printf '%s\n' "$cluster_info" | is_cluster_healthy "$CONF_TOTAL_INSTANCES"; then
     log_ok "Cluster already healthy — skipping create"
 else
     log_info "[9/9] Creating cluster with ${#BUILD_CREATE_ARGS[@]} instances..."
@@ -630,7 +633,7 @@ health_ok=0
 attempt=1
 while [ "$attempt" -le 5 ]; do
     cluster_info="$(cluster_info_from "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" "$FIRST_REDIS_PORT" || true)"
-    if printf '%s\n' "$cluster_info" | is_cluster_healthy; then
+    if printf '%s\n' "$cluster_info" | is_cluster_healthy "$CONF_TOTAL_INSTANCES"; then
         health_ok=1
         break
     fi

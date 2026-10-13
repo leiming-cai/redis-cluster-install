@@ -47,6 +47,44 @@ HEALTHY_INFO=$'cluster_state:ok\ncluster_slots_assigned:16384\ncluster_slots_ok:
     [ "$status" -ne 0 ]
 }
 
+# --- MIN_KNOWN_NODES threshold ---
+#
+# The default of 6 suits the 3-master/1-replica layout this project ships and
+# keeps status.sh (which has no config to count instances from) unchanged. A
+# caller that knows its instance count passes it, because lib/conf.sh accepts
+# a 5-instance layout that would otherwise never satisfy a hardcoded 6.
+SMALL_INFO=$'cluster_state:ok\ncluster_slots_assigned:16384\ncluster_slots_ok:16384\ncluster_slots_pfail:0\ncluster_slots_fail:0\ncluster_known_nodes:5\ncluster_size:3'
+
+@test "is_cluster_healthy defaults to requiring 6 known nodes" {
+    # No argument -> the default threshold still rejects a 5-node cluster.
+    run is_cluster_healthy <<<"$SMALL_INFO"
+    [ "$status" -ne 0 ]
+}
+
+@test "is_cluster_healthy accepts a 5-node cluster when told the threshold is 5" {
+    run is_cluster_healthy 5 <<<"$SMALL_INFO"
+    [ "$status" -eq 0 ]
+}
+
+@test "is_cluster_healthy still rejects a 5-node cluster when the threshold is 6" {
+    run is_cluster_healthy 6 <<<"$SMALL_INFO"
+    [ "$status" -ne 0 ]
+}
+
+@test "is_cluster_healthy honours a threshold above the known node count" {
+    run is_cluster_healthy 9 <<<"$HEALTHY_INFO"
+    [ "$status" -ne 0 ]
+}
+
+@test "is_cluster_healthy falls back to the default on a non-numeric threshold" {
+    # An empty or junk argument must not make `[` fail with
+    # "integer expression expected" and be mistaken for cluster health.
+    run is_cluster_healthy abc <<<"$HEALTHY_INFO"
+    [ "$status" -eq 0 ]
+    run is_cluster_healthy "" <<<"$HEALTHY_INFO"
+    [ "$status" -eq 0 ]
+}
+
 @test "build_create_command emits redis-cli then create then nodes then replicas 1" {
     out=$(build_create_command "secret" "10.0.0.1:6379" "10.0.0.2:6379")
     [[ "$out" == *"redis-cli"* ]]
