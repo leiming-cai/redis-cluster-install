@@ -9,11 +9,13 @@
 
 ## 一句话现状
 
-计划的 **Task 1-6 已完成并提交**，Task 7-10 未开始。
+计划的 **Task 1-10 已完成并提交**（`cluster-config.sh` 665 行，spec 第 4 节的 9 步流程全部实现）。
+剩余 **Task 11-14**：Docker E2E、跑 E2E 修问题、文档、最终检查。
+主脚本末尾已无 `die "not implemented yet"` 占位。
 主脚本目前到「解析配置 + CLI + dry-run + 凭证收集（env 优先 + 交互回退）」，末尾留了一行占位：
 
 ```
-die "not implemented yet: preflight and deployment (see spec section 4)"
+(占位已删除 —— Task 7-10 实现了 preflight / 建目录 / 下发 / 启动 / 建集群)
 ```
 
 ---
@@ -39,12 +41,20 @@ die "not implemented yet: preflight and deployment (see spec section 4)"
 | 4 | 渲染契约测试（守 D8 回归） | `3ccf63d` |
 | 5 | `cluster-config.sh` 骨架：CLI + 配置加载 + dry-run | `417903b` |
 | 6 | 凭证收集（env 优先 + 交互回退）+ `--print-credentials` | `a2f524d` |
+| 7 | preflight（二进制 + redis 用户）+ 建运行时目录 | `0dc133c` |
+| 8 | 下发 `auth.conf` + `redis.conf` + systemd unit | `9eafa0e` |
+| 9 | 启动 + PING 验证 + 失败诊断 | `052aaa4` |
+| 10 | `redis-cli --cluster create` + 健康检查 | `8a71347` |
 
 ---
 
-## 提交清单（17 个，按时间倒序）
+## 提交清单（22 个，按时间倒序）
 
 ```
+8a71347 feat(cluster-config): create cluster and verify health
+052aaa4 feat(cluster-config): start instances and verify with PING plus diagnostics
+9eafa0e feat(cluster-config): deploy auth.conf, redis.conf and systemd units
+0dc133c feat(cluster-config): preflight binaries/user, then create runtime dirs
 a2f524d feat(cluster-config): env-first credential resolution with interactive fallback
 d27e6a2 fix(config_gen): escape sed metacharacters in every interpolated field
 417903b feat(cluster-config): add CLI, config loading and dry-run
@@ -69,16 +79,13 @@ eb47fe4 feat(conf): add INI-style cluster.conf parser
 
 | Task | 内容 | 依赖真实 SSH？ |
 |---|---|---|
-| 7 | preflight（校验二进制 + redis 用户）+ **建运行时目录** | 是 |
-| 8 | 下发 `auth.conf` + 6 份 `redis.conf` + 6 份 unit | 是 |
-| 9 | 启动 + PING 验证 + 失败诊断 | 是 |
-| 10 | `redis-cli --cluster create` + 健康检查 | 是 |
 | 11 | Docker E2E 脚本（**尚未开始**） | — |
 | 12 | 跑 E2E 并修复发现的问题 | — |
 | 13 | README / USAGE 文档 | — |
 | 14 | 最终集成检查 | — |
 
-Task 6 已完成。Task 7-10 只能靠 Task 11/12 的 E2E 验证。
+Task 7-10 的代码已完成，但**全部只做过静态验证，一次真实 SSH 都没跑过**。
+Task 11/12 的 E2E 是唯一能验证它们的手段。
 
 ---
 
@@ -195,6 +202,45 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
 8. **`PROMPT_NO_TTY=1` 时 prompt 读 stdin**：bats 若继承了终端 stdin，
    `read` 会**永久阻塞**。测试里凡触发 prompt 的调用都必须 `</dev/null`。
 
+9. **远端 heredoc 脚本 `bash -n` 查不出来**（Task 7-10）：bash 只把 heredoc
+   当**文本**处理，`bash -n cluster-config.sh` 永远不会发现远端脚本里的语法错误。
+   必须用 `sed` 把 `<<'DELIM'` 与 `DELIM` 之间的内容抽出来单独 `bash -n`。
+   当前共 **9 段**远端脚本：PREFLIGHT / DIRS / AUTHREMOTE / DEPLOYREMOTE /
+   PING / STARTREMOTE / DIAG / CLINFO / CREATE。
+
+10. **远端脚本必须检查 `ssh_run` 退出码**（Task 7-10）：计划里几乎所有
+    `ssh_run ... <<'REMOTE'` 都**没有检查返回码**，而远端是 `set -e`。
+    结果是 `mkdir` / `cp` / `systemctl` 失败后照样打印「已部署」。
+    统一改成 `rc=0; ssh_run ... <<'X' || rc=$?` 再 `[ "$rc" -eq 0 ] || die`。
+    **别把 `|| die` 写在 `<<'X'` 后面用反斜杠续行** —— 那样 heredoc 体
+    的起始行会变得难以判断（我就被自己的校验脚本坑了一次）。
+
+11. **绝不把密码插进远端命令字符串**（Task 9-10）：`lib/conf.sh` 只校验
+    `cluster_password` 非空，**不限制字符**。形如
+    `ssh_run ... "redis-cli -a '$CONF_PASSWORD' -p $p PING"` 的写法，
+    密码里只要有 `'` `;` `$()` 反引号就会被**远端 shell 执行**，
+    而同一脚本在这台机器上是要跑 `sudo` 的。已实测确认旧的插值写法
+    真的会执行注入命令。正确做法：**当位置参数传**，远端脚本里
+    `"$REDIS_CLI" -a "$CLUSTER_PASS"` 引用。已改为 `ping_instance` /
+    `cluster_info_from` 两个 helper。
+
+### 一个已确认的既有 bug（未修，需要你拍板）
+
+`lib/cluster.sh:19` 的 `is_cluster_healthy` 把 **`cluster_known_nodes >= 6` 写死了**，
+但 `lib/conf.sh` 接受 **5 个实例**的布局（`masters = (5+1)/2 = 3 >= 3`）。
+
+实测（`known_nodes=5` 时 `is_cluster_healthy` 返回假）：
+
+| known_nodes | 结果 |
+|---|---|
+| 5（conf.sh 允许的最小布局） | **永远不健康** |
+| 6（标准布局） | 健康 |
+| 9 | 健康 |
+
+后果：5 实例的集群会白等 5×3=15 秒，然后死于「health check failed」。
+**未修**，因为 `is_cluster_healthy` 是共享库（`status.sh` 也在用）且有既有测试，
+改语义需要单独决定：应该改成对比 `CONF_TOTAL_INSTANCES` 吗？
+
 ### 待处理（审查已报告，未修）
 
 - `unset -f` 会删掉调用方同名函数（`lib/conf.sh` 的嵌套 `_conf_flush_node` 有此问题）
@@ -208,25 +254,32 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
 
 - 主仓库 `D:\work\rediscluterproject` 在 `main` = `54438d8`
 - `main` 上已有：Docker E2E 的 10 个缺陷修复（`7a2b0fc`）+ spec 同步（`54438d8`）
-- worktree 分支领先 17 个提交，**尚未合并**
+- worktree 分支领先 22 个提交，**尚未合并**
 - 建议全部 Task 完成后一次性 rebase/merge，并在主仓库跑一次全套测试
 
 ---
 
 ## 下一步具体动作
 
-1. 执行 **Task 7**：preflight（校验二进制 + redis 用户）+ 建运行时目录。
-2. 执行 **Task 8–10**：下发 → 启动 → 建集群。这几步的远端 heredoc 脚本**建议逐个抽出来 `bash -n` 检查**。
-3. 执行 **Task 11**：写 Docker E2E 脚本（`scripts/e2e-cluster-config.sh` + 两个 fixture Dockerfile）。
-   **前置：`rc-node:local` 镜像已丢失，先重建。**
-4. 执行 **Task 12**：跑 E2E，修发现的问题。**这是唯一能验证 Task 7–10 的手段。**
-5. Task 13–14：文档与最终检查。
+1. 执行 **Task 11**：写 Docker E2E 脚本（`scripts/e2e-cluster-config.sh` + 两个 fixture Dockerfile）。
+   **前置：`rc-node:local` 镜像已丢失，先重建（走 `docker.m.daocloud.io` 镜像源）。**
+2. 执行 **Task 12**：跑 E2E，修发现的问题。**Task 7-10 的代码只有这一步能真正验证。**
+3. Task 13-14：文档与最终检查。
 
 ### 给下一个执行者的提醒
 
-计划文档里 Task 7–10 的代码是写好的，但**我已在计划自查阶段修过几处**
-（顶层 `local`、preflight 的中间版本、行号范围）。以计划文档为准，
-但遇到可疑之处**直接改并说明**，不要为了对上计划而将就。
+计划文档里 Task 7-10 的代码是写好的，但**已确认计划本身有多处错误**，
+下面这些都已改（详见上面的坑位清单）：
+
+- Task 7 的 preflight 曾是**空操作**：`MISSING_*` 标记被捕获后从未检查，
+  而远端脚本恒 `exit 0`，等于一台没装 Redis 的机器会被判为通过。
+- `DIRCHECK` 名不副实：注释说验证 per-port 目录，实际一个都没验。
+- Task 7-10 共 4 处未加引号的 `IFS=',' x=($raw)`（`lib/conf.sh` 明令禁止的旧 bug）。
+- Task 7-10 共 5 处 `ssh_run` 没检查退出码。
+- Task 9-10 共 3 处密码插值进远端命令字符串（可注入，已实测）。
+- 计划给的测试 3 永远不可能通过（Task 6 已修）。
+
+结论：**不要照抄计划**。以仓库代码为准，遇到可疑之处直接改并说明。
 
 **Task 6 阶段已确认计划文档本身有错**，改法记在这里备查：
 
