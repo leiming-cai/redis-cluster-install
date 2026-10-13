@@ -547,4 +547,121 @@ for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
 done
 log_ok "All instances responding to PING"
 
-die "not implemented yet: cluster create and health check (see spec section 4)"
+# === Create cluster ===
+# Node list is built from the resolved credentials + config ports.
+# NOTE: no `local` here — this code runs at script top level, not in a
+# function, and bash rejects `local` outside functions (fatal under set -e).
+BUILD_CREATE_ARGS=()
+_port_list=()
+for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
+    # Split on commas and NOTHING else — see the note in lib/conf.sh about the
+    # unquoted `IFS=',' local -a x=($raw)` form going through pathname
+    # expansion and making the result depend on $PWD.
+    _port_list=()
+    IFS=',' read -r -a _port_list <<< "${CONF_NODE_PORTS[$i]}"
+    for p in "${_port_list[@]}"; do
+        BUILD_CREATE_ARGS+=("${CRED_HOST[$i]}:$p")
+    done
+done
+
+# Query the first node's first port to decide whether to create.
+FIRST_HOST="${CRED_HOST[1]}"
+FIRST_SSH_PORT="${CRED_SSH_PORT[1]}"
+FIRST_USER="${CRED_USER[1]}"
+FIRST_PASS="${CRED_PASS[1]}"
+_first_ports=()
+IFS=',' read -r -a _first_ports <<< "${CONF_NODE_PORTS[1]}"
+FIRST_REDIS_PORT="${_first_ports[0]}"
+
+# cluster_info_from USER PASS HOST SSH_PORT REDIS_PORT
+# Echoes `redis-cli cluster info` for one instance.
+#
+# As in ping_instance, the cluster password travels as a positional argument
+# instead of being interpolated into the remote command string: lib/conf.sh
+# accepts any non-empty cluster_password, so `-a '...'` with a password
+# holding a quote, `;` or `$(...)` would be executed by the remote shell.
+cluster_info_from() {
+    local user="$1" pass="$2" host="$3" ssh_port="$4" redis_port="$5"
+    ssh_run "$user" "$pass" "$host" "$ssh_port" \
+        bash -s "$CONF_PASSWORD" "$redis_port" "$REDIS_BIN" 2>/dev/null <<'CLINFO'
+set -u
+CLUSTER_PASS="$1"
+PORT="$2"
+REDIS_BIN="$3"
+"$REDIS_BIN/redis-cli" -a "$CLUSTER_PASS" -p "$PORT" cluster info
+CLINFO
+}
+
+cluster_info="$(cluster_info_from "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" "$FIRST_REDIS_PORT" || true)"
+
+if printf '%s\n' "$cluster_info" | is_cluster_healthy; then
+    log_ok "Cluster already healthy — skipping create"
+else
+    log_info "[9/9] Creating cluster with ${#BUILD_CREATE_ARGS[@]} instances..."
+    if command -v redis-cli >/dev/null 2>&1; then
+        redis-cli --cluster create "${BUILD_CREATE_ARGS[@]}" \
+            --cluster-replicas "$CONF_REPLICAS" --cluster-yes \
+            -a "$CONF_PASSWORD" \
+            || die "redis-cli --cluster create failed"
+    else
+        log_warn "redis-cli not on control machine; running create from $FIRST_HOST"
+        # Node addresses arrive as positional args too, so the remote script
+        # never re-parses a string this process built by concatenation.
+        rc=0
+        ssh_run "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" \
+            bash -s "$CONF_PASSWORD" "$CONF_REPLICAS" "$REDIS_BIN" "${BUILD_CREATE_ARGS[@]}" <<'CREATE' || rc=$?
+set -u
+CLUSTER_PASS="$1"
+REPLICAS="$2"
+REDIS_BIN="$3"
+shift 3
+exec "$REDIS_BIN/redis-cli" --cluster create "$@" \
+    --cluster-replicas "$REPLICAS" --cluster-yes -a "$CLUSTER_PASS"
+CREATE
+        [ "$rc" -eq 0 ] || die "redis-cli --cluster create from $FIRST_HOST failed"
+    fi
+fi
+
+# === Health check ===
+# Right after create, masters may still be doing bus handshakes, so
+# cluster_state can briefly read "fail". Retry with backoff.
+log_info "[health] Verifying cluster health..."
+health_ok=0
+attempt=1
+while [ "$attempt" -le 5 ]; do
+    cluster_info="$(cluster_info_from "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" "$FIRST_REDIS_PORT" || true)"
+    if printf '%s\n' "$cluster_info" | is_cluster_healthy; then
+        health_ok=1
+        break
+    fi
+    [ "$attempt" -eq 5 ] && break
+    log_warn "health check attempt $attempt/5 not ready; sleeping 3s"
+    sleep 3
+    attempt=$((attempt + 1))
+done
+
+[ "$health_ok" -eq 1 ] || die "cluster health check failed after 5 attempts:
+$cluster_info
+
+Clustered instances can take longer than 15s to finish their master-to-master
+handshakes. Re-run this script once the nodes have settled: step 9 skips
+'--cluster create' entirely when the cluster already reports healthy."
+
+log_ok "Cluster is healthy (attempt $attempt)"
+
+# === Summary card ===
+cat <<CARD
+
+==========================================
+ Redis Cluster READY
+==========================================
+CARD
+for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
+    echo "  ${CONF_NODE_GROUP[$i]}  ${CRED_HOST[$i]}  ports=[${CONF_NODE_PORTS[$i]}]"
+done
+cat <<CARD
+  Connect:  redis-cli -c -a "<password>" -h ${FIRST_HOST} -p ${FIRST_REDIS_PORT}
+  Password: cluster_password in $CONF_FILE
+  Other:    status.sh  uninstall.sh  add-node.sh
+==========================================
+CARD
