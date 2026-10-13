@@ -42,8 +42,13 @@ trap cleanup EXIT
 command -v docker >/dev/null || fail "docker not found"
 
 log "Building images"
-docker build -q -f "$HOST_REPO/tests/fixtures/Dockerfile.node.e2e"   -t rc-e2e-node:local   "$HOST_REPO" >/dev/null
-docker build -q -f "$HOST_REPO/tests/fixtures/Dockerfile.control.e2e" -t rc-e2e-control:local "$HOST_REPO" >/dev/null
+# `docker build` reads the Dockerfile AND tars the context using the CLI, so
+# these must be paths visible to whoever runs this script (REPO_ROOT).
+# `docker run -v` is different: the DAEMON resolves the source, which is why
+# that one needs HOST_REPO. Conflating the two breaks the build with
+# "unable to prepare context: path ... not found".
+docker build -q -f "$REPO_ROOT/tests/fixtures/Dockerfile.node.e2e"   -t rc-e2e-node:local   "$REPO_ROOT" >/dev/null
+docker build -q -f "$REPO_ROOT/tests/fixtures/Dockerfile.control.e2e" -t rc-e2e-control:local "$REPO_ROOT" >/dev/null
 
 log "Starting nodes"
 docker network create "$NET" >/dev/null
@@ -64,9 +69,13 @@ log "node-a=$A_IP node-b=$B_IP"
 
 # Every remote command runs in a throwaway control container joined to the
 # same network. The password goes in through SSHPASS, never argv.
+#
+# -i is REQUIRED, not cosmetic: without it docker discards stdin, so a
+# `bash -s <<EOF` heredoc would never reach ssh and the remote script would
+# receive an empty stdin and exit 0 having done nothing.
 ssh_root() {
     local host="$1"; shift
-    docker run --rm --network "$NET" -e SSHPASS="$NODE_PW" rc-e2e-control:local \
+    docker run --rm -i --network "$NET" -e SSHPASS="$NODE_PW" rc-e2e-control:local \
         sshpass -e ssh -o StrictHostKeyChecking=no \
                   -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
                   root@"$host" "$@"
@@ -99,8 +108,8 @@ log "Pre-provisioning nodes (binaries, redis user, directories)"
 # NOTE: nodes must be addressed by IP, not hostname — CLUSTER MEET cannot
 # resolve container hostnames in this network.
 provision() {
-    local host="$1"
-    ssh_root "$host" bash -s >/dev/null <<PRE
+    local host="$1" out rc=0
+    out="$(ssh_root "$host" bash -s 2>&1 <<PRE
 set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -113,7 +122,18 @@ id redis >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin redis
 systemctl stop redis-server 2>/dev/null || true
 systemctl disable redis-server 2>/dev/null || true
 chown -R redis:redis /etc/redis /var/lib/redis /var/run/redis $PREFIX/cluster $PREFIX/log
+# Prove the preconditions cluster-config.sh checks actually hold, so a
+# provisioning failure surfaces here instead of as a confusing preflight
+# error three steps later.
+[ -x "$PREFIX/bin/redis-server" ] || { echo "provision: redis-server binary missing" >&2; exit 1; }
+[ -x "$PREFIX/bin/redis-cli" ]    || { echo "provision: redis-cli binary missing" >&2; exit 1; }
+id redis >/dev/null 2>&1          || { echo "provision: redis user missing" >&2; exit 1; }
 PRE
+    )" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf '%s\n' "$out" >&2
+        fail "pre-provisioning $host failed (exit $rc)"
+    fi
 }
 provision "$A_IP"
 provision "$B_IP"
@@ -158,15 +178,23 @@ ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -h $A_IP -p 6379 cluster info" 
     | grep -E "cluster_state:ok|cluster_slots_assigned:16384|cluster_known_nodes:6"
 
 log "DoD4: cross-machine read/write"
-ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -c SET e2e:key from-A" >/dev/null
+# -h and -p are mandatory here: `redis-cli -c` without them talks to
+# 127.0.0.1:6379, which on node B is not a cluster instance at all (B runs
+# 6382-6384) and the command fails with "Connection refused". -c then follows
+# the MOVED redirection to whichever node actually owns the slot.
+# --no-auth-warning silences the "Using a password with '-a'" notice so it
+# cannot be mistaken for command output.
+ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6379 -c SET e2e:key from-A" >/dev/null \
+    || fail "SET e2e:key on A failed"
 sleep 1
-v="$(ssh_root "$B_IP" "$PREFIX/bin/redis-cli -a $PASS -c GET e2e:key" | tr -d '\r')"
+v="$(ssh_root "$B_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $B_IP -p 6382 -c GET e2e:key" | tr -d '\r')"
 [ "$v" = "from-A" ] || fail "B GET -> '$v'"
 echo "  A->B OK"
 
-ssh_root "$B_IP" "$PREFIX/bin/redis-cli -a $PASS -c SET e2e:key2 from-B" >/dev/null
+ssh_root "$B_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $B_IP -p 6382 -c SET e2e:key2 from-B" >/dev/null \
+    || fail "SET e2e:key2 on B failed"
 sleep 1
-v="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -c GET e2e:key2" | tr -d '\r')"
+v="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 -c GET e2e:key2" | tr -d '\r')"
 [ "$v" = "from-B" ] || fail "A GET -> '$v'"
 echo "  B->A OK"
 
