@@ -1,0 +1,2 @@
+requirepass p%PASSWORD%ss
+masterauth p%PASSWORD%ss
