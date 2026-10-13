@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # HELP-START
 # cluster-config.sh — Configure and form a Redis Cluster on machines that
-# already have the Redis binaries, the `redis` user and the required
-# directories in place.
+# already have the Redis binaries and the `redis` user in place.
+#
+# This script creates the runtime directories itself (and corrects their
+# ownership): Redis refuses to start when its data directory is missing, and
+# putting that on an operator's checklist is an easy way to lose an hour.
+# Installing Redis and creating the `redis` user remain out of scope — those
+# are checked before anything is touched, and a missing one is reported by
+# name.
 #
 # Usage:
 #   bash cluster-config.sh                       # read ./cluster.conf
