@@ -1,0 +1,15 @@
+# Test fixture: cluster systemd unit (minimal mirror of
+# config/redis-cluster.service.template). See cluster-config.redis.conf.template
+# for why this is a separate file from systemd.service.template.
+[Unit]
+Description=Redis %PORT% (%NODE_NAME%)
+
+[Service]
+User=redis
+EnvironmentFile=/etc/redis/cluster/auth.conf
+ExecStart=%REDIS_PREFIX%/bin/redis-server /etc/redis/cluster/redis-%PORT%.conf
+ProtectSystem=strict
+ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis %REDIS_PREFIX%/cluster %REDIS_PREFIX%/log
+
+[Install]
+WantedBy=multi-user.target
