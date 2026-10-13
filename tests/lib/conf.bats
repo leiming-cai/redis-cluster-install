@@ -590,3 +590,63 @@ EOF
     [ ! -e "/tmp/conf-pwned-$$" ]
     [[ "$CONF_UNKNOWN_KEYS" == *"INJECTED"* ]]
 }
+
+@test "parse_conf dies when two sections map to the same env var prefix" {
+    # conf_envkey folds every non-alphanumeric character to '_', so distinct
+    # labels can collide: a-b and a_b both become NODE_A_B. The second group
+    # would silently read the first group's NODE_A_B_SSH_* credentials.
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.a-b]
+host  = h1
+ports = 6379,6380,6381
+[node.a_b]
+host  = h2
+ports = 6382,6383,6384
+[node.c]
+host  = h3
+ports = 6385,6386,6387
+CONFEOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"NODE_A_B"* ]]
+    [[ "$output" == *"distinct"* ]]
+}
+
+@test "parse_conf dies when the same section label appears twice" {
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.a]
+host  = h2
+ports = 6382,6383,6384
+[node.b]
+host  = h3
+ports = 6385,6386,6387
+CONFEOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"NODE_A"* ]]
+}
+
+@test "parse_conf still allows punctuation that does not collide" {
+    # spec 4.1 requires worker-1 -> NODE_WORKER_1, so a dash stays legal.
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.worker-1]
+host  = h1
+ports = 6379,6380,6381
+[node.worker-2]
+host  = h2
+ports = 6382,6383,6384
+[node.worker-3]
+host  = h3
+ports = 6385,6386,6387
+CONFEOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "${CONF_NODE_ENVKEY[1]}" = "NODE_WORKER_1" ]
+    [ "${CONF_NODE_ENVKEY[2]}" = "NODE_WORKER_2" ]
+    [ "${CONF_NODE_ENVKEY[3]}" = "NODE_WORKER_3" ]
+}

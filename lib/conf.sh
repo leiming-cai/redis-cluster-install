@@ -190,6 +190,23 @@ parse_conf() {
                 cur=$((cur + 1))
                 CONF_NODE_GROUP[$cur]="$label"
                 CONF_NODE_ENVKEY[$cur]="$(conf_envkey "$label")"
+
+                # conf_envkey folds every non-alphanumeric character to '_', so
+                # distinct labels can collide: [node.a-b] and [node.a_b] both
+                # yield NODE_A_B. The second group would then silently read the
+                # first group's NODE_A_B_SSH_* credentials, which is far worse
+                # than a hard error — refuse the config instead.
+                local k dup_label=""
+                for (( k = 1; k < cur; k++ )); do
+                    if [ "${CONF_NODE_ENVKEY[$k]}" = "${CONF_NODE_ENVKEY[$cur]}" ]; then
+                        dup_label="${CONF_NODE_GROUP[$k]}"
+                        break
+                    fi
+                done
+                if [ -n "$dup_label" ]; then
+                    die "$file:$lineno: section [node.$label] and [node.$dup_label] both map to environment variable prefix ${CONF_NODE_ENVKEY[$cur]}; rename one of them to give each node group a distinct NODE_* prefix"
+                fi
+
                 in_node=1
                 continue
                 ;;
