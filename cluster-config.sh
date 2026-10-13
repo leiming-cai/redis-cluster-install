@@ -180,6 +180,7 @@ collect_credentials() {
     done
 }
 
+log_info "[3/9] Resolving SSH credentials (environment first, prompt for gaps)..."
 collect_credentials
 
 if [ "$PRINT_CREDENTIALS" = "1" ]; then
@@ -238,7 +239,7 @@ PREFLIGHT
     fi
 }
 
-log_info "[3/9] Verifying pre-provisioned state on all nodes..."
+log_info "[4/9] Verifying pre-provisioned state on all nodes..."
 for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
     preflight_node "$i"
 done
@@ -304,10 +305,138 @@ DIRS
     done
 }
 
-log_info "[4/9] Creating runtime directories..."
+log_info "[5/9] Creating runtime directories..."
 for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
     create_dirs "$i"
 done
 log_ok "Runtime directories created on all nodes"
 
-die "not implemented yet: deploy and start (see spec section 4)"
+# === Deploy auth.conf ===
+# Content matches EnvironmentFile=/etc/redis/cluster/auth.conf in the unit
+# template; ExecStop references it as $REDIS_PASSWORD.
+deploy_auth() {
+    local i="$1"
+    local user="${CRED_USER[$i]}" pass="${CRED_PASS[$i]}"
+    local host="${CRED_HOST[$i]}" port="${CRED_SSH_PORT[$i]}"
+
+    # File content travels via scp, never as an SSH positional argument:
+    # some sshd versions re-inject multi-line args as stdin and the remote
+    # shell would try to execute the file content as commands.
+    local tmpf
+    tmpf="$(mktemp)"
+    printf 'REDIS_PASSWORD=%s\n' "$CONF_PASSWORD" > "$tmpf"
+    ssh_copy "$user" "$pass" "$host" "$port" "$tmpf" "/tmp/redis-cluster-auth.conf" \
+        || { rm -f "$tmpf"; die "scp auth.conf to $host failed"; }
+    rm -f "$tmpf"
+
+    # The remote script runs under `set -e`, so a failed cp/chown/chmod comes
+    # back as a non-zero exit. It has to be checked: otherwise the node would
+    # be reported as deployed while /etc/redis/cluster/auth.conf is absent or
+    # world-readable, and redis would fail to authenticate much later.
+    local rc=0
+    ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" <<'AUTHREMOTE' || rc=$?
+set -e
+SUDO_PASS="$1"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+# /etc/redis/cluster already exists: create_dirs (step 5) ran before this.
+_sudo cp /tmp/redis-cluster-auth.conf /etc/redis/cluster/auth.conf
+_sudo chown redis:redis /etc/redis/cluster/auth.conf
+_sudo chmod 600 /etc/redis/cluster/auth.conf
+rm -f /tmp/redis-cluster-auth.conf
+AUTHREMOTE
+    [ "$rc" -eq 0 ] || die "installing auth.conf on $host failed"
+    log_info "  ${CONF_NODE_GROUP[$i]}: auth.conf deployed"
+}
+
+# === Render and deploy redis.conf + systemd unit ===
+# REDIS_PREFIX is threaded into BOTH templates so that
+# cluster-config-file / logfile (redis.conf) and ExecStart / ReadWritePaths
+# (unit) resolve to the same directories. If they disagree,
+# ProtectSystem=strict makes the paths read-only and redis-server refuses
+# to start — see docs/VERIFICATION.md D8.
+deploy_configs() {
+    local i="$1"
+    local user="${CRED_USER[$i]}" pass="${CRED_PASS[$i]}"
+    local host="${CRED_HOST[$i]}" port="${CRED_SSH_PORT[$i]}"
+    local ports="${CONF_NODE_PORTS[$i]}"
+    local p tmpf rc
+
+    # Split on commas and NOTHING else — see the note in lib/conf.sh about the
+    # unquoted `IFS=',' local -a x=($raw)` form going through pathname
+    # expansion and making the result depend on $PWD.
+    local -a port_list=()
+    IFS=',' read -r -a port_list <<< "$ports"
+
+    for p in "${port_list[@]}"; do
+        # redis.conf
+        tmpf="$(mktemp)"
+        render_redis_conf "$CONF_TEMPLATE" "$p" "$CONF_PASSWORD" "node-$p" "$CONF_BIND_ADDR" "$REDIS_PREFIX" > "$tmpf" \
+            || { rm -f "$tmpf"; die "rendering redis-$p.conf failed"; }
+        ssh_copy "$user" "$pass" "$host" "$port" "$tmpf" "/tmp/redis-$p.conf" \
+            || { rm -f "$tmpf"; die "scp redis-$p.conf to $host failed"; }
+        rm -f "$tmpf"
+
+        # systemd unit
+        tmpf="$(mktemp)"
+        render_systemd_unit "$UNIT_TEMPLATE" "$p" "node-$p" "$CONF_PASSWORD" "$REDIS_PREFIX" > "$tmpf" \
+            || { rm -f "$tmpf"; die "rendering redis-$p.service failed"; }
+        ssh_copy "$user" "$pass" "$host" "$port" "$tmpf" "/tmp/redis-$p.service" \
+            || { rm -f "$tmpf"; die "scp redis-$p.service to $host failed"; }
+        rm -f "$tmpf"
+
+        rc=0
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" <<'DEPLOYREMOTE' || rc=$?
+set -e
+SUDO_PASS="$1"
+PORT="$2"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+# Directories already exist: create_dirs (step 5) ran before this.
+_sudo cp "/tmp/redis-${PORT}.conf" "/etc/redis/cluster/redis-${PORT}.conf"
+_sudo chown redis:redis "/etc/redis/cluster/redis-${PORT}.conf"
+_sudo chmod 640 "/etc/redis/cluster/redis-${PORT}.conf"
+_sudo cp "/tmp/redis-${PORT}.service" "/etc/systemd/system/redis-${PORT}.service"
+_sudo chmod 644 "/etc/systemd/system/redis-${PORT}.service"
+rm -f "/tmp/redis-${PORT}.conf" "/tmp/redis-${PORT}.service"
+
+# Confirm both landed. The unit is the one that decides whether redis ever
+# starts, and a unit that was never copied looks exactly like a unit that was
+# installed and simply has not been started yet.
+for f in "/etc/redis/cluster/redis-${PORT}.conf" \
+         "/etc/systemd/system/redis-${PORT}.service"; do
+    [ -f "$f" ] || { echo "MISSING_FILE: $f" >&2; exit 1; }
+done
+DEPLOYREMOTE
+        [ "$rc" -eq 0 ] || die "deploying redis-$p.conf and redis-$p.service to $host failed"
+        log_info "  ${CONF_NODE_GROUP[$i]}: redis-$p.conf + redis-$p.service deployed"
+    done
+}
+
+log_info "[6/9] Deploying auth.conf..."
+for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
+    deploy_auth "$i"
+done
+log_ok "auth.conf deployed on all nodes"
+
+log_info "[7/9] Rendering and deploying redis.conf and systemd units..."
+for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
+    deploy_configs "$i"
+done
+log_ok "redis.conf and systemd units deployed on all nodes"
+
+die "not implemented yet: start, cluster create and health check (see spec section 4)"
