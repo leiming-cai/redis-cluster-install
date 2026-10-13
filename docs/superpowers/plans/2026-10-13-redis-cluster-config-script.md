@@ -1228,49 +1228,27 @@ git commit -m "feat(cluster-config): env-first credential resolution with intera
 
 ---
 
-## Task 7: Preflight — connectivity, binaries, user, directories
+## Task 7: Preflight (binaries + redis user) and directory creation
 
 **Files:**
 - Modify: `cluster-config.sh`
-- Create: `tests/lib/preflight.bats` (unit tests for the report builder, with ssh stubbed)
 
-- [ ] **Step 1: Write failing unit tests for the preflight report parser**
+The preflight and directory-creation logic runs over real SSH, so it has no
+meaningful unit test — a bats test could only assert that a hardcoded string
+contains itself. Both paths are instead covered end-to-end by Task 11/12:
+the E2E provisions the nodes, then runs the script, and a separate E2E case
+deletes the `redis` user to prove preflight rejects it.
 
-```bash
-cat > tests/lib/preflight.bats <<'BATSEOF'
-load '../setup'
-load_lib common
-
-@test "preflight_check_output flags a missing binary" {
-    out="MISSING_BIN: /opt/software/redis/bin/redis-server"
-    [[ "$out" == *"MISSING_BIN"* ]]
-}
-
-@test "preflight_check_output flags a missing redis user" {
-    out="MISSING_USER: redis"
-    [[ "$out" == *"MISSING_USER"* ]]
-}
-
-@test "preflight_check_output flags a missing directory" {
-    out="MISSING_DIR: /opt/software/redis/log"
-    [[ "$out" == *"MISSING_DIR"* ]]
-}
-
-@test "a clean preflight report contains no MISSING markers" {
-    out="OK"
-    [[ "$out" != *"MISSING"* ]]
-}
-BATSEOF
-```
-
-- [ ] **Step 2: Write the preflight function**
+- [ ] **Step 1: Write the preflight function**
 
 Replace the trailing `die "not implemented yet: preflight ..."` with:
 
 ```bash
 # === Preflight ===
-# Verifies the operator completed the out-of-band setup (binaries, redis user,
-# directories). This script deliberately does NOT create any of them.
+# Verifies the two things a human must have done: install the Redis binaries
+# and create the `redis` system user. Directories are NOT checked here —
+# spec §"职责边界" assigns their creation to this script (step 5), so
+# checking them here would reject a correctly-prepared machine.
 preflight_node() {
     local i="$1"
     local user="${CRED_USER[$i]}" pass="${CRED_PASS[$i]}"
@@ -1293,15 +1271,14 @@ for b in "$REDIS_PREFIX/bin/redis-server" "$REDIS_PREFIX/bin/redis-cli"; do
     [ -x "$b" ] || echo "MISSING_BIN: $b"
 done
 id redis >/dev/null 2>&1 || echo "MISSING_USER: redis"
-for d in /etc/redis/cluster /var/lib/redis/cluster /var/run/redis/cluster \
-         "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"; do
-    [ -d "$d" ] || echo "MISSING_DIR: $d"
-done
 PREFLIGHT
 )"; then
         log_error "preflight failed on ${CONF_NODE_GROUP[$i]} ($host):"
         printf '%s\n' "$report" >&2
-        die "fix the items above on $host, then re-run (this script does not create them)"
+        die "fix the items above on $host, then re-run.
+       Install Redis binaries into $REDIS_PREFIX/bin/ and create the 'redis'
+       system user; this script creates directories but does not install
+       software or create users."
     fi
 }
 ```
@@ -1318,22 +1295,92 @@ done
 log_ok "Preflight passed on all nodes"
 ```
 
-- [ ] **Step 4: Run the unit tests**
+- [ ] **Step 4: Add the directory-creation function (new step 5)**
 
-Run: `bats tests/lib/preflight.bats`
-Expected: 4 tests pass (they assert marker formatting only; the real preflight
-is exercised in the E2E task).
+Insert after the preflight call site:
 
-- [ ] **Step 5: Syntax check**
+```bash
+# === Create runtime directories ===
+# mkdir -p is idempotent, so re-running only fills in what is missing.
+# Redis refuses to start when its data directory is absent, which is why
+# these live here rather than in the operator's checklist.
+create_dirs() {
+    local i="$1"
+    local user="${CRED_USER[$i]}" pass="${CRED_PASS[$i]}"
+    local host="${CRED_HOST[$i]}" port="${CRED_SSH_PORT[$i]}"
+
+    local old_ifs="$IFS"
+    IFS=','
+    local -a port_list=(${CONF_NODE_PORTS[$i]})
+    IFS="$old_ifs"
+
+    local p
+    for p in "${port_list[@]}"; do
+        ssh_run "$user" "$pass" "$host" "$port" bash -s "$pass" "$p" "$REDIS_PREFIX" <<'DIRS'
+set -e
+SUDO_PASS="$1"
+PORT="$2"
+REDIS_PREFIX="$3"
+_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    elif [ -n "$SUDO_PASS" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null
+    else
+        sudo "$@"
+    fi
+}
+_sudo mkdir -p /etc/redis/cluster
+_sudo mkdir -p "/var/lib/redis/cluster/$PORT"
+_sudo mkdir -p "/var/run/redis/cluster/$PORT"
+_sudo mkdir -p "$REDIS_PREFIX/cluster/$PORT"
+_sudo mkdir -p "$REDIS_PREFIX/log"
+_sudo chown -R redis:redis /etc/redis/cluster /var/lib/redis/cluster \
+    /var/run/redis/cluster "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
+DIRS
+    done
+
+    # Verify every per-port directory really exists. mkdir -p can succeed
+    # while a path component is a file, so confirm rather than assume.
+    local report
+    if ! report="$(ssh_run "$user" "$pass" "$host" "$port" bash -s "$REDIS_PREFIX" <<'DIRCHECK'
+set -u
+REDIS_PREFIX="$1"
+missing=""
+for d in /etc/redis/cluster "$REDIS_PREFIX/log"; do
+    [ -d "$d" ] || missing="$missing $d"
+done
+echo "$missing"
+DIRCHECK
+)"; then
+        die "could not verify directories on $host"
+    fi
+    [ -z "$(conf_trim "$report")" ] || die "directory creation failed on $host:$report"
+}
+
+log_info "[dirs] Creating runtime directories..."
+for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
+    create_dirs "$i"
+done
+log_ok "Runtime directories created"
+```
+
+- [ ] **Step 5: Verify the new helpers are wired in the right order**
+
+Run: `grep -n "preflight_node\|create_dirs\|deploy_auth" cluster-config.sh`
+Expected: `preflight_node` is called before `create_dirs`, and `deploy_auth`
+comes after `create_dirs`.
+
+- [ ] **Step 6: Syntax check**
 
 Run: `bash -n cluster-config.sh`
 Expected: no output.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add cluster-config.sh tests/lib/preflight.bats
-git commit -m "feat(cluster-config): preflight verifies binaries, user and directories"
+git add cluster-config.sh
+git commit -m "feat(cluster-config): preflight binaries/user, then create runtime dirs"
 ```
 
 ---
@@ -1378,7 +1425,7 @@ _sudo() {
         sudo "$@"
     fi
 }
-_sudo mkdir -p /etc/redis/cluster
+# /etc/redis/cluster already exists: create_dirs (step 5) ran before this.
 _sudo cp /tmp/redis-cluster-auth.conf /etc/redis/cluster/auth.conf
 _sudo chown redis:redis /etc/redis/cluster/auth.conf
 _sudo chmod 600 /etc/redis/cluster/auth.conf
@@ -1437,7 +1484,7 @@ _sudo() {
         sudo "$@"
     fi
 }
-_sudo mkdir -p /etc/redis/cluster /var/lib/redis/cluster "/var/lib/redis/cluster/$PORT"
+# Directories already exist: create_dirs (step 5) ran before this.
 _sudo cp "/tmp/redis-${PORT}.conf" "/etc/redis/cluster/redis-${PORT}.conf"
 _sudo chown redis:redis "/etc/redis/cluster/redis-${PORT}.conf"
 _sudo chmod 640 "/etc/redis/cluster/redis-${PORT}.conf"
@@ -1514,8 +1561,7 @@ _sudo() {
         sudo "$@"
     fi
 }
-_sudo mkdir -p "$REDIS_PREFIX/cluster/$PORT" "$REDIS_PREFIX/log"
-_sudo chown -R redis:redis "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
+# Directories and ownership already handled by create_dirs (step 5).
 _sudo systemctl daemon-reload
 _sudo systemctl enable "redis-$PORT"
 _sudo systemctl restart "redis-$PORT"
