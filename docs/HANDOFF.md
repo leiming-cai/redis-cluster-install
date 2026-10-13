@@ -9,14 +9,11 @@
 
 ## 一句话现状
 
-计划的 **Task 1-10 已完成并提交**（`cluster-config.sh` 665 行，spec 第 4 节的 9 步流程全部实现）。
-剩余 **Task 11-14**：Docker E2E、跑 E2E 修问题、文档、最终检查。
-主脚本末尾已无 `die "not implemented yet"` 占位。
-主脚本目前到「解析配置 + CLI + dry-run + 凭证收集（env 优先 + 交互回退）」，末尾留了一行占位：
+**计划的 14 个 Task 全部完成。** `cluster-config.sh` 约 700 行，spec 第 4 节的
+9 步流程全部实现；Docker 双节点 E2E 全绿（含反向 preflight 用例）；148 个单元测试通过。
 
-```
-(占位已删除 —— Task 7-10 实现了 preflight / 建目录 / 下发 / 启动 / 建集群)
-```
+**下一步**：分支尚未合并到 main（领先 30 个提交）。合并前建议在主仓库再跑一次全套测试。
+`finishing-a-development-branch` 的收尾流程尚未走。
 
 ---
 
@@ -45,6 +42,10 @@
 | 8 | 下发 `auth.conf` + `redis.conf` + systemd unit | `9eafa0e` |
 | 9 | 启动 + PING 验证 + 失败诊断 | `052aaa4` |
 | 10 | `redis-cli --cluster create` + 健康检查 | `8a71347` |
+| 11 | Docker 双节点 E2E + 两个 fixture Dockerfile | `f18302d` |
+| 12 | 跑通 E2E 并修掉它发现的缺陷 | `2eb4aee`（含 chown 缺陷） |
+| 13 | README + USAGE 文档 | `50e83bb` |
+| 14 | 最终集成检查 + 清理误提交文件 | `95e47ab` |
 
 ---
 
@@ -95,12 +96,11 @@ Task 11/12 的 E2E 是唯一能验证它们的手段。
 
 | 命令 | 预期结果 |
 |---|---|
-| `bats tests/lib/*.bats` | **105 通过 / 0 失败** |
-| `bats tests/cluster_config.bats` | **16 通过 / 0 失败** |
-| `bats tests/*.bats` | （与 lib 合计 **143 通过 / 0 失败**） |
-| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **143 通过 / 0 失败**（CI 调用方式） |
+| `bats tests/lib/*.bats tests/*.bats` | **148 通过 / 0 失败** |
+| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **148 通过 / 0 失败**（CI 调用方式） |
 | `bash tests/check_syntax.sh` | `TOTAL=30 FAIL=0` |
 | `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
+| `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 
 ---
 
@@ -123,10 +123,50 @@ docker run --rm -v "${wt}:/repo" -w /repo rc-control:bats bash -c "bats tests/cl
 |---|---|---|
 | `rc-control:bats` | **已构建，可直接用** | Ubuntu 22.04 + bats 1.2.1 + sshpass + redis-tools |
 | `rc-control:local` | 已构建 | 同上但**不含 bats** |
-| `rc-node:local` | ⚠️ **已丢失，需重建** | Ubuntu 22.04 + sshd + systemd + build-essential（Task 11 需要） |
+| `rc-node:local` | ❌ 已丢失，**且并不需要** | — |
 
-> `rc-node:local` 在 2026-10-13 接手时已不在本机，只剩 `rc-control:*`。
-> Task 11 开工前必须重建（走 `docker.m.daocloud.io` 镜像源）。
+### Task 11-12 新建的镜像（都在本机）
+
+| 镜像 | 用途 |
+|---|---|
+| `rc-e2e-node:local` | E2E 节点：Ubuntu 22.04 + sshd + systemd + build-essential |
+| `rc-e2e-control:local` | E2E 控制端：bash + sshpass + openssh-client + redis-tools |
+| `rc-e2e-runner:local` | **仅本机需要**：带静态 docker CLI，用来在容器里驱动上面的镜像 |
+
+> **`rc-node:local` 其实不是 Task 11 的前置** —— Task 11 自带
+> `Dockerfile.node.e2e`，直接从镜像源构建 `rc-e2e-node:local`，用不到那个丢失的镜像。
+> 之前 HANDOFF 把「重建 rc-node:local」列为前置是判断错了。
+
+### 在这台机器上跑 E2E 的方式
+
+宿主机**没有可用 bash**（Git Bash 不存在，`bash.exe` 是坏的 WSL shim），
+而 E2E 是 bash 脚本且要用 `docker` 编排容器。必须套一层：
+
+```powershell
+$wt="C:\Users\蔡雷鸣\.local\share\opencode\worktree\3e438c\cluster-config-script"
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
+  -v "${wt}:/repo" -e E2E_HOST_REPO="${wt}" `
+  rc-e2e-runner:local bash /repo/scripts/e2e-cluster-config.sh
+```
+
+`rc-e2e-runner` 的 Dockerfile 不在仓库里（`%TEMP%\opencode\Dockerfile.e2erunner`）。
+镜像丢失时用阿里云静态 docker CLI 重建：
+
+```dockerfile
+FROM docker.m.daocloud.io/library/ubuntu:22.04
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        ca-certificates curl bash coreutils grep gawk sed diffutils \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/d.tgz https://mirrors.aliyun.com/docker-ce/linux/static/stable/x86_64/docker-24.0.9.tgz \
+ && tar -xzf /tmp/d.tgz -C /tmp && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+ && rm -rf /tmp/docker /tmp/d.tgz
+```
+
+⚠️ **`docker.m.daocloud.io` 没有 `docker:cli` 镜像**（拉取报 502），所以只能自己构建。
+
+⚠️ **注意镜像里有什么**：跑 bats 用 `rc-control:bats`，跑 git 用宿主 PowerShell。
+**不要用 `rc-e2e-runner` 跑测试** —— 它既没有 bats 也没有 git，会报
+「0 个测试 0 个失败」和「git: command not found」，看着像通过其实什么都没做。
 
 > `rc-control:bats` 是 subagent 在临时目录里用 `FROM rc-control:local` + `apt-get install bats` 建的，
 > **Dockerfile 不在仓库里**。镜像若丢失，需重建：
@@ -224,22 +264,50 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
     `"$REDIS_CLI" -a "$CLUSTER_PASS"` 引用。已改为 `ping_instance` /
     `cluster_info_from` 两个 helper。
 
-### 一个已确认的既有 bug（未修，需要你拍板）
+### 已修复（Task 12 用 E2E 发现的）
 
-`lib/cluster.sh:19` 的 `is_cluster_healthy` 把 **`cluster_known_nodes >= 6` 写死了**，
-但 `lib/conf.sh` 接受 **5 个实例**的布局（`masters = (5+1)/2 = 3 >= 3`）。
+11. **父目录不 chown**（`2eb4aee`）：`create_dirs` 只 chown `/etc/redis/cluster`，
+    不管它的**父目录** `/etc/redis`。apt 装出来的是 `0770 redis:redis` 且带 setgid，
+    redis 用户一旦被重建（容器重建、从备份恢复）拿到新 uid，父目录还挂在旧 uid 上，
+    新 redis **无法穿越 0770 目录** —— 哪怕下面每个文件的归属都完全正确，
+    依然报 `Fatal error, can't open config file ...: Permission denied`。
+    这是最难查的一类：看起来一切正常，就是打不开。
+    **只有真实跑一遍才会暴露，148 个单元测试全都测不到**（只在 uid 变化时触发）。
+    `/var/lib/redis`、`/var/run/redis` 同理，已一并修。
 
-实测（`known_nodes=5` 时 `is_cluster_healthy` 返回假）：
+12. **`is_cluster_healthy` 写死 `known_nodes >= 6`**（`1df5075`，已修）：
+    但 `lib/conf.sh` 接受 5 实例布局（`ceil(5/2)=3`），那种集群报 `known_nodes:5`，
+    健康检查**永远过不了**。已改成可选入参、默认仍是 6（`status.sh` 行为不变），
+    `cluster-config.sh` 传 `CONF_TOTAL_INSTANCES`。
 
-| known_nodes | 结果 |
-|---|---|
-| 5（conf.sh 允许的最小布局） | **永远不健康** |
-| 6（标准布局） | 健康 |
-| 9 | 健康 |
+### E2E harness 自身踩过的坑（Task 11-12）
 
-后果：5 实例的集群会白等 5×3=15 秒，然后死于「health check failed」。
-**未修**，因为 `is_cluster_healthy` 是共享库（`status.sh` 也在用）且有既有测试，
-改语义需要单独决定：应该改成对比 `CONF_TOTAL_INSTANCES` 吗？
+13. **`docker run` 不加 `-i` 会丢弃 stdin**：`ssh_root ... bash -s <<EOF` 的
+    heredoc 根本到不了 ssh，远端收到空 stdin、exit 0、什么都没做。
+    叠加 `>/dev/null` 就是**完全静默的失败**，三步之后才以一个
+    指向错误方向的 preflight 报错现形。
+
+14. **`docker build -f` 与 `docker run -v` 的路径由不同方解析**：
+    build 的 `-f` 和 context 由 **CLI** 读（要容器侧路径），
+    `-v` 的源由 **daemon** 解析（要宿主侧路径）。混用会报
+    `unable to prepare context: path ... not found`。
+
+15. **`redis-cli -c` 不给 `-h/-p` 会连 `127.0.0.1:6379`**：node B 上根本没有这个实例
+    → Connection refused。上面那条 `SET` 同样失败却被 `>/dev/null` 藏了，
+    错误报在 `GET` 上、指向错误的命令。
+
+16. **`cluster nodes` 的主机名逗号在 `@bus-port` 之后**：
+    格式是 `<id> <ip:port@bus-port[,hostname]> <flags>`，
+    所以 `grep ",$IP:port@"` **永远匹配不到**。
+
+### 这一轮反复出现的一类错误
+
+**写下了一个自己从没执行过的假设。** 本轮至少 5 次：
+诊断探针漏写 `-v` 就宣布「路径可用」；`setpriv` 不存在却把「命令找不到」
+读成「文件不可读」；上面 14/16 两条；以及给反向 preflight 用例**没有断言前置条件**
+（`userdel` 因进程占用而失败、stderr 又被丢弃，于是用例以完全错误的方式「通过」）。
+
+这类错误 148 个单元测试一个都抓不到。**判断标准是：这条代码路径被真正执行过吗？**
 
 ### 待处理（审查已报告，未修）
 
@@ -261,10 +329,12 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
 
 ## 下一步具体动作
 
-1. 执行 **Task 11**：写 Docker E2E 脚本（`scripts/e2e-cluster-config.sh` + 两个 fixture Dockerfile）。
-   **前置：`rc-node:local` 镜像已丢失，先重建（走 `docker.m.daocloud.io` 镜像源）。**
-2. 执行 **Task 12**：跑 E2E，修发现的问题。**Task 7-10 的代码只有这一步能真正验证。**
-3. Task 13-14：文档与最终检查。
+1. **合并分支**：worktree 领先 main 约 30 个提交，合并前在主仓库跑一次全套测试
+   （`rc-control:bats` 跑 bats，宿主 PowerShell 跑 git）。
+2. 走 `finishing-a-development-branch` 收尾流程（尚未走过）。
+3. 主仓库 `D:\work\rediscluterproject` 有一个**与本任务无关的未提交改动**
+   （`docs/superpowers/plans/2026-10-13-redis-cluster-config-script.md`），
+   合并前先确认那是什么、要不要保留。
 
 ### 给下一个执行者的提醒
 
