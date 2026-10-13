@@ -1,4 +1,4 @@
-load '../setup'
+load 'setup'
 
 @test "install.sh --help prints usage and exits 0" {
     run bash "$REPO_ROOT/install.sh" --help

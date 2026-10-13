@@ -33,8 +33,8 @@ for f in lib/*.sh; do
 done
 
 echo
-echo "=== Test script syntax check ==="
-for f in tests/setup.bash tests/*.bats tests/lib/*.bats; do
+echo "=== Test support script syntax check ==="
+for f in tests/setup.bash; do
     TOTAL=$((TOTAL+1))
     if bash -n "$f" 2>"$TMP_ERR"; then
         echo "OK: $f"
@@ -43,6 +43,18 @@ for f in tests/setup.bash tests/*.bats tests/lib/*.bats; do
         sed 's/^/    /' "$TMP_ERR"
         FAIL=$((FAIL+1))
     fi
+done
+
+echo
+echo "=== Bats test files (NOT checked with bash -n) ==="
+# NOTE: .bats files use bats' `@test "name" { ... }` DSL, which is not valid
+# bash. Running `bash -n` on them reports "syntax error near unexpected
+# token '}'" for every file and drowns out real syntax failures.
+# They are validated by executing them with bats instead.
+for f in tests/*.bats tests/lib/*.bats; do
+    [ -e "$f" ] || continue
+    TOTAL=$((TOTAL+1))
+    echo "SKIP (bats DSL, run 'bats' to validate): $f"
 done
 
 rm -f "$TMP_ERR"

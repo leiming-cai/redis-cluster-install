@@ -403,7 +403,7 @@ render_and_push() {
         # Render locally, then SCP the file to the remote /tmp
         local local_tmpf
         local_tmpf=$(mktemp)
-        render_redis_conf "$CONF_TEMPLATE" "$p" "$CLUSTER_PASS" "node-${p}" "0.0.0.0" > "$local_tmpf"
+        render_redis_conf "$CONF_TEMPLATE" "$p" "$CLUSTER_PASS" "node-${p}" "0.0.0.0" "$REDIS_PREFIX" > "$local_tmpf"
         ssh_copy "$user" "$pass" "$host" "$port" "$local_tmpf" "/tmp/redis-${p}.conf" \
             || { rm -f "$local_tmpf"; die "scp redis-${p}.conf to $host failed"; }
         rm -f "$local_tmpf"
@@ -441,7 +441,7 @@ push_units() {
     for p in "${@:5}"; do
         local local_tmpf
         local_tmpf=$(mktemp)
-        render_systemd_unit "$SERVICE_TEMPLATE" "$p" "node-${p}" "$CLUSTER_PASS" > "$local_tmpf"
+        render_systemd_unit "$SERVICE_TEMPLATE" "$p" "node-${p}" "$CLUSTER_PASS" "$REDIS_PREFIX" > "$local_tmpf"
         ssh_copy "$user" "$pass" "$host" "$port" "$local_tmpf" "/tmp/redis-${p}.service" \
             || { rm -f "$local_tmpf"; die "scp redis-${p}.service to $host failed"; }
         rm -f "$local_tmpf"

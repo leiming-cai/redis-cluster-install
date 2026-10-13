@@ -8,15 +8,22 @@ Type=simple
 User=redis
 Group=redis
 EnvironmentFile=/etc/redis/cluster/auth.conf
-ExecStart=/opt/software/redis/bin/redis-server /etc/redis/cluster/redis-%PORT%.conf
-ExecStop=/bin/sh -c '/opt/software/redis/bin/redis-cli -a "$$REDIS_PASSWORD" -p %PORT% shutdown nosave || true'
+ExecStart=%REDIS_PREFIX%/bin/redis-server /etc/redis/cluster/redis-%PORT%.conf
+ExecStop=/bin/sh -c '%REDIS_PREFIX%/bin/redis-cli -a "$$REDIS_PASSWORD" -p %PORT% shutdown nosave || true'
 Restart=always
 RestartSec=3
 LimitNOFILE=10032
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis
+# These paths MUST match the directories used in redis.conf.template:
+#   cluster-config-file %REDIS_PREFIX%/cluster/%PORT%/nodes.conf
+#   logfile            %REDIS_PREFIX%/log/redis-%PORT%.log
+#   dir                /var/lib/redis/cluster/%PORT%
+# With ProtectSystem=strict every path not listed here is read-only, and
+# redis-server then aborts with "Can't open the log file: Read-only file
+# system". Verified by E2E run (see docs/VERIFICATION.md, D8).
+ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis %REDIS_PREFIX%/cluster %REDIS_PREFIX%/log
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes

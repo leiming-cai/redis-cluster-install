@@ -69,7 +69,7 @@ REMOTE
 
 # === Push redis.conf via scp ===
 local_tmpf=$(mktemp)
-render_redis_conf "$REPO_ROOT/config/redis.conf.template" "$NEW_PORT" "$CLUSTER_PASS" "node-${NEW_PORT}" "0.0.0.0" > "$local_tmpf"
+render_redis_conf "$REPO_ROOT/config/redis.conf.template" "$NEW_PORT" "$CLUSTER_PASS" "node-${NEW_PORT}" "0.0.0.0" "$REDIS_PREFIX" > "$local_tmpf"
 ssh_copy "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" "$local_tmpf" "/tmp/redis-${NEW_PORT}.conf" \
     || { rm -f "$local_tmpf"; die "scp redis.conf to $NEW_HOST failed"; }
 rm -f "$local_tmpf"
@@ -96,7 +96,7 @@ REMOTE
 
 # === Push systemd unit via scp ===
 local_tmpf=$(mktemp)
-render_systemd_unit "$REPO_ROOT/config/redis-cluster.service.template" "$NEW_PORT" "node-${NEW_PORT}" "$CLUSTER_PASS" > "$local_tmpf"
+render_systemd_unit "$REPO_ROOT/config/redis-cluster.service.template" "$NEW_PORT" "node-${NEW_PORT}" "$CLUSTER_PASS" "$REDIS_PREFIX" > "$local_tmpf"
 ssh_copy "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" "$local_tmpf" "/tmp/redis-${NEW_PORT}.service" \
     || { rm -f "$local_tmpf"; die "scp systemd unit to $NEW_HOST failed"; }
 rm -f "$local_tmpf"
@@ -120,10 +120,13 @@ rm -f "/tmp/redis-${PORT}.service"
 REMOTE
 
 # === Start the service ===
-ssh_run "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" bash -s "$NEW_PASS" "$NEW_PORT" <<'REMOTE'
+ssh_run "$NEW_USER" "$NEW_PASS" "$NEW_HOST" "$NEW_SSH_PORT" bash -s "$NEW_PASS" "$NEW_PORT" "$REDIS_PREFIX" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
 PORT="$2"
+# Must match the prefix install.sh used, otherwise the generated unit and
+# config point at different directories and redis cannot write its state.
+REDIS_PREFIX="${3:-/opt/software/redis}"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"
@@ -134,7 +137,8 @@ _sudo() {
     fi
 }
 _sudo mkdir -p "/var/lib/redis/cluster/${PORT}" "/var/run/redis/cluster/${PORT}"
-_sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis
+_sudo mkdir -p "$REDIS_PREFIX/cluster/${PORT}" "$REDIS_PREFIX/log"
+_sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
 _sudo systemctl daemon-reload
 _sudo systemctl enable "redis-${PORT}"
 _sudo systemctl restart "redis-${PORT}"
@@ -142,14 +146,18 @@ REMOTE
 
 # === Join the cluster (redis-cli --cluster add-node) ===
 # This is a SINGLE-LINE arg, safe to pass as a positional argument.
-ssh_run "$EXIST_USER" "$EXIST_PASS" "$EXIST_HOST" "$EXIST_SSH_PORT" bash -s "$EXIST_PASS" "$NEW_HOST" "$NEW_PORT" "$EXIST_HOST" "$EXIST_PORT" <<'REMOTE'
+ssh_run "$EXIST_USER" "$EXIST_PASS" "$EXIST_HOST" "$EXIST_SSH_PORT" bash -s "$EXIST_PASS" "$NEW_HOST" "$NEW_PORT" "$EXIST_HOST" "$EXIST_PORT" "$REDIS_PREFIX" <<'REMOTE'
 set -e
 SUDO_PASS="$1"
 NEW_HOST="$2"
 NEW_PORT="$3"
 EXIST_HOST="$4"
 EXIST_PORT="$5"
-REDIS_BIN=${REDIS_PREFIX:-/opt/software/redis}/bin
+# REDIS_PREFIX must be forwarded explicitly: $1..$5 are already taken by the
+# args above, so relying on the remote environment silently fell back to
+# /opt/software/redis even when the operator set a custom REDIS_PREFIX.
+REDIS_PREFIX="${6:-/opt/software/redis}"
+REDIS_BIN="$REDIS_PREFIX/bin"
 _sudo() {
     if sudo -n true 2>/dev/null; then
         sudo -n "$@"

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # uninstall.sh — Stop services, back up data, remove configs and binaries.
-# Default: dry-run, prints what would happen.
-# --force: actually delete.
+#
+# Usage:
+#   bash uninstall.sh              # dry-run (default): prints what would happen
+#   bash uninstall.sh --force      # actually stop, back up and delete
+#
+# Requires: bash 4+, sshpass, openssh-client.
+# Note: there is no --dry-run flag; dry-run is the behaviour when no flag is given.
 
 set -euo pipefail
 
@@ -17,7 +22,8 @@ FORCE=0
 case "${1:-}" in
     --force|-f) FORCE=1 ;;
     --help|-h)
-        sed -n '2,8p' "$0"
+        # Lines 2-9 are the usage comment block (kept in sync by hand).
+        sed -n '2,9p' "$0"
         exit 0
         ;;
 esac

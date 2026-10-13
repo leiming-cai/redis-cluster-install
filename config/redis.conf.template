@@ -11,7 +11,9 @@ tcp-keepalive 300
 
 # Cluster
 cluster-enabled yes
-cluster-config-file /opt/software/redis/cluster/%PORT%/nodes.conf
+# NOTE: must be listed in the systemd unit's ReadWritePaths, otherwise
+# ProtectSystem=strict makes it read-only and redis-server refuses to start.
+cluster-config-file %REDIS_PREFIX%/cluster/%PORT%/nodes.conf
 cluster-node-timeout 15000
 cluster-migration-barrier 1
 cluster-require-full-coverage yes
@@ -55,7 +57,10 @@ maxmemory-policy allkeys-lru
 
 # Logging
 loglevel notice
-logfile /opt/software/redis/log/redis-%PORT%.log
+# NOTE: must be listed in the systemd unit's ReadWritePaths, otherwise
+# ProtectSystem=strict makes it read-only and redis-server aborts with
+# "Can't open the log file: Read-only file system".
+logfile %REDIS_PREFIX%/log/redis-%PORT%.log
 
 # Slow log
 slowlog-log-slower-than 10000

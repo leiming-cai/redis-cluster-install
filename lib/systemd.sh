@@ -10,21 +10,27 @@ _sed_escape() {
     printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'
 }
 
-# render_systemd_unit TEMPLATE PORT NODE_NAME [PASSWORD]
-# Echoes rendered unit to stdout. Password optional (template may or may not reference it).
+# render_systemd_unit TEMPLATE PORT NODE_NAME [PASSWORD] [REDIS_PREFIX]
+# Echoes rendered unit to stdout. Password optional (template may or may not
+# reference it). REDIS_PREFIX defaults to /opt/software/redis and is expanded
+# into %REDIS_PREFIX%; it must match the prefix install.sh used, otherwise the
+# unit would point ExecStart/ReadWritePaths at the wrong directories.
 render_systemd_unit() {
     local template="$1"
     local port="$2"
     local node_name="$3"
     local password="${4:-}"
+    local redis_prefix="${5:-/opt/software/redis}"
     [ -f "$template" ] || { echo "systemd: template not found: $template" >&2; return 1; }
-    local port_e node_e pass_e
+    local port_e node_e pass_e prefix_e
     port_e=$(_sed_escape "$port")
     node_e=$(_sed_escape "$node_name")
     pass_e=$(_sed_escape "$password")
+    prefix_e=$(_sed_escape "$redis_prefix")
     sed -e "s|%PORT%|$port_e|g" \
         -e "s|%NODE_NAME%|$node_e|g" \
         -e "s|%PASSWORD%|$pass_e|g" \
+        -e "s|%REDIS_PREFIX%|$prefix_e|g" \
         "$template"
 }
 

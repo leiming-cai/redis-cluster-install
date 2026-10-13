@@ -2,7 +2,10 @@ load '../setup'
 load_lib prompt
 
 setup() {
-    REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
+    # REPO_ROOT is already computed at load time by ../setup.bash
+    # (tests/lib/prompt.bats is 2 levels below the repo root). Do NOT
+    # recompute it here — going up a single level lands on tests/, not the
+    # repo root, which broke load_lib.
     load_lib common
     load_lib prompt
     export PROMPT_NO_TTY=1

@@ -45,8 +45,15 @@ read_default() {
     local default="$2"
     local prompt_str="$prompt [$default]: "
     local reply=""
-    if ! _read_from prompt_str reply; then
-        return 1
+    # NOTE: "$default" must be forwarded as _read_from's 3rd argument —
+    # that is where the fallback is actually applied (see prompt.sh:34-36).
+    # Omitting it made an empty reply (bare Enter) return an empty string,
+    # which broke install.sh's SSH port/user defaults ("Bad port ''").
+    #
+    # On EOF (no input available at all) fall back to the default too, rather
+    # than returning an empty string that later breaks command construction.
+    if ! _read_from prompt_str reply "$default"; then
+        reply="$default"
     fi
     printf '%s' "$reply"
 }

@@ -154,14 +154,25 @@ assert_eq "cluster_known_nodes parses 7" "7" "$out"
 out=$(printf 'no_such_key_here\n' | cluster_known_nodes)
 assert_eq "cluster_known_nodes empty on missing" "" "$out"
 
-ret=$(printf 'cluster_state:ok\ncluster_slots_assigned:16384\n' | is_cluster_healthy; echo $?)
+ret=$(printf 'cluster_state:ok\ncluster_slots_assigned:16384\ncluster_slots_fail:0\ncluster_known_nodes:6\n' | is_cluster_healthy; echo $?)
 assert_eq "is_cluster_healthy ok+16384 -> 0" "0" "$ret"
 
-ret=$(printf 'cluster_state:ok\ncluster_slots_assigned:16000\n' | is_cluster_healthy; echo $?)
+ret=$(printf 'cluster_state:ok\ncluster_slots_assigned:16000\ncluster_slots_fail:0\ncluster_known_nodes:6\n' | is_cluster_healthy; echo $?)
 assert_eq "is_cluster_healthy ok+16000 -> 1" "1" "$ret"
 
-ret=$(printf 'cluster_state:fail\ncluster_slots_assigned:16384\n' | is_cluster_healthy; echo $?)
-assert_eq "is_cluster_healthy fail+16384 -> 1" "1" "$ret"
+ret=$(printf 'cluster_state:ok\ncluster_slots_assigned:16384\ncluster_slots_fail:0\ncluster_known_nodes:3\n' | is_cluster_healthy; echo $?)
+assert_eq "is_cluster_healthy too few known nodes -> 1" "1" "$ret"
+
+ret=$(printf 'cluster_state:ok\ncluster_slots_assigned:16384\ncluster_slots_fail:100\ncluster_known_nodes:6\n' | is_cluster_healthy; echo $?)
+assert_eq "is_cluster_healthy slots_fail>0 -> 1" "1" "$ret"
+
+# Transient cluster_state:fail right after `redis-cli --cluster create` is
+# tolerated by design (see lib/cluster.sh:11-18) as long as slots are complete.
+ret=$(printf 'cluster_state:fail\ncluster_slots_assigned:16384\ncluster_slots_fail:0\ncluster_known_nodes:6\n' | is_cluster_healthy; echo $?)
+assert_eq "is_cluster_healthy transient fail+16384 -> 0" "0" "$ret"
+
+ret=$(printf '' | is_cluster_healthy; echo $?)
+assert_eq "is_cluster_healthy empty input -> 1" "1" "$ret"
 
 out=$(build_create_command "mypass" "127.0.0.1:6379" "127.0.0.1:6380")
 assert_contains "build_create_command has redis-cli" "redis-cli" "$out"
