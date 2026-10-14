@@ -12,8 +12,9 @@
 **计划的 14 个 Task 全部完成。** `cluster-config.sh` 约 700 行，spec 第 4 节的
 9 步流程全部实现；Docker 双节点 E2E 全绿（含反向 preflight 用例）；148 个单元测试通过。
 
-**下一步**：分支尚未合并到 main（领先 30 个提交）。合并前建议在主仓库再跑一次全套测试。
-`finishing-a-development-branch` 的收尾流程尚未走。
+**下一步**：**已合并到 main**（`--no-ff`，main = `96737d2`），合并后在主仓库
+重跑了全套测试与 E2E，全部通过。worktree 与 feature 分支原样保留、内容一致，
+可随时手动清理。
 
 ---
 
@@ -320,21 +321,38 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
 
 ## 与主分支的关系
 
-- 主仓库 `D:\work\rediscluterproject` 在 `main` = `54438d8`
-- `main` 上已有：Docker E2E 的 10 个缺陷修复（`7a2b0fc`）+ spec 同步（`54438d8`）
-- worktree 分支领先 22 个提交，**尚未合并**
-- 建议全部 Task 完成后一次性 rebase/merge，并在主仓库跑一次全套测试
+- 主仓库 `D:\work\rediscluterproject`，分支 `main`，已包含全部 14 个 Task
+- 合并方式：`git merge --no-ff feature/cluster-config-script`（`54438d8` → `96737d2`）
+- 合并前用 `git merge-tree` 预检过，exit 0、无冲突标记；实际合并也确实干净
+- 合并后在主仓库重跑：`bats 148/0`、`check_syntax 30/0`、`validate_libs 50/0`、E2E 全绿
+- worktree 与 feature 分支**保留**在原处，内容与 main 一致
+
+### 合并时处理的一件事
+
+主仓库当时有一个未提交改动（`docs/superpowers/plans/...`，96 增 50 删）。
+先确认它的 blob hash（`7e1d95b`）与分支上已提交的版本**逐字节相同**，
+即属于重复劳动，丢弃后 `git merge` 才肯运行（git 会拒绝覆盖脏文件）。
+**没有丢失任何东西。**
 
 ---
 
 ## 下一步具体动作
 
-1. **合并分支**：worktree 领先 main 约 30 个提交，合并前在主仓库跑一次全套测试
-   （`rc-control:bats` 跑 bats，宿主 PowerShell 跑 git）。
-2. 走 `finishing-a-development-branch` 收尾流程（尚未走过）。
-3. 主仓库 `D:\work\rediscluterproject` 有一个**与本任务无关的未提交改动**
-   （`docs/superpowers/plans/2026-10-13-redis-cluster-config-script.md`），
-   合并前先确认那是什么、要不要保留。
+本轮工作已收尾，**没有遗留的实现任务**。可选的清理动作：
+
+1. 删除 worktree 与 feature 分支（内容已全部在 main 上，两者均未被本次改动）：
+   ```powershell
+   cd D:\work\rediscluterproject
+   git worktree remove "C:\Users\蔡雷鸣\.local\share\opencode\worktree\3e438c\cluster-config-script"
+   git worktree prune
+   git branch -d feature/cluster-config-script
+   ```
+   ⚠️ **顺序有讲究**：分支正被该 worktree 检出，必须先删 worktree 再删分支，
+   否则 `git branch -d` 会失败。
+2. 计划文档（`docs/superpowers/plans/...`）里的代码片段与仓库现状已有出入
+   （本轮修了计划中的多处错误）。若要让它成为可信参考，需要按仓库代码回改。
+3. spec §8 的 DoD 清单里，`tests/lib/preflight.bats` 计划要求存在，
+   实际从未创建 —— preflight 走真实 SSH，按设计只由 E2E 覆盖，没有单元测试。
 
 ### 给下一个执行者的提醒
 
