@@ -218,6 +218,118 @@ Proceed with <A_USER>@<A_HOST> and <B_USER>@<B_HOST>? [y/N]
 
 ---
 
+## 5.7 cluster-config.sh — 已装好 Redis 时的组网
+
+`install.sh` 负责从源码把 Redis 装起来。如果你**已经**在目标机器上装好了
+Redis 二进制和 `redis` 用户，可以跳过它，直接用 `cluster-config.sh` 组网。
+
+### 5.7.1 与 install.sh 的职责边界
+
+| | `install.sh` | `cluster-config.sh` |
+|---|---|---|
+| 编译安装 Redis | ✅ | ❌ |
+| 创建 `redis` 用户 | ✅ | ❌ |
+| 创建运行时目录 | ✅ | ✅ |
+| 渲染下发 `redis.conf` / unit | ✅ | ✅ |
+| 建集群、健康检查 | ✅ | ✅ |
+
+「❌」不是「不管」而是「只校验不创建」：脚本运行前会检查二进制和 `redis` 用户
+是否存在，缺失时列出具体缺哪几项并退出。
+
+**为什么目录由脚本创建**：Redis 在数据目录缺失时拒绝启动，把它放进运维检查表
+很容易漏。而 `mkdir -p` 幂等，重复执行只补齐缺失的部分。
+
+### 5.7.2 命令行
+
+```bash
+bash cluster-config.sh                       # 读 ./cluster.conf
+bash cluster-config.sh --config FILE         # 读指定文件
+bash cluster-config.sh --dry-run             # 只打印计划，不改任何东西
+bash cluster-config.sh --print-credentials   # 解析凭证并打印后退出
+bash cluster-config.sh --help
+```
+
+`--dry-run` 和 `--print-credentials` 都在**收集凭证之前或之后立即退出**，
+不会连接任何节点、不会做任何修改。
+
+### 5.7.3 执行流程（9 步）
+
+| 步 | 动作 |
+|---|---|
+| 1 | 解析 `cluster.conf`，缺键即报错并指出文件名 + 键名 |
+| 2 | 打印解析结果（每个节点组的 host、ssh_port、ports） |
+| 3 | 收集 SSH 凭证：环境变量优先，只对缺失项提问 |
+| 4 | 连通性 + 前置校验（二进制、`redis` 用户） |
+| 5 | 创建运行时目录并修正归属 |
+| 6 | 下发 `auth.conf`（`redis:redis` 0600） |
+| 7 | 渲染下发每实例的 `redis.conf` + systemd unit |
+| 8 | `systemctl enable` + `restart`，逐实例 PING 验证 |
+| 9 | `redis-cli --cluster create` + 健康检查（已健康则跳过 create） |
+
+### 5.7.4 配置文件格式
+
+见 `cluster.conf.example`（含逐项注释）。要点：
+
+- 解析器**只做键值切分，绝不执行文件内容**
+- `#` 只支持整行注释。值后面写 `# ...` 会**直接报错**而不是被吞掉 ——
+  密码里出现 `#` 是合法字符，静默截断比报错更危险
+- `redis_prefix` 必须与目标机器上的实际路径一致，否则 `redis.conf` 与 unit
+  会指向不同目录，在 `ProtectSystem=strict` 下导致 Redis 起不来
+- `ports` 每个元素和 `ssh_port` 都必须是 1-65535 的十进制整数，逗号分隔
+- 实例数下限：`replicas` 固定为 1，master 数 = `ceil(实例数 / 2)`，
+  而 `redis-cli --cluster create` 要求至少 3 个 master，因此**实例总数必须 ≥ 5**
+- 计数单位是「实例数」不是「节点组数」：标准布局是 2 个节点组共 6 个实例
+
+### 5.7.5 SSH 凭证从哪来
+
+每个节点组 `[node.X]` 对应一组环境变量，`X` 转为大写、非字母数字替换为 `_`：
+
+```
+NODE_<X>_SSH_USER    默认 root
+NODE_<X>_HOST        覆盖配置文件里的 host
+NODE_<X>_SSH_PORT    默认取配置文件的 ssh_port（22）
+NODE_<X>_SSH_PASS    无默认值，缺失时静默提问
+```
+
+优先级：环境变量 > 交互提问的默认值 > 报错。
+密码**没有**任何默认值 —— 密码唯一来源是环境变量或交互输入，
+配置文件里不存放密码。
+
+若没有终端可提问且缺少密码环境变量，脚本会指名报出该设哪个变量：
+
+```
+[ERROR] no terminal available to prompt for the SSH password of node group a;
+        set NODE_A_SSH_PASS to a non-empty value
+```
+
+### 5.7.6 幂等性
+
+重复执行是安全的：
+
+- 目录用 `mkdir -p`，只补齐缺失
+- 配置文件与 unit 每次重新渲染覆盖，实例会全部重启（数据不丢）
+- 集群已健康则跳过 `--cluster create`，打印 `Cluster already healthy — skipping create`
+
+归属也会被重新修正为 `redis:redis`。这一点在 `redis` 用户被重建过
+（容器重建、从备份恢复）之后尤其重要：此时 uid 会变，而 `apt` 装出来的
+`/etc/redis` 是 `0770 redis:redis` 且带 setgid 位 —— 只修正子目录是不够的，
+redis 会因为无法穿越父目录而报
+`Fatal error, can't open config file ...: Permission denied`，
+哪怕配置文件本身的归属完全正确。
+
+### 5.7.7 端到端测试
+
+```bash
+bash scripts/e2e-cluster-config.sh
+```
+
+需要 Docker。会在本地起两个容器模拟节点（真实 sshd + systemd），预置
+Redis 二进制与用户，然后跑完整流程并校验：6 实例 PING、16384 槽位覆盖、
+跨机读写、幂等重跑、删掉 `redis` 用户后 preflight 必须拒绝、以及杀主节点
+后副本必须被提升。
+
+---
+
 ## 6. 常见失败与处理
 
 ### 6.1 `ERROR: GCC 7+ required`

@@ -1,5 +1,6 @@
 # Force LF for shell scripts and templates — Windows host auto-converts LF→CRLF, which breaks Linux bash execution.
 *.sh             text eol=lf
+*.bash           text eol=lf
 *.bats           text eol=lf
 *.template       text eol=lf
 *.md             text eol=lf

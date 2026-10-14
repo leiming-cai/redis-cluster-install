@@ -17,10 +17,17 @@ render_redis_conf() {
 
     [ -f "$template" ] || { echo "config_gen: template not found: $template" >&2; return 1; }
 
-    # Use | as sed delimiter (values must not contain |).
-    # The prefix is passed through _sed_escape-equivalent handling: escape
-    # characters that are special on the replacement side of sed.
-    redis_prefix=$(printf '%s' "$redis_prefix" | sed -e 's/[&|\\]/\\&/g')
+    # Every value interpolated into the sed REPLACEMENT side must have &, |
+    # and \ escaped — otherwise a password containing them is silently
+    # mangled (a&b -> a%PASSWORD%b, a\b -> ab) or aborts the whole render
+    # (a|b -> "unknown option to `s'|"). cluster_password is arbitrary user
+    # input, so unlike gen_password output it is not restricted to [A-Za-z0-9].
+    # This mirrors _sed_escape in lib/systemd.sh so the two renderers agree.
+    port="$(printf '%s'    "$port"        | sed -e 's/[&|\\]/\\&/g')"
+    password="$(printf '%s' "$password"    | sed -e 's/[&|\\]/\\&/g')"
+    node_name="$(printf '%s' "$node_name"  | sed -e 's/[&|\\]/\\&/g')"
+    bind_addr="$(printf '%s' "$bind_addr"  | sed -e 's/[&|\\]/\\&/g')"
+    redis_prefix="$(printf '%s' "$redis_prefix" | sed -e 's/[&|\\]/\\&/g')"
 
     sed -e "s|%PORT%|$port|g" \
         -e "s|%PASSWORD%|$password|g" \

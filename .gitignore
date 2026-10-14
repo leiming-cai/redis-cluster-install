@@ -30,3 +30,6 @@ Thumbs.db
 
 # Stray debug / npm artifacts
 package-lock.json
+
+# Cluster config (contains cluster_password)
+cluster.conf

@@ -1,0 +1,13 @@
+# Test fixture: cluster instance config (minimal mirror of config/redis.conf.template)
+#
+# Deliberately NOT named redis.conf.template: that one belongs to
+# tests/lib/config_gen.bats, which asserts on the node_name directive this
+# minimal fixture does not carry. Two fixtures, two owners.
+port %PORT%
+bind %BIND_ADDR%
+requirepass %PASSWORD%
+masterauth %PASSWORD%
+cluster-enabled yes
+cluster-config-file %REDIS_PREFIX%/cluster/%PORT%/nodes.conf
+logfile %REDIS_PREFIX%/log/redis-%PORT%.log
+dir /var/lib/redis/cluster/%PORT%

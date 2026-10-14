@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# e2e-cluster-config.sh — two-node Docker validation of cluster-config.sh.
+#
+# Prerequisite: Redis is already "installed" on both nodes (binaries in
+# $REDIS_PREFIX/bin, redis user, directories). That is exactly the contract
+# cluster-config.sh expects, so the source build is intentionally skipped —
+# compiling Redis needs far more than the 2 vCPU / 2 GB this runs on.
+#
+# Usage: bash scripts/e2e-cluster-config.sh
+#
+# Covers: DoD1 (all instances PING), DoD2/3 (cluster check + info),
+# DoD4 (cross-machine read/write), DoD5 (kill a master, expect promotion),
+# DoD7 (idempotent re-run), plus a negative preflight case.
+
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Paths handed to `docker build -f` and `docker run -v` are resolved by the
+# DAEMON, not by whatever machine this script happens to run on. When the
+# script runs inside a runner container (the repo's host has no usable bash),
+# REPO_ROOT is that container's view of the repo, which the daemon cannot
+# resolve. Set E2E_HOST_REPO to the daemon-visible path in that case.
+HOST_REPO="${E2E_HOST_REPO:-$REPO_ROOT}"
+
+WORK="$(mktemp -d)"
+NET=rc-cfg-net
+PASS='E2eClusterPw'
+NODE_PW='TestPw123!'
+PREFIX=/opt/software/redis
+
+log()  { printf '\n=== %s ===\n' "$*"; }
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+cleanup() {
+    docker rm -f e2e-node-a e2e-node-b >/dev/null 2>&1 || true
+    docker network rm "$NET"   >/dev/null 2>&1 || true
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+command -v docker >/dev/null || fail "docker not found"
+
+log "Building images"
+# `docker build` reads the Dockerfile AND tars the context using the CLI, so
+# these must be paths visible to whoever runs this script (REPO_ROOT).
+# `docker run -v` is different: the DAEMON resolves the source, which is why
+# that one needs HOST_REPO. Conflating the two breaks the build with
+# "unable to prepare context: path ... not found".
+docker build -q -f "$REPO_ROOT/tests/fixtures/Dockerfile.node.e2e"   -t rc-e2e-node:local   "$REPO_ROOT" >/dev/null
+docker build -q -f "$REPO_ROOT/tests/fixtures/Dockerfile.control.e2e" -t rc-e2e-control:local "$REPO_ROOT" >/dev/null
+
+log "Starting nodes"
+docker network create "$NET" >/dev/null
+for n in a b; do
+    docker rm -f "e2e-node-$n" >/dev/null 2>&1 || true
+    docker run -d --name "e2e-node-$n" --network "$NET" --hostname "node-$n" \
+        --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+        rc-e2e-node:local >/dev/null
+done
+sleep 20
+
+A_IP="$(docker run --rm --network "$NET" rc-e2e-control:local \
+    getent hosts node-a | awk '{print $1}')"
+B_IP="$(docker run --rm --network "$NET" rc-e2e-control:local \
+    getent hosts node-b | awk '{print $1}')"
+[ -n "$A_IP" ] && [ -n "$B_IP" ] || fail "could not resolve node IPs"
+log "node-a=$A_IP node-b=$B_IP"
+
+# Every remote command runs in a throwaway control container joined to the
+# same network. The password goes in through SSHPASS, never argv.
+#
+# -i is REQUIRED, not cosmetic: without it docker discards stdin, so a
+# `bash -s <<EOF` heredoc would never reach ssh and the remote script would
+# receive an empty stdin and exit 0 having done nothing.
+ssh_root() {
+    local host="$1"; shift
+    docker run --rm -i --network "$NET" -e SSHPASS="$NODE_PW" rc-e2e-control:local \
+        sshpass -e ssh -o StrictHostKeyChecking=no \
+                  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+                  root@"$host" "$@"
+}
+
+# run_config — run cluster-config.sh from a control container against the
+# current nodes. Usage: run_config LOGFILE [extra args...]
+#
+# cluster.conf travels as an environment variable rather than a bind mount:
+# a mount source must be a path the daemon can see, and WORK lives in this
+# script's own filesystem, which the daemon cannot (see HOST_REPO above).
+run_config() {
+    local logfile="$1"; shift
+    docker run --rm --network "$NET" \
+        -e PROMPT_NO_TTY=1 \
+        -e NODE_A_SSH_USER=root -e NODE_A_HOST="$A_IP" -e NODE_A_SSH_PORT=22 -e NODE_A_SSH_PASS="$NODE_PW" \
+        -e NODE_B_SSH_USER=root -e NODE_B_HOST="$B_IP" -e NODE_B_SSH_PORT=22 -e NODE_B_SSH_PASS="$NODE_PW" \
+        -e CLUSTER_CONF \
+        -v "$HOST_REPO:/repo" \
+        rc-e2e-control:local bash -c '
+            set -e
+            mkdir -p /work
+            printf "%s\n" "$CLUSTER_CONF" > /work/cluster.conf
+            exec bash /repo/cluster-config.sh --config /work/cluster.conf "$@"
+        ' _ "$@" 2>&1 | tee "$logfile"
+    return "${PIPESTATUS[0]}"
+}
+
+log "Pre-provisioning nodes (binaries, redis user, directories)"
+# NOTE: nodes must be addressed by IP, not hostname — CLUSTER MEET cannot
+# resolve container hostnames in this network.
+provision() {
+    local host="$1" out rc=0
+    out="$(ssh_root "$host" bash -s 2>&1 <<PRE
+set -e
+export DEBIAN_FRONTEND=noninteractive
+# apt-get update against the public archive fails intermittently from here
+# ("Clearsigned file isn't valid, got 'NOSPLIT'"), usually after a few of
+# these containers have hammered it. Retry rather than fail the whole run.
+_n=1
+until apt-get update -qq; do
+    if [ "\$_n" -ge 3 ]; then
+        echo "provision: apt-get update failed \$_n times" >&2
+        exit 1
+    fi
+    echo "provision: apt-get update attempt \$_n failed, retrying" >&2
+    _n=\$((_n + 1))
+    sleep 5
+done
+apt-get install -y -qq --no-install-recommends redis-server redis-tools
+mkdir -p $PREFIX/bin $PREFIX/cluster $PREFIX/log /etc/redis/cluster \\
+         /var/lib/redis/cluster /var/run/redis/cluster
+cp -f "\$(command -v redis-server)" $PREFIX/bin/redis-server
+cp -f "\$(command -v redis-cli)"    $PREFIX/bin/redis-cli
+id redis >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin redis
+systemctl stop redis-server 2>/dev/null || true
+systemctl disable redis-server 2>/dev/null || true
+chown -R redis:redis /etc/redis /var/lib/redis /var/run/redis $PREFIX/cluster $PREFIX/log
+# Prove the preconditions cluster-config.sh checks actually hold, so a
+# provisioning failure surfaces here instead of as a confusing preflight
+# error three steps later.
+[ -x "$PREFIX/bin/redis-server" ] || { echo "provision: redis-server binary missing" >&2; exit 1; }
+[ -x "$PREFIX/bin/redis-cli" ]    || { echo "provision: redis-cli binary missing" >&2; exit 1; }
+id redis >/dev/null 2>&1          || { echo "provision: redis user missing" >&2; exit 1; }
+PRE
+    )" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf '%s\n' "$out" >&2
+        fail "pre-provisioning $host failed (exit $rc)"
+    fi
+}
+provision "$A_IP"
+provision "$B_IP"
+log "Pre-provisioning done"
+
+log "Writing cluster.conf"
+cat > "$WORK/cluster.conf" <<CONF
+redis_prefix     = $PREFIX
+cluster_password = $PASS
+bind_addr        = 0.0.0.0
+
+[node.a]
+host     = $A_IP
+ssh_port = 22
+ports    = 6379,6380,6381
+
+[node.b]
+host     = $B_IP
+ssh_port = 22
+ports    = 6382,6383,6384
+CONF
+
+# Exported so `docker run -e CLUSTER_CONF` forwards it by name, keeping the
+# multi-line value out of any shell word-splitting or quoting path.
+export CLUSTER_CONF="$(cat "$WORK/cluster.conf")"
+
+log "Running cluster-config.sh"
+run_config "$WORK/install.log" || fail "cluster-config.sh exited non-zero"
+grep -q "Redis Cluster READY" "$WORK/install.log" || fail "cluster-config.sh did not print READY"
+
+log "DoD1: all 6 instances PING"
+for spec in "$A_IP:6379" "$A_IP:6380" "$A_IP:6381" \
+            "$B_IP:6382" "$B_IP:6383" "$B_IP:6384"; do
+    out="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -h ${spec%:*} -p ${spec#*:} PING" | tr -d '\r')"
+    [ "$out" = "PONG" ] || fail "PING $spec -> '$out'"
+    echo "  OK $spec"
+done
+
+log "DoD2/3: cluster check + info"
+ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --cluster check $A_IP:6379" | grep -E "All 16384 slots covered"
+ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -h $A_IP -p 6379 cluster info" \
+    | grep -E "cluster_state:ok|cluster_slots_assigned:16384|cluster_known_nodes:6"
+
+log "DoD4: cross-machine read/write"
+# -h and -p are mandatory here: `redis-cli -c` without them talks to
+# 127.0.0.1:6379, which on node B is not a cluster instance at all (B runs
+# 6382-6384) and the command fails with "Connection refused". -c then follows
+# the MOVED redirection to whichever node actually owns the slot.
+# --no-auth-warning silences the "Using a password with '-a'" notice so it
+# cannot be mistaken for command output.
+ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6379 -c SET e2e:key from-A" >/dev/null \
+    || fail "SET e2e:key on A failed"
+sleep 1
+v="$(ssh_root "$B_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $B_IP -p 6382 -c GET e2e:key" | tr -d '\r')"
+[ "$v" = "from-A" ] || fail "B GET -> '$v'"
+echo "  A->B OK"
+
+ssh_root "$B_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $B_IP -p 6382 -c SET e2e:key2 from-B" >/dev/null \
+    || fail "SET e2e:key2 on B failed"
+sleep 1
+v="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 -c GET e2e:key2" | tr -d '\r')"
+[ "$v" = "from-B" ] || fail "A GET -> '$v'"
+echo "  B->A OK"
+
+log "DoD7: idempotent re-run"
+run_config "$WORK/rerun.log" || fail "re-run exited non-zero"
+grep -q "already healthy" "$WORK/rerun.log" || fail "re-run did not skip cluster create"
+echo "  idempotency OK"
+
+# --- negative preflight -------------------------------------------------
+# The remote preflight script reports missing prerequisites by echoing
+# MISSING_* markers and exiting 0, so the ONLY way to notice is to inspect
+# its output. An earlier version of cluster-config.sh captured the report and
+# never looked at it, which made preflight a no-op: a node with no Redis
+# binaries and no redis user was reported as passing. This case is the
+# regression guard for exactly that.
+log "Preflight rejects a node whose redis user is missing"
+# -f is required: the redis instances are running AS this user, and plain
+# `userdel` refuses with "user redis is currently used by process N". With
+# the user left in place, preflight would correctly pass and this case would
+# assert nothing at all — a green result for entirely the wrong reason.
+ssh_root "$B_IP" "userdel -f redis" || fail "could not delete the redis user on B"
+if ssh_root "$B_IP" "id -u redis" >/dev/null 2>&1; then
+    fail "the redis user still exists on B; this case would prove nothing"
+fi
+echo "  redis user removed from B"
+rc=0
+run_config "$WORK/preflight.log" >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "preflight passed even though the redis user was deleted"
+grep -q "MISSING_USER" "$WORK/preflight.log" \
+    || fail "preflight failed without reporting MISSING_USER; log:
+$(cat "$WORK/preflight.log")"
+echo "  rejected as expected: $(grep -m1 MISSING_USER "$WORK/preflight.log")"
+
+log "Restoring the redis user and re-verifying"
+ssh_root "$B_IP" "useradd -r -s /usr/sbin/nologin redis" >/dev/null
+run_config "$WORK/recover.log" || fail "could not recover after restoring the redis user"
+echo "  recovered"
+
+log "DoD5: kill a master, expect promotion"
+# `cluster nodes` prints "<id> <ip:port@bus-port[,hostname]> <flags> ...".
+# The address is field 2 and the comma (when a hostname is shown) comes AFTER
+# the @bus-port, so matching on ",$IP:port@" never hits anything. Match the
+# address with index() — a literal substring test, not a regex where the dots
+# in the IP would be wildcards.
+victim_id="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6379 cluster nodes" \
+    | awk -v a="$A_IP:6379@" 'index($2, a) {print $1; exit}')"
+[ -n "$victim_id" ] || fail "could not find the victim's node id"
+echo "  victim node id=$victim_id"
+ssh_root "$A_IP" "systemctl stop redis-6379"
+promoted=0
+for _ in $(seq 1 12); do
+    sleep 5
+    if ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 cluster nodes" \
+        | awk -v v="$victim_id" '$1==v && $3 ~ /master/ {found=1} END{exit !found}'; then
+        promoted=1
+        break
+    fi
+done
+[ "$promoted" -eq 1 ] || fail "replica was not promoted within 60s"
+echo "  promotion OK"
+
+ssh_root "$A_IP" "systemctl start redis-6379"
+sleep 8
+ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 cluster info" | grep "cluster_state:ok"
+
+log "E2E PASSED"
