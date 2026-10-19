@@ -303,27 +303,42 @@ echo "  redis uid changed $old_uid -> $new_uid (the dangling-parent case is live
 run_config "$WORK/recover.log" || fail "could not recover after restoring the redis user"
 echo "  recovered"
 
-log "DoD5: kill a master, expect promotion"
-# `cluster nodes` prints "<id> <ip:port@bus-port[,hostname]> <flags> ...".
-# The address is field 2 and the comma (when a hostname is shown) comes AFTER
-# the @bus-port, so matching on ",$IP:port@" never hits anything. Match the
-# address with index() — a literal substring test, not a regex where the dots
-# in the IP would be wildcards.
-victim_id="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6379 cluster nodes" \
-    | awk -v a="$A_IP:6379@" 'index($2, a) {print $1; exit}')"
+log "DoD5: kill a master, expect its replica to be promoted"
+# `cluster nodes` fields:
+#   $1 id   $2 ip:port@cport[,hostname]   $3 flags   $4 master-id   ...
+# Field 4 is the master id (all zeros on a master), so `$4==V` uniquely
+# identifies V's replica. That lookup MUST happen before the kill -- the
+# replica is the object we are going to watch.
+#
+# The previous version polled for `$1==V && $3 ~ /master`, which cannot detect
+# anything: V is already a master before it is killed, and once it dies its
+# line merely gains a `fail` flag, so `$3` still contains "master". The
+# condition was true the instant `systemctl stop` returned. It was green for
+# entirely the wrong reason. Polling the replica's flags is the check that
+# means what it claims to mean.
+#
+# index(), not a regex: the dots in an IP would otherwise be wildcards.
+nodes_of() {
+    ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning \
+              -h $A_IP -p 6380 cluster nodes"
+}
+
+victim_id="$(nodes_of | awk -v a="$A_IP:6379@" 'index($2, a) {print $1; exit}')"
 [ -n "$victim_id" ] || fail "could not find the victim's node id"
-echo "  victim node id=$victim_id"
+replica_id="$(nodes_of | awk -v v="$victim_id" '$4==v {print $1; exit}')"
+[ -n "$replica_id" ] || fail "no node reports master id $victim_id"
+echo "  victim node id=$victim_id  replica node id=$replica_id"
+
 ssh_root "$A_IP" "systemctl stop redis-6379"
 promoted=0
 for _ in $(seq 1 12); do
     sleep 5
-    if ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 cluster nodes" \
-        | awk -v v="$victim_id" '$1==v && $3 ~ /master/ {found=1} END{exit !found}'; then
+    if nodes_of | awk -v r="$replica_id" '$1==r && $3 !~ /(slave|replica)/ {found=1} END{exit !found}'; then
         promoted=1
         break
     fi
 done
-[ "$promoted" -eq 1 ] || fail "replica was not promoted within 60s"
+[ "$promoted" -eq 1 ] || fail "replica $replica_id was not promoted within 60s"
 echo "  promotion OK"
 
 ssh_root "$A_IP" "systemctl start redis-6379"
