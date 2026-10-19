@@ -90,10 +90,12 @@ Reading the configuration file, at line 58
 Can't open the log file: Read-only file system
 ```
 
-systemd 单元只声明
+systemd 单元的 `ReadWritePaths=` 当时只列了 `/var/lib/redis`、`/var/log/redis`、
+`/var/run/redis` 三条，缺了 `redis.conf` 实际写入的 `%REDIS_PREFIX%` 路径
+（下面展示的是修复后的现行形式）：
 
 ```
-ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis
+ReadWritePaths=-/var/lib/redis -/var/log/redis -/var/run/redis -%REDIS_PREFIX%/cluster -%REDIS_PREFIX%/log
 ```
 
 而 `redis.conf` 把 `cluster-config-file` 与 `logfile` 放在
@@ -105,6 +107,19 @@ ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis
 并让 `redis.conf` / unit 的路径都从 `%REDIS_PREFIX%` 占位符渲染，与 `REDIS_PREFIX` 环境变量保持一致。
 
 **验证**：修复后 `All 6 instances responding to PING`。
+
+> **后补的一条（与 D8 不是同一个问题）**：现行形式里每一项前面的 `-` 是
+> systemd 的「**该路径不存在就忽略**」标记。没有 `-` 的条目是硬性要求 ——
+> 路径一旦缺失，单元直接以 `status=226/NAMESPACE` 启动失败，redis-server
+> 根本没机会运行。`/var/log/redis` 虽然被列在单元里，但仓库里**没有任何代码
+> 创建它**（`cluster-config.sh` 的 `create_dirs` 不建，`install.sh` 的源码编译
+> 路径也不建），所以在没有装过发行版 redis 包的机器上，单元会在 redis-server
+> 启动之前就死掉。Debian/Ubuntu 自己的 `redis-server.service` 五项也全带 `-`，
+> 原因相同。
+>
+> 这与 D8 是**两个不同的问题**：D8 是「**该列的路径没列**」，
+> 这条是「**列了，但根本没人创建**」。缺陷、触发条件与修法都不一样。
+> 详见 `docs/HANDOFF.md` 的已知问题记录与提交 `32ac923`。
 
 ---
 
@@ -355,7 +370,7 @@ dry-run 模式（不给参数）确认不会误删，服务保持 active。
 | 文件 | 缺陷 |
 |------|------|
 | `lib/prompt.sh` | D1 |
-| `config/redis-cluster.service.template` | D8 |
+| `config/redis-cluster.service.template` | D8（+ 后续 `32ac923`：五项加 `-` 前缀） |
 | `config/redis.conf.template` | D8（`%REDIS_PREFIX%` 占位符） |
 | `lib/config_gen.sh` | D8（支持 `%REDIS_PREFIX%`） |
 | `lib/systemd.sh` | D8（支持 `%REDIS_PREFIX%`） |

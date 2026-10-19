@@ -325,10 +325,19 @@ redis 会因为无法穿越父目录而报
 bash scripts/e2e-cluster-config.sh
 ```
 
-需要 Docker。会在本地起两个容器模拟节点（真实 sshd + systemd），预置
-Redis 二进制与用户，然后跑完整流程并校验：6 实例 PING、16384 槽位覆盖、
-跨机读写、幂等重跑、删掉 `redis` 用户后 preflight 必须拒绝、以及杀主节点
-后副本必须被提升。
+需要 Docker。会在本地起两个容器模拟节点（真实 sshd + systemd），基于官方
+`redis:8` 镜像，然后跑完整流程并校验：6 实例 PING、16384 槽位覆盖、跨机读写、
+幂等重跑、删掉 `redis` 用户后 preflight 必须拒绝、以及杀主节点后**其副本**必须
+被提升。
+
+节点与控制机都跑真实 Redis 8，脚本会先断言版本，不是 8 直接失败 —— 否则换回
+旧底包时这套测试依然会全绿，却什么 Redis 8 的行为都没验证。
+
+镜像源可通过环境变量切换：
+
+```bash
+E2E_REGISTRY=docker.1ms.run/library bash scripts/e2e-cluster-config.sh
+```
 
 ---
 
@@ -557,8 +566,16 @@ LimitNOFILE=10032                                # 取代 redis.conf 里的 ulim
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis
+ReadWritePaths=-/var/lib/redis -/var/log/redis -/var/run/redis -%REDIS_PREFIX%/cluster -%REDIS_PREFIX%/log
 ```
+
+`ReadWritePaths=` 每一项前面的 `-` 是 systemd 的「**路径不存在就忽略**」标记，
+不能去掉。没有 `-` 的条目是硬性要求：该路径一旦缺失，单元会直接以
+`status=226/NAMESPACE` 启动失败，redis-server 根本没机会运行。
+仓库里**没有任何代码创建 `/var/log/redis`**（`cluster-config.sh` 的
+`create_dirs` 不建，`install.sh` 的源码编译路径也不建），
+所以在没装过发行版 redis 包的机器上，这一项必须带 `-`。
+Debian/Ubuntu 自己的 `redis-server.service` 五项也全带 `-`，原因相同。
 
 `redis.conf` 里**没有** `ulimit nofile` —— Redis 8 会把它当未解析配置直接拒绝启动，
 文件描述符上限改由 systemd 的 `LimitNOFILE` 提供。
@@ -629,6 +646,9 @@ bash tests/validate_libs.sh
 
 # Docker 端到端（需要 docker + sshpass）
 bash scripts/smoke-test.sh
+
+# cluster-config.sh 的端到端（需要 docker；会拉取 redis:8）
+bash scripts/e2e-cluster-config.sh
 ```
 
 > ⚠️ `scripts/smoke-test.sh` **不调用 `install.sh`**。
