@@ -63,7 +63,8 @@ redis，每次运行都打 Ubuntu 归档，并为此加了 3 次重试。这不�
 ## 4. Dockerfile.node.e2e
 
 ```dockerfile
-FROM docker.m.daocloud.io/library/redis:8
+ARG REGISTRY=docker.m.daocloud.io/library
+FROM ${REGISTRY}/redis:8
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -133,10 +134,23 @@ redis 镜像声明了 `VOLUME /data`。节点容器不挂载它，docker 会为�
 一个匿名卷。功能无影响，但会在 `docker volume ls` 里留下 6 个无名卷。
 **要求**在节点容器的 `docker run` 上加 `--tmpfs /data`，使 DoD-8 可验证。
 
+### 4.5 driver 侧如何传镜像源
+
+`scripts/e2e-cluster-config.sh` 的两处 `docker build`（现有第 50-51 行）
+改为透传环境变量：
+
+```bash
+REGISTRY="${E2E_REGISTRY:-docker.m.daocloud.io/library}"
+docker build -q --build-arg REGISTRY="$REGISTRY" -f ... -t ... .
+```
+
+沿用既有的 `E2E_HOST_REPO` 命名风格（`E2E_` 前缀 = 仅 E2E 使用的旋钮）。
+
 ## 5. Dockerfile.control.e2e
 
 ```dockerfile
-FROM docker.m.daocloud.io/library/redis:8
+ARG REGISTRY=docker.m.daocloud.io/library
+FROM ${REGISTRY}/redis:8
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -299,17 +313,67 @@ esac
 | R3 | Redis 8 行为差异导致 E2E 首次跑即红 | 真实发现 | 摆证据再定，**不擅自改模板** |
 | R4 | Redis 8 官方镜像体积较大（~150MB） | 构建变慢 | 可接受 |
 
-### 9.1 R2 的退路
+### 9.1 R2 的退路：镜像源做成可覆盖的构建参数
 
-宿主无法直连 Docker Hub（见 `Dockerfile.node.e2e:3` 的既有记载）。若
-`docker.m.daocloud.io/library/redis:8` 不可用，按以下顺序退：
+宿主无法直连 Docker Hub（`registry-1.docker.io` 实测超时），必须走镜像源。
+因此**镜像前缀不写死**，而是做成 build arg：
 
-1. 换用 `redis:8.0` / `redis:8.2` 等更早的确定存在的 tag（仍属 Redis 8）
-2. 从任一可达源导入镜像到本地并 `docker tag`
+```dockerfile
+ARG REGISTRY=docker.m.daocloud.io/library
+FROM ${REGISTRY}/redis:8
+```
+
+调用侧：
+
+```bash
+docker build --build-arg REGISTRY=docker.1ms.run/library -f ... -t ... .
+```
+
+换源改一个参数，不必翻文件找硬编码的域名。
+
+#### 2026-10-19 实测结果
+
+| 镜像源 | 探测 `/v2/` | 结论 |
+|---|---|---|
+| `docker.m.daocloud.io` | 401 | ✅ 可用（401 是未认证时的正常响应） |
+| `docker.1ms.run` | 401 | ✅ 可用 |
+| `docker.xuanyuan.me` | 401 | ✅ 可用 |
+| `docker.1panel.live` | 200 | ✅ 可用 |
+| `mirror.baidubce.com` | 连接失败 | ❌ 已失效，不要用 |
+| `registry-1.docker.io` | 超时 | ❌ 宿主不可达 |
+
+默认仍用 `docker.m.daocloud.io`（仓库既有约定）。按上表顺序退。
+
+> **401 是成功，不是失败。** 任何 Docker registry 在 `/v2/` 未带认证时都返回
+> 401。首次探测时用 PowerShell 测，把它误判成了不可达 —— 探测 registry
+> 可用性时**必须区分 401 与连接失败**，二者含义完全相反。
+
+#### 若所有镜像源都不可用
+
+`redis:8` 的 tag 也可退到更早的确定存在的 `redis:8.0` / `redis:8.2`
+（仍属 Redis 8），或从任一可达源导入后 `docker tag` 到本地。
 
 **不得**退到 Redis 6 或 7 —— 那会让本设计失去意义。
 
-### 9.2 R3 的具体候选
+### 9.2 R2b：apt 源无需备选
+
+镜像构建期会跑 `apt-get update`（装 `openssh-server` / `systemd` / `sudo`）。
+实测 Debian bookworm 源全部可达，**无需做镜像切换**：
+
+| apt 源 | 状态 | 延迟 |
+|---|---|---|
+| `deb.debian.org`（官方） | ✅ | 385 ms |
+| `mirrors.aliyun.com` | ✅ | 280 ms |
+| `mirrors.cloud.tencent.com` | ✅ | 286 ms |
+| `mirrors.tuna.tsinghua.edu.cn` | ✅ | 306 ms |
+| `mirrors.ustc.edu.cn` | ✅ | 433 ms |
+| `mirrors.huaweicloud.com` | ✅ | 285 ms |
+
+保持官方源默认。若将来 `apt-get update` 出现超时/签名错误
+（上一轮 Ubuntu 归档曾报 `Clearsigned file isn't valid, got 'NOSPLIT'`），
+再切 `sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources`。
+
+### 9.3 R3 的具体候选
 
 以下是已知可能出问题、但**未经确认**的点。若 E2E 报红且指向这些，属真实发现：
 
