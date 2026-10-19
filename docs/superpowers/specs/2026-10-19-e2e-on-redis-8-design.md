@@ -109,19 +109,28 @@ CMD ["/sbin/init"]
 
 ### 4.2 为什么必须清空 ENTRYPOINT
 
-官方 redis 镜像的 `ENTRYPOINT` 是 `/usr/local/bin/docker-entrypoint.sh`（实测存在）。
-它对非 `redis-server` 的首参会走 `exec "$@"` 分支，理论上 `/sbin/init` 能透传。
-但**不能依赖这个推断**：entrypoint 的分支随版本变化，且一旦它判定需要以
-`redis` 用户运行（`id -u` 为 0 时），systemd 就会以 `redis` 身份启动 ——
-那会让 `systemctl` 完全失效。显式 `ENTRYPOINT []` 把这个变量消灭掉。
+**初稿的理由是错的，已更正。** 初稿写「镜像内没有 gosu 也没有 su-exec，所以
+`--user redis` 是唯一可行路径，entrypoint 在场会让 systemd 以 redis 身份启动」。
 
-**实测补充**：`redis:8` 镜像内**既没有 `gosu` 也没有 `su-exec`**
-（`command -v` 两者皆无）。这意味着「靠 entrypoint 自动降权到 redis 用户」
-和「显式调 `gosu redis`」**两条路都不通** —— 清空 ENTRYPOINT 后由
-`docker run --user redis` 决定身份，是唯一可行路径。这反过来印证了
-`ENTRYPOINT []` 不是可选项。
+**实测证伪**（2026-10-19）：
 
-镜像自带 `redis` 用户，实测 `uid=999(redis) gid=999(redis)`。
+- 镜像内**确实**没有 `gosu` / `su-exec`，但**有 `/usr/bin/setpriv`**，而
+  entrypoint 的降权机制正是它：
+  `SETPRIV="/usr/bin/setpriv --reuid redis --regid redis --clear-groups"`。
+  从「两个工具不存在」推断出「降权不可用」是错的。
+- 降权路径以 `CMD[0]` 解析到 `/usr/local/bin/redis-server` 为前提。本 fixture 的
+  `CMD` 是 `/sbin/init`，**该分支永远不会触发**。
+- base **没有设置 `USER`**（`.Config.User` 为空），而 `--user` 在本仓库中
+  从未被传入 —— 「systemd 会以 redis 身份启动」不可能发生。
+  `--user redis` 那套说法来自一份**已被废弃**的设计（那个设计里容器直接跑
+  redis-server）。本 fixture 里容器跑 `/sbin/init`，redis 单元由 systemd 以
+  `User=redis` 启动。
+
+**真正成立的理由**（实测）：entrypoint 在 `exec "$@"` 之前无条件执行
+`umask 0077`。清空 ENTRYPOINT 后，实测容器内 `umask` 为 `0022`，
+`ps -p 1` 为 `systemd`。差别很小，但 PID 1 及其所有子进程都会继承这个 umask。
+
+结论不变：**`ENTRYPOINT []` 仍然要做**，只是理由换了。
 
 ### 4.3 systemd 装在 Debian trixie 上 —— **已实测通过**
 
@@ -135,11 +144,17 @@ sshd 监听 0.0.0.0:22 且可从同网络的另一容器 SSH 登录。
 原先担心的 Debian systemd 依赖冲突**没有发生**：
 `--no-install-recommends` + `policy-rc.d` 已足够，镜像内共 114 个包。
 
-### 4.4 `/data` 匿名卷
+### 4.4 `/data` 不是匿名卷 —— **原判断有误，已撤回**
 
-redis 镜像声明了 `VOLUME /data`。节点容器不挂载它，docker 会为每个容器创建
-一个匿名卷。功能无影响，但会在 `docker volume ls` 里留下 6 个无名卷。
-**要求**在节点容器的 `docker run` 上加 `--tmpfs /data`，使 DoD-8 可验证。
+初稿假设「redis 镜像声明了 `VOLUME /data`，不挂载就会留下匿名卷」。
+
+**实测证伪**：`docker inspect redis:8` 显示 `.Config.Volumes` 为空
+（`Volumes=map[]`）。该镜像只设了 `WorkingDir=/data`，目录本身存在且属主为
+`redis:redis`，**并未声明 VOLUME**。
+
+因此节点容器**不会**产生匿名卷，无需 `--tmpfs /data`。加了它等于为一个不存在
+的问题打补丁，还附一条错误的注释说明理由 —— 与本项目反复纠正的「因为错误的
+理由得到绿灯」是同一类。**本项已从实施范围中移除。**
 
 ### 4.5 driver 侧如何传镜像源
 
@@ -409,4 +424,4 @@ URIs: http://deb.debian.org/debian-security   Suites: trixie-security
 | DoD-5 | DoD5 按 §7.2 判定：人为不杀 master 时该断言必须**不**通过 |
 | DoD-6 | `cluster-config.sh`、`lib/`、`config/*.template` 零改动 |
 | DoD-7 | 现有测试基线不受影响：bats 148/0、`check_syntax.sh` 30/0、`validate_libs.sh` 50/0 |
-| DoD-8 | 脚本退出后无残留容器、网络；匿名卷已按 §4.4 处理 |
+| DoD-8 | 脚本退出后无残留容器与网络 |
