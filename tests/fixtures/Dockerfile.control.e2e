@@ -1,13 +1,17 @@
 # E2E control fixture — the machine cluster-config.sh itself runs on.
 #
-# Base is redis:8 for two reasons: bash / coreutils / redis-cli all come
-# free, and the control machine's redis-cli now MATCHES the nodes.
+# Base is redis:8 for the version match: the control machine's redis-cli now
+# MATCHES the nodes. bash / coreutils / getent / awk also come free, so the apt
+# installs shrink to the two packages the remote path actually needs.
 # Previously it came from apt (Redis 6), and cluster-config.sh runs
 # `redis-cli --cluster create` locally whenever it finds one on PATH -- a
-# version skew that was never exercised.
+# version skew this change removes.
 #
 # Only sshpass and openssh-client need installing: every remote step goes
 # through ssh. The repo is bind-mounted at /repo at run time.
+#
+# Docker Hub is unreachable from this host; same mirror and override as the node
+# fixture. Override with `docker build --build-arg REGISTRY=...`.
 ARG REGISTRY=docker.m.daocloud.io/library
 FROM ${REGISTRY}/redis:8
 
@@ -17,6 +21,9 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         sshpass openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
+# Mirrors the node fixture, but the stakes are lower here: there is no init to
+# protect. Measured effect of leaving the base entrypoint in place is exactly
+# `umask 0077` — uid stays 0, and getent / bash -c / sshpass all still work.
 ENTRYPOINT []
 WORKDIR /repo
 CMD ["/bin/bash"]
