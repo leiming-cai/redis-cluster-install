@@ -181,6 +181,20 @@ provision "$A_IP"
 provision "$B_IP"
 log "Pre-provisioning done"
 
+# The entire point of this fixture is validating on Redis 8. If the base image
+# is ever reverted to ubuntu:22.04 the run below stays green while testing
+# nothing about Redis 8 -- a green light for entirely the wrong reason, which
+# is the failure mode this project keeps hitting. Refuse to start instead.
+log "Checking Redis version on all nodes"
+for host in "$A_IP" "$B_IP"; do
+    ver="$(ssh_root "$host" "$PREFIX/bin/redis-server --version" | tr -d '\r')"
+    case "$ver" in
+        *"v=8."*) : ;;
+        *) fail "expected Redis 8 on $host, got: $ver" ;;
+    esac
+    echo "  $host: $ver"
+done
+
 log "Writing cluster.conf"
 cat > "$WORK/cluster.conf" <<CONF
 redis_prefix     = $PREFIX
