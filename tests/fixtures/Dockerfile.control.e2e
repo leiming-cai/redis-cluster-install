@@ -1,17 +1,22 @@
 # E2E control fixture — the machine cluster-config.sh itself runs on.
 #
-# Needs: bash (the script requires 4+), sshpass + openssh-client (every remote
-# step), redis-tools (the `--cluster create` path when redis-cli is present
-# locally), procps/coreutils (diagnostics and the driver's own plumbing).
+# Base is redis:8 for two reasons: bash / coreutils / redis-cli all come
+# free, and the control machine's redis-cli now MATCHES the nodes.
+# Previously it came from apt (Redis 6), and cluster-config.sh runs
+# `redis-cli --cluster create` locally whenever it finds one on PATH -- a
+# version skew that was never exercised.
 #
-# The repo is bind-mounted at /repo at run time; nothing is baked in here.
-FROM docker.m.daocloud.io/library/ubuntu:22.04
+# Only sshpass and openssh-client need installing: every remote step goes
+# through ssh. The repo is bind-mounted at /repo at run time.
+ARG REGISTRY=docker.m.daocloud.io/library
+FROM ${REGISTRY}/redis:8
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-        bash sshpass openssh-client redis-tools coreutils procps \
+        sshpass openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
+ENTRYPOINT []
 WORKDIR /repo
 CMD ["/bin/bash"]
