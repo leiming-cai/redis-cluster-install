@@ -109,24 +109,31 @@ CMD ["/sbin/init"]
 
 ### 4.2 为什么必须清空 ENTRYPOINT
 
-官方 redis 镜像的 `ENTRYPOINT` 是 `/usr/local/bin/docker-entrypoint.sh`。
+官方 redis 镜像的 `ENTRYPOINT` 是 `/usr/local/bin/docker-entrypoint.sh`（实测存在）。
 它对非 `redis-server` 的首参会走 `exec "$@"` 分支，理论上 `/sbin/init` 能透传。
 但**不能依赖这个推断**：entrypoint 的分支随版本变化，且一旦它判定需要以
 `redis` 用户运行（`id -u` 为 0 时），systemd 就会以 `redis` 身份启动 ——
 那会让 `systemctl` 完全失效。显式 `ENTRYPOINT []` 把这个变量消灭掉。
 
-### 4.3 systemd 装在 Debian bookworm 上
+**实测补充**：`redis:8` 镜像内**既没有 `gosu` 也没有 `su-exec`**
+（`command -v` 两者皆无）。这意味着「靠 entrypoint 自动降权到 redis 用户」
+和「显式调 `gosu redis`」**两条路都不通** —— 清空 ENTRYPOINT 后由
+`docker run --user redis` 决定身份，是唯一可行路径。这反过来印证了
+`ENTRYPOINT []` 不是可选项。
 
-这是本次改动**最大的不确定性**。Debian 的 `systemd` 包与 sysvinit、dbus
-存在依赖/替换关系，安装时可能移除其它包。缓解措施：
+镜像自带 `redis` 用户，实测 `uid=999(redis) gid=999(redis)`。
 
-- `--no-install-recommends`，避免拖入 systemd 之外的推荐包
-- `policy-rc.d` 挡掉安装期的服务启动
-- 保留 `rm -rf /var/lib/apt/lists/*`
+### 4.3 systemd 装在 Debian trixie 上 —— **已实测通过**
 
-**必须在实现阶段实际构建验证**，不得假定成功。若 bookworm 上装 systemd
-确实不可行，退路是改用 `jrei/systemd-rocky` 之类的第三方 systemd 底包 +
-安装 redis 官方 deb —— 但那会重新引入 apt 依赖，与本设计目标冲突。
+`redis:8` 的底包是 **Debian GNU/Linux 13 (trixie)**，不是 bookworm。
+
+2026-10-19 实测：按下列 Dockerfile 一次构建成功，systemd 257 正常安装，
+容器以 `/sbin/init` 启动后 `systemctl is-system-running` 返回 `degraded`
+（容器内正常 —— 唯一 failed unit 是 `systemd-modules-load`，无害），
+sshd 监听 0.0.0.0:22 且可从同网络的另一容器 SSH 登录。
+
+原先担心的 Debian systemd 依赖冲突**没有发生**：
+`--no-install-recommends` + `policy-rc.d` 已足够，镜像内共 114 个包。
 
 ### 4.4 `/data` 匿名卷
 
@@ -306,14 +313,14 @@ esac
 
 ## 9. 风险
 
-| # | 风险 | 影响 | 应对 |
+| # | 风险 | 影响 | 状态 |
 |---|---|---|---|
-| R1 | Debian bookworm 装 systemd 冲突/移除包 | 镜像构建失败 | §4.3；退路见 §4.3 |
-| R2 | `redis:8` tag 在 daocloud 镜像源不存在 | 拉取失败 | 需构建期确认；退路见 §9.1 |
-| R3 | Redis 8 行为差异导致 E2E 首次跑即红 | 真实发现 | 摆证据再定，**不擅自改模板** |
-| R4 | Redis 8 官方镜像体积较大（~150MB） | 构建变慢 | 可接受 |
+| R1 | Debian 上装 systemd 冲突/移除包 | 镜像构建失败 | ✅ **已实测解除**（§4.3，trixie + systemd 257 正常） |
+| R2 | `redis:8` tag 在镜像源不存在 | 拉取失败 | ✅ **已实测解除**（8.10.2，§9.1） |
+| R3 | Redis 8 行为差异导致 E2E 首次跑即红 | 真实发现 | ⏳ 待 E2E 首跑验证；摆证据再定，**不擅自改模板** |
+| R4 | 镜像体积较大 | 构建变慢 | 可接受（实测 node 镜像构建 <30s，base 已缓存） |
 
-### 9.1 R2 的退路：镜像源做成可覆盖的构建参数
+### 9.1 镜像源做成可覆盖的构建参数
 
 宿主无法直连 Docker Hub（`registry-1.docker.io` 实测超时），必须走镜像源。
 因此**镜像前缀不写死**，而是做成 build arg：
@@ -355,14 +362,23 @@ docker build --build-arg REGISTRY=docker.1ms.run/library -f ... -t ... .
 
 **不得**退到 Redis 6 或 7 —— 那会让本设计失去意义。
 
-### 9.2 R2b：apt 源无需备选
+### 9.2 apt 源无需备选
 
 镜像构建期会跑 `apt-get update`（装 `openssh-server` / `systemd` / `sudo`）。
-实测 Debian bookworm 源全部可达，**无需做镜像切换**：
+
+镜像内 `/etc/apt/sources.list.d/*.sources` 实测指向：
+
+```
+URIs: http://deb.debian.org/debian        Suites: trixie trixie-updates
+URIs: http://deb.debian.org/debian-security   Suites: trixie-security
+```
+
+官方源**可达且构建成功**（实测全量构建 <30s），**无需做镜像切换**。
+国内备选源同样可用（探测 bookworm 路径全部 200，trixie 路径同源同构）：
 
 | apt 源 | 状态 | 延迟 |
 |---|---|---|
-| `deb.debian.org`（官方） | ✅ | 385 ms |
+| `deb.debian.org`（官方，实测可用） | ✅ | 385 ms |
 | `mirrors.aliyun.com` | ✅ | 280 ms |
 | `mirrors.cloud.tencent.com` | ✅ | 286 ms |
 | `mirrors.tuna.tsinghua.edu.cn` | ✅ | 306 ms |
