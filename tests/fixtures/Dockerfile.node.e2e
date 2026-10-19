@@ -1,20 +1,45 @@
 # E2E node fixture — one Redis Cluster node with a real sshd + systemd.
 #
-# Built from the daocloud mirror: Docker Hub is unreachable from this host.
+# Base is the official redis:8 image (Debian 13 trixie, currently 8.10.2) so
+# that cluster-config.sh's full 9-step deployment is validated against the
+# target Redis version. It previously used ubuntu:22.04 + apt redis-server,
+# which meant Redis 8 was never exercised despite being the shipped target.
+# The tag floats within the 8.x line on purpose: the point is to validate
+# against Redis 8, not against one pinned patch release.
 #
-# systemd needs /sys/fs/cgroup mounted rw and --privileged; the driver script
-# supplies both. Redis itself is NOT built from source — the 2 vCPU / 2 GB this
-# runs on cannot survive the LTO build. The driver installs the distro package
-# and copies its binaries into $REDIS_PREFIX/bin, which is exactly the
-# pre-provisioned state cluster-config.sh expects.
-FROM docker.m.daocloud.io/library/ubuntu:22.04
+# ENTRYPOINT [] is deliberate. The base entrypoint is a privilege-dropping
+# wrapper for redis-server: it re-execs through
+# /usr/bin/setpriv --reuid redis --regid redis (setpriv, not gosu or
+# su-exec — neither exists in this image) when CMD[0] resolves to
+# redis-server, and regardless of CMD it sets `umask 0077` before exec'ing.
+# The privilege drop cannot fire for /sbin/init, but the umask would be
+# inherited by PID 1 and everything it spawns. Clearing it keeps
+# PID 1 = /sbin/init, uid 0, umask 0022.
+#
+# Docker Hub is unreachable from this host. Override the mirror with
+# `docker build --build-arg REGISTRY=...`. Declared before FROM, so REGISTRY
+# is global scope: usable in FROM only — a RUN that needs it must re-declare
+# ARG inside the stage.
+ARG REGISTRY=docker.m.daocloud.io/library
+FROM ${REGISTRY}/redis:8
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-        openssh-server systemd systemd-sysv sudo build-essential \
-        gcc g++ make tar curl ca-certificates procps net-tools iproute2 \
-    && rm -rf /var/lib/apt/lists/*
+# The base image already ships an equivalent /usr/sbin/policy-rc.d (exit 101);
+# rewrite it explicitly so this file does not rest on an undocumented property
+# of the base. It stops dpkg from starting services during the install -- there
+# is no init in the build container, and systemd is what is being installed
+# right here. It is deliberately NOT removed afterwards: once systemd is PID 1
+# it manages services itself and never consults invoke-rc.d, so leaving the
+# guard in place costs nothing.
+RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
+ && chmod +x /usr/sbin/policy-rc.d \
+ && apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends \
+        openssh-server systemd systemd-sysv sudo procps iproute2 \
+ && rm -rf /var/lib/apt/lists/*
+
+ENTRYPOINT []
 
 # Root password + password auth: the whole deployment runs over sshpass.
 RUN echo 'root:TestPw123!' | chpasswd && \
@@ -25,5 +50,9 @@ RUN echo 'root:TestPw123!' | chpasswd && \
 RUN echo '* soft nofile 65535' >> /etc/security/limits.conf && \
     echo '* hard nofile 65535' >> /etc/security/limits.conf
 
+# Declared here, but the driver MUST bind-mount it read-write AND pass
+# --privileged — e2e-cluster-config.sh does both when it starts the node.
+# Without them systemd cannot mount cgroups and the node never comes up.
+# Nothing else in this file would hint at that.
 VOLUME ["/sys/fs/cgroup"]
 CMD ["/sbin/init"]
