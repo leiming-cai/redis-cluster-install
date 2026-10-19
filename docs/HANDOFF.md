@@ -268,10 +268,16 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
 ### 已修复（Task 12 用 E2E 发现的）
 
 11. **父目录不 chown**（`2eb4aee`）：`create_dirs` 只 chown `/etc/redis/cluster`，
-    不管它的**父目录** `/etc/redis`。apt 装出来的是 `0770 redis:redis` 且带 setgid，
+    不管它的**父目录** `/etc/redis`。当父目录是 `0770 redis:redis` 且带 setgid 时，
     redis 用户一旦被重建（容器重建、从备份恢复）拿到新 uid，父目录还挂在旧 uid 上，
     新 redis **无法穿越 0770 目录** —— 哪怕下面每个文件的归属都完全正确，
     依然报 `Fatal error, can't open config file ...: Permission denied`。
+
+    > 更正：本条原先写「apt 装出来的是 `0770 redis:redis` 且带 setgid」，**这是错的**。
+    > 实测 `redis-server 6.0.16-1ubuntu1.2`（Ubuntu 22.04）与 `7.0.15-1~deb12u10`
+    > （Debian bookworm）都把 `/etc/redis` 装成 `0755 root:root`，且 postinst 完全
+    > 不碰它。缺陷本身真实、修复也仍然必要（该形态见于其它打包方式与手工规划的机器），
+    > 但来源不是 apt。
     这是最难查的一类：看起来一切正常，就是打不开。
     **只有真实跑一遍才会暴露，148 个单元测试全都测不到**（只在 uid 变化时触发）。
     `/var/lib/redis`、`/var/run/redis` 同理，已一并修。

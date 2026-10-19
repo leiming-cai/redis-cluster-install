@@ -210,9 +210,11 @@ PREFIX=/opt/software/redis
 mkdir -p "$PREFIX/bin" "$PREFIX/cluster" "$PREFIX/log" \
          /etc/redis/cluster /var/lib/redis/cluster /var/run/redis/cluster
 
-# 复刻 apt 的 redis-server 包留下的形态：0770 redis:redis 且带 setgid。
-# 正因如此 create_dirs 必须 chown 父目录树（提交 2eb4aee）。
-# 换底包后这个前提不会自动出现，必须显式造出来，否则就丢了那条回归防线。
+# 显式造出 0770 redis:redis + setgid 的形态（而非从 base 继承）：该形态正是
+# create_dirs 必须 chown 父目录树的原因（提交 2eb4aee）。
+# redis:8 镜像里根本没有 /etc/redis；apt 的 redis-server 包也不产生这个形态
+# （6.0.16-1ubuntu1.2 与 7.0.15-1~deb12u10 都是 0755 root:root，postinst 不碰它）。
+# 不造出来，这条父目录 chown 的回归防线就完全不会被触发。
 install -d -o redis -g redis -m 0770 /etc/redis
 chmod g+s /etc/redis
 
