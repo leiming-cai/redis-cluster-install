@@ -23,6 +23,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # resolve. Set E2E_HOST_REPO to the daemon-visible path in that case.
 HOST_REPO="${E2E_HOST_REPO:-$REPO_ROOT}"
 
+# Registry prefix for the two image builds. Overridable so a dead mirror
+# costs one environment variable rather than a source edit. Note that a
+# registry answering 401 on /v2/ is UP, not down.
+REGISTRY="${E2E_REGISTRY:-docker.m.daocloud.io/library}"
+
 WORK="$(mktemp -d)"
 NET=rc-cfg-net
 PASS='E2eClusterPw'
@@ -47,8 +52,16 @@ log "Building images"
 # `docker run -v` is different: the DAEMON resolves the source, which is why
 # that one needs HOST_REPO. Conflating the two breaks the build with
 # "unable to prepare context: path ... not found".
-docker build -q -f "$REPO_ROOT/tests/fixtures/Dockerfile.node.e2e"   -t rc-e2e-node:local   "$REPO_ROOT" >/dev/null
-docker build -q -f "$REPO_ROOT/tests/fixtures/Dockerfile.control.e2e" -t rc-e2e-control:local "$REPO_ROOT" >/dev/null
+#
+# Both builds are checked explicitly: the script runs under `set -uo pipefail`,
+# not `set -e`, so an unchecked failure surfaces much later as "could not
+# resolve node IPs" -- which reads like a networking bug, not a dead mirror.
+docker build -q --build-arg REGISTRY="$REGISTRY" \
+    -f "$REPO_ROOT/tests/fixtures/Dockerfile.node.e2e"   -t rc-e2e-node:local   "$REPO_ROOT" >/dev/null \
+    || fail "node image build failed (registry: $REGISTRY)"
+docker build -q --build-arg REGISTRY="$REGISTRY" \
+    -f "$REPO_ROOT/tests/fixtures/Dockerfile.control.e2e" -t rc-e2e-control:local "$REPO_ROOT" >/dev/null \
+    || fail "control image build failed (registry: $REGISTRY)"
 
 log "Starting nodes"
 docker network create "$NET" >/dev/null
@@ -109,34 +122,51 @@ log "Pre-provisioning nodes (binaries, redis user, directories)"
 # resolve container hostnames in this network.
 provision() {
     local host="$1" out rc=0
-    out="$(ssh_root "$host" bash -s 2>&1 <<PRE
+    # Quoted heredoc: nothing is expanded locally, so the remote script needs
+    # no \$ escaping and PREFIX travels as a positional argument the same way
+    # every other remote script in cluster-config.sh receives its parameters.
+    out="$(ssh_root "$host" bash -s "$PREFIX" 2>&1 <<'PRE'
 set -e
-export DEBIAN_FRONTEND=noninteractive
-# apt-get update against the public archive fails intermittently from here
-# ("Clearsigned file isn't valid, got 'NOSPLIT'"), usually after a few of
-# these containers have hammered it. Retry rather than fail the whole run.
-_n=1
-until apt-get update -qq; do
-    if [ "\$_n" -ge 3 ]; then
-        echo "provision: apt-get update failed \$_n times" >&2
-        exit 1
-    fi
-    echo "provision: apt-get update attempt \$_n failed, retrying" >&2
-    _n=\$((_n + 1))
-    sleep 5
-done
-apt-get install -y -qq --no-install-recommends redis-server redis-tools
-mkdir -p $PREFIX/bin $PREFIX/cluster $PREFIX/log /etc/redis/cluster \\
-         /var/lib/redis/cluster /var/run/redis/cluster
-cp -f "\$(command -v redis-server)" $PREFIX/bin/redis-server
-cp -f "\$(command -v redis-cli)"    $PREFIX/bin/redis-cli
+PREFIX="$1"
+
+# Ahead of the install -d below, not after it: `install -o redis` aborts with
+# "install: invalid user 'redis'" when the user is absent, and under `set -e`
+# that kills the script before this fallback could ever be reached.
 id redis >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin redis
-systemctl stop redis-server 2>/dev/null || true
-systemctl disable redis-server 2>/dev/null || true
-chown -R redis:redis /etc/redis /var/lib/redis /var/run/redis $PREFIX/cluster $PREFIX/log
-# Prove the preconditions cluster-config.sh checks actually hold, so a
-# provisioning failure surfaces here instead of as a confusing preflight
-# error three steps later.
+
+# /etc/redis must be a 0770 redis:redis directory with the setgid bit: that is
+# what makes the PARENT's ownership load-bearing, and therefore what makes
+# create_dirs chown /etc/redis itself and not just /etc/redis/cluster
+# (commit 2eb4aee -- a redis user recreated with a new uid cannot traverse a
+# 0770 parent, so every file below it is EACCES no matter how it is owned).
+#
+# The shape is recreated deliberately, not inherited. The redis:8 image has no
+# /etc/redis at all, and apt does not produce this shape either: redis-server
+# 6.0.16-1ubuntu1.2 (Ubuntu 22.04) and 7.0.15-1~deb12u10 (Debian bookworm) both
+# ship it 0755 root:root, and neither postinst touches it. Without these lines
+# the E2E would never exercise the parent-chown path at all.
+install -d -o redis -g redis -m 0770 /etc/redis
+chmod g+s /etc/redis
+
+# mkdir runs after the chmod, so /etc/redis/cluster inherits the setgid bit and
+# the redis group instead of landing as 0755 root:root.
+mkdir -p "$PREFIX/bin" "$PREFIX/cluster" "$PREFIX/log" \
+         /etc/redis/cluster /var/lib/redis/cluster /var/run/redis/cluster
+
+# $PREFIX/cluster, $PREFIX/log, /var/lib/redis and /var/run/redis are left
+# root:root on purpose: step 5 of cluster-config.sh (create_dirs) chowns
+# exactly those trees recursively, so narrowing that chown list later would
+# silently regress this fixture rather than fail it.
+
+# The image ships binaries in /usr/local/bin; cluster-config.sh expects them
+# under $PREFIX/bin. Symlink rather than copy: one inode, and preflight's
+# `-x` test follows the link.
+ln -sf /usr/local/bin/redis-server "$PREFIX/bin/redis-server"
+ln -sf /usr/local/bin/redis-cli    "$PREFIX/bin/redis-cli"
+
+# Assert the three preconditions cluster-config.sh's preflight checks, so a
+# provisioning failure surfaces HERE instead of three steps later as a
+# preflight error that reads like a cluster-config.sh bug.
 [ -x "$PREFIX/bin/redis-server" ] || { echo "provision: redis-server binary missing" >&2; exit 1; }
 [ -x "$PREFIX/bin/redis-cli" ]    || { echo "provision: redis-cli binary missing" >&2; exit 1; }
 id redis >/dev/null 2>&1          || { echo "provision: redis user missing" >&2; exit 1; }
@@ -227,6 +257,15 @@ log "Preflight rejects a node whose redis user is missing"
 # `userdel` refuses with "user redis is currently used by process N". With
 # the user left in place, preflight would correctly pass and this case would
 # assert nothing at all — a green result for entirely the wrong reason.
+#
+# The uid is captured BEFORE the delete: the parent-chown regression only
+# reproduces if the recreated redis comes back with a DIFFERENT uid than
+# /etc/redis is still owned by (999 -> 995 in practice). If uid allocation
+# ever recycled the number, this case would pass for the wrong reason --
+# exactly the failure mode this fixture exists to prevent. Asserted on the
+# way back, after the restore below.
+old_uid="$(ssh_root "$B_IP" "id -u redis")"
+[ -n "$old_uid" ] || fail "could not read the redis uid on B before deleting it"
 ssh_root "$B_IP" "userdel -f redis" || fail "could not delete the redis user on B"
 if ssh_root "$B_IP" "id -u redis" >/dev/null 2>&1; then
     fail "the redis user still exists on B; this case would prove nothing"
@@ -242,6 +281,11 @@ echo "  rejected as expected: $(grep -m1 MISSING_USER "$WORK/preflight.log")"
 
 log "Restoring the redis user and re-verifying"
 ssh_root "$B_IP" "useradd -r -s /usr/sbin/nologin redis" >/dev/null
+new_uid="$(ssh_root "$B_IP" "id -u redis")"
+[ -n "$new_uid" ] || fail "redis user was not recreated on B"
+[ "$new_uid" != "$old_uid" ] \
+    || fail "redis got uid $new_uid back; the parent-chown case would prove nothing"
+echo "  redis uid changed $old_uid -> $new_uid (the dangling-parent case is live)"
 run_config "$WORK/recover.log" || fail "could not recover after restoring the redis user"
 echo "  recovered"
 
