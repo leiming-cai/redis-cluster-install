@@ -40,7 +40,11 @@ writable_paths() {
 }
 
 read_write_paths() {
-    printf '%s\n' "$1" | sed -n 's/^ReadWritePaths=//p' | tr ' ' '\n' | sed '/^$/d'
+    # systemd reads a leading "-" on a ReadWritePaths= entry as "ignore this
+    # path if it does not exist". Strip it so the coverage checks below
+    # compare real paths.
+    printf '%s\n' "$1" | sed -n 's/^ReadWritePaths=//p' | tr ' ' '\n' \
+        | sed -e '/^$/d' -e 's/^-//'
 }
 
 # covered PATH — reads the ReadWritePaths list on stdin, succeeds when PATH
@@ -147,4 +151,30 @@ covered() {
         printf '%s\n' "$rwp" | covered "$w" \
             || { echo "'$w' is not covered by ReadWritePaths ($rwp)" >&2; false; }
     done <<< "$(writable_paths "$conf")"
+}
+
+@test "every real ReadWritePaths entry is optional (a bare path fails the unit if absent)" {
+    # A ReadWritePaths= entry with no leading "-" is a hard requirement: if the
+    # path does not exist systemd aborts the unit with status=226/NAMESPACE.
+    # /var/log/redis was named in the template while nothing in the repo ever
+    # created it, so every unit failed on a host without the distro redis
+    # package — and all 148 tests still passed, because they only compared
+    # rendered text. Assert the marker, not the path list.
+    unit="$(render_systemd_unit "$REAL_UNIT" 6380 "node-6380" "$PASS" "$PREFIX")"
+    raw="$(printf '%s\n' "$unit" | sed -n 's/^ReadWritePaths=//p')"
+    [ -n "$raw" ] || { echo "unit has no ReadWritePaths at all" >&2; false; }
+
+    bad="$(printf '%s\n' "$raw" | tr ' ' '\n' | sed '/^$/d' | grep -v '^-' || true)"
+    [ -z "$bad" ] || {
+        echo "these ReadWritePaths entries have no '-' prefix and hard-fail the unit when missing:" >&2
+        printf '  %s\n' $bad >&2
+        false
+    }
+
+    # "Every" means every: a line that parsed down to no entries at all would
+    # satisfy the grep -v above vacuously, so count what was actually parsed.
+    total="$(printf '%s\n' "$raw" | tr ' ' '\n' | sed '/^$/d' | wc -l)"
+    optional="$(printf '%s\n' "$raw" | tr ' ' '\n' | sed '/^$/d' | grep -c '^-' || true)"
+    [ "$total" -gt 0 ]
+    [ "$total" -eq "$optional" ]
 }

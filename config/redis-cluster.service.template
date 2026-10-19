@@ -23,7 +23,18 @@ ProtectHome=yes
 # With ProtectSystem=strict every path not listed here is read-only, and
 # redis-server then aborts with "Can't open the log file: Read-only file
 # system". Verified by E2E run (see docs/VERIFICATION.md, D8).
-ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis %REDIS_PREFIX%/cluster %REDIS_PREFIX%/log
+#
+# The leading '-' on every entry is load-bearing, do not strip it: a
+# ReadWritePaths= entry WITHOUT it is a hard requirement, and the unit then
+# fails to start with status=226/NAMESPACE the moment that path is missing.
+# /var/log/redis is named above, but neither install path creates it --
+# cluster-config.sh's create_dirs nor install.sh's source build (only
+# scripts/smoke-test.sh does, which is not a deployment path) -- so on a host
+# that never had the distro redis package the unit died before redis-server
+# ever ran. Debian/Ubuntu's own redis-server.service prefixes every entry with
+# '-' for the same reason; so do we, on all five, so that any path absent on
+# any distribution is ignored rather than fatal.
+ReadWritePaths=-/var/lib/redis -/var/log/redis -/var/run/redis -%REDIS_PREFIX%/cluster -%REDIS_PREFIX%/log
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
