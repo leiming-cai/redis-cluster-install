@@ -1,26 +1,25 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-19
-**工作分支**：`feature/e2e-redis-8`（**未合并**）
+**工作分支**：无 —— 第二轮已在 `main` 上（**已合并**）
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = `18dd8ef`（spec/plan 提交，之后 main 未再动）
+**基线**：`main` = `d073da5`（第二轮 E2E 迁移 Redis 8 的最后一个提交）
 
 ---
 
 ## 一句话现状
 
 **第一轮计划的 14 个 Task 全部完成并已合并进 main**（`--no-ff`，合并点 `96737d2`）。
-本轮又把 `cluster-config.sh` 的 E2E 从 Ubuntu 22.04 + apt Redis 6 迁到了官方
+第二轮又把 `cluster-config.sh` 的 E2E 从 Ubuntu 22.04 + apt Redis 6 迁到了官方
 `redis:8` 镜像（Debian 13 trixie，当前 8.10.2），149 个单元测试通过，
-E2E 在 Redis 8 上端到端全绿。
+E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd8ef` → `d073da5`），
+分支 `feature/e2e-redis-8` 已删除。
 
 **迁移过程暴露了一个真实的生产缺陷**：`ReadWritePaths=` 把 `/var/log/redis`
 写成了硬性要求，而仓库里没有任何代码创建这个目录 —— 单元直接以
 `status=226/NAMESPACE` 启动失败。已由提交 `32ac923` 修复。
 
-**下一步**：本轮工作**在 `feature/e2e-redis-8` 分支上，尚未合并**。
-main 自 `18dd8ef`（spec/plan）之后未再改动。合并方式与上一轮相同：
-`git merge --no-ff feature/e2e-redis-8`，合并前用 `git merge-tree` 预检。
+**下一步**：只剩推送与两个已记录的遗留项，见文末。
 
 ---
 
@@ -57,7 +56,7 @@ main 自 `18dd8ef`（spec/plan）之后未再改动。合并方式与上一轮�
 | 13 | README + USAGE 文档 | `50e83bb` |
 | 14 | 最终集成检查 + 清理误提交文件 | `95e47ab` |
 
-### 第二轮：E2E 迁到 Redis 8（`feature/e2e-redis-8`，未合并）
+### 第二轮：E2E 迁到 Redis 8（`feature/e2e-redis-8`，**已合并进 main**）
 
 | 步骤 | 内容 | 关键提交 |
 |---|---|---|
@@ -75,7 +74,7 @@ main 自 `18dd8ef`（spec/plan）之后未再改动。合并方式与上一轮�
 
 ## 提交清单（按时间倒序）
 
-### `feature/e2e-redis-8`（相对 `main` = `18dd8ef`，10 个提交，**未合并**）
+### 第二轮 `feature/e2e-redis-8`（相对 `main` = `18dd8ef`，11 个提交，**已 fast-forward 合并**）
 
 ```
 32ac923 fix(cluster-config): make every ReadWritePaths entry optional
@@ -448,6 +447,31 @@ _sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis "$REDIS_
 （列了/用了一个根本没人创建的路径），只是发生在 `add-node.sh` 而不是
 systemd 单元里。
 
+---
+
+### 已知问题二（收尾时新发现，**未修**）：E2E 自己有两处断言不会让运行失败
+
+`scripts/e2e-cluster-config.sh` 第 232 行与第 346 行是**裸 `| grep`，没有 `|| fail`**：
+
+```bash
+232: ssh_root "$A_IP" "... --cluster check $A_IP:6379" | grep -E "All 16384 slots covered"
+346: ssh_root "$A_IP" "... cluster info" | grep "cluster_state:ok"
+```
+
+脚本用的是 `set -uo pipefail`，**没有 `set -e`**。所以这两处即使 grep 不到，
+脚本也会继续往下走，**最后照样退出 0**。
+
+后果：E2E 可能部署出一个**槽位没覆盖全**、或 `cluster_state` **不是 ok** 的集群，
+却返回一个绿色的退出码 —— 只会在日志里少一行，CI 不会红。
+
+这一轮没有踩到（有完整日志的绿跑里两行都在），但这正是本项目一直在打的
+「因为错误的原因得到绿灯」，只是这次长在**测试自己**身上。
+
+修法：两行各加一个 `|| fail`。**改动在 E2E 驱动里，不在被测方。**
+
+> 顺带一提，这也意味着**单看 `E2E_EXIT_CODE=0` 不足以证明 DoD2/DoD3 通过** ——
+> 断言强度不够。判断那两条时要看日志里对应行是否出现。
+
 **本轮刻意没有修** —— `add-node.sh` 属于生产代码，不在
 「E2E 迁移到 Redis 8」这个变更的范围里。要修的话，最小改动是
 在第 139-140 行的 `mkdir -p` 里补上 `/var/log/redis`
@@ -461,15 +485,17 @@ systemd 单元里。
 
 ## 与主分支的关系
 
-- 主仓库 `D:\work\rediscluterproject`，当前检出 `feature/e2e-redis-8`
+- 主仓库 `D:\work\rediscluterproject`，当前检出 `main` = `d073da5`，工作区干净
 - **上一轮**（14 个 Task）已合并进 main：`git merge --no-ff feature/cluster-config-script`（`54438d8` → `96737d2`）
   - 合并前用 `git merge-tree` 预检过，exit 0、无冲突标记；实际合并也确实干净
   - 合并后在主仓库重跑：`bats 148/0`、`check_syntax 30/0`、`validate_libs 50/0`、E2E 全绿
-- **本轮**（E2E 迁 Redis 8）**在 `feature/e2e-redis-8` 分支上，尚未合并**：
-  - 相对 `main` = `18dd8ef` 领先 10 个提交
-  - `main` 自 `18dd8ef`（spec/plan 提交）之后**未再动过**
-  - 合并方式同上一轮：`git merge --no-ff feature/e2e-redis-8`
-  - 合并前同样用 `git merge-tree` 预检
+- **本轮**（E2E 迁 Redis 8）**已合并进 main**：`git merge --ff-only feature/e2e-redis-8`（`18dd8ef` → `d073da5`）
+  - 相对 `main` = `18dd8ef` 领先 11 个提交，因 main 未动过，故为**纯 fast-forward，无需预检**
+  - 分支 `feature/e2e-redis-8` 已 `git branch -d` 删除
+  - 合并后在主仓库重跑：`bats 149/0`、`check_syntax 30/0`、`validate_libs 50/0`、E2E 退出码 0
+- **⚠️ main 领先 `origin/main` 54 个提交，从未推送。** 且合并时 `git pull` **失败**
+  （GitHub 不可达：`Recv failure: Connection was reset`），所以**无法确认 origin/main
+  期间是否移动过**。推送前请先确认网络可达并核对。
 - 旧的 worktree `C:\Users\蔡雷鸣\.local\share\opencode\worktree\3e438c\cluster-config-script`
   （分支 `feature/cluster-config-script`）**仍保留在原处**，内容与 main 一致，可随时清理
 
@@ -484,19 +510,20 @@ systemd 单元里。
 
 ## 下一步具体动作
 
-**本轮（Redis 8 迁移）已收尾，没有遗留的实现任务。** 剩下的动作：
+**本轮（Redis 8 迁移）已收尾并合并，没有遗留的实现任务。** 剩下的动作：
 
-1. **合并 `feature/e2e-redis-8` 进 main**（本轮工作还在线上，未合并）：
-   ```powershell
-   cd D:\work\rediscluterproject
-   git merge --no-ff feature/e2e-redis-8
-   ```
-   合并前先 `git merge-tree` 预检。合并后在 main 上重跑
-   `bats`（149/0）、`check_syntax`（30/0）、`validate_libs`（50/0）与 E2E。
+1. **推送 main**（领先 origin 54 个提交，从未推送）。
+   ⚠️ 合并时 `git pull` 因 GitHub 不可达而失败，**无法确认 origin/main 是否移动过**。
+   推送前请先确认网络可达，并核对远端是否分叉。
 2. **决定是否修 `add-node.sh:141`**（见上面的「已知问题」）。
    它是生产代码，本轮刻意未动。修的话最小改动是在 `mkdir -p` 里补
    `/var/log/redis`。
-3. 删除旧 worktree 与 `feature/cluster-config-script` 分支
+3. **修 E2E 里两处裸 `| grep` 断言**（本轮收尾时新发现，见「已知问题」）：
+   `scripts/e2e-cluster-config.sh:232` 与 `:346`。脚本是 `set -uo pipefail`、
+   **没有** `set -e`，所以这两条 grep 失败也不会让脚本非零退出 ——
+   意味着 E2E 可能「槽位没覆盖全 / cluster_state 不是 ok」却依然返回 0。
+   修法是各加一个 `|| fail`。
+4. 删除旧 worktree 与 `feature/cluster-config-script` 分支
    （内容已全部在 main 上，两者均未被本轮改动）：
    ```powershell
    cd D:\work\rediscluterproject
