@@ -68,19 +68,20 @@ FROM ${REGISTRY}/redis:8
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# policy-rc.d 必须在 apt 之前就位：dpkg 装 systemd 时会尝试拉起服务，
-# 容器里没有 init，只会产生一堆 "invoke-rc.d: could not determine current
-# runlevel" 并拖慢构建。安装完成后立即移除。
+# base 镜像自带一份等价的 /usr/sbin/policy-rc.d（exit 101）；这里显式重写，
+# 免得本文件依赖 base 的一个未文档化属性。它阻止 dpkg 在安装期间拉起服务 ——
+# 构建容器里没有 init，而正要安装的就是 systemd。安装后**刻意不删除**：
+# 一旦 systemd 成为 PID 1，服务由它自己管理，根本不会去问 invoke-rc.d，
+# 留着这道保险没有代价。
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
  && chmod +x /usr/sbin/policy-rc.d \
  && apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends \
         openssh-server systemd systemd-sysv sudo procps iproute2 \
- && rm -rf /var/lib/apt/lists/* \
- && rm -f /usr/sbin/policy-rc.d
+ && rm -rf /var/lib/apt/lists/*
 
-# redis 镜像带 /usr/local/bin/docker-entrypoint.sh，它会 exec "$@" 包裹 CMD。
-# systemd 必须是裸的 PID 1，否则容器起不来或 systemctl 行为异常。
+# 理由见 §4.2：base 的 entrypoint 在 exec CMD 之前会把 umask 改成 0077，
+# 而 PID 1 及其所有子进程都会继承。清空后实测 umask 为 0022。
 ENTRYPOINT []
 
 RUN echo 'root:TestPw123!' | chpasswd && \
@@ -176,7 +177,9 @@ FROM ${REGISTRY}/redis:8
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# base 已含 bash / coreutils / procps / redis-cli / redis-server。
+# base 已含 bash / coreutils / redis-cli / redis-server。
+# 注意 base **不含 procps**（实测无 ps/pgrep/pkill/top），但驱动与
+# cluster-config.sh 都不使用它，因此不装。
 # 只需补 sshpass 与 openssh-client —— cluster-config.sh 的每个远端步骤都要用。
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         sshpass openssh-client \
