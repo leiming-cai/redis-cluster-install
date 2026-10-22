@@ -694,11 +694,45 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
   - 生产文件**只改注释**（已用 `git diff` 逐行核过）
 - **✅ main 已推送到 `origin/main`**。2026-10-22 推送前重新核对过：
   `git ls-remote origin` **可达**，`origin/main` = `5c191f1`，与本地是
-  **纯 fast-forward（ahead 61 / behind 0）**，远端期间**没有移动过**。
+  **纯 fast-forward（ahead 62 / behind 0）**，远端期间**没有移动过**。
   推送后两者一致 —— 以 `git log origin/main -1` 为准。
   > 前三轮之所以推不了，是 GitHub 从这台机器不可达
   > （`Recv failure: Connection was reset` / `Failed to connect to github.com:443`），
   > **不是**配置问题。网络恢复后一次推成功。
+
+  > ### ⚠️ 推送方式：走 SSH，不是 HTTPS
+  >
+  > HTTPS 那条路**推不上去**，原因不是网络：
+  > ```
+  > ! [remote rejected] main -> main (refusing to allow a Personal Access Token
+  >   to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)
+  > ```
+  > Git Credential Manager 里存的那个 PAT **没有 `workflow` 权限**。
+  > 本次推送范围里只有一个提交碰了 `.github/`：
+  > `bf55228`（新增 `.github/workflows/ci.yml`）。
+  >
+  > **实际用的办法**（`~/.ssh/id_rsa` 已经在 GitHub 上注册过，
+  > `ssh -T git@github.com` 能通）：
+  > ```powershell
+  > $env:GIT_SSH="C:\Windows\System32\OpenSSH\ssh.exe"
+  > git -c remote.origin.pushurl=git@github.com:leiming-cai/redis-cluster-install.git push origin main
+  > ```
+  > 两个要点：
+  > 1. **`-c remote.origin.pushurl=...`** 是**一次性**覆盖，用户的 remote 配置
+  >    没动（`git remote -v` 仍然是 HTTPS）。注意这个 git 版本**不支持**
+  >    命令行上的 `--push-url` 选项。
+  > 2. **必须指定 `GIT_SSH` 指向原生 Windows OpenSSH。**
+  >    git 自带的是 MSYS 版 ssh，它把中文用户名 `蔡雷鸣` 转义成
+  >    `/c/Users/\262\314\300\327\303\371/...`，于是
+  >    `known_hosts` 和 `id_rsa` 都**找不到**，报「Host key verification failed」。
+  >    原生 `C:\Windows\System32\OpenSSH\ssh.exe` 没有这个问题。
+  >    **这是这台机器上第三次被非 ASCII 用户名绊倒**
+  >    （前两次：PowerShell 读 UTF-8 脚本、docker 的 `-v` 路径）。
+  >
+  > **长期修法**（三选一，都还没做）：
+  > 给 PAT 加 `workflow` scope；或把 `origin` 换成 SSH 并设好 `core.sshCommand`；
+  > 或把 `~/.ssh` 复制到一个纯 ASCII 路径下。
+  > **否则下次再改 workflow 文件，推送会再被拒一次。**
 - 旧的 worktree 与 `feature/cluster-config-script` 分支**已清理**：
   `git worktree remove` 删掉了全部内容并注销了登记（`git worktree list` 只剩主仓库），
   分支已 `git branch -d` 删除（它相对 main 的独有提交数为 0）。
@@ -720,8 +754,13 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 **第四轮（修 `add-node.sh` + 更正 apt 归因）已完成并推送，没有遗留的实现任务。** 剩下的动作：
 
 1. ~~推送 main~~ —— **已完成**（2026-10-22）。推送前重新核对过：
-   `git ls-remote origin` 可达，`origin/main` = `5c191f1`，**ahead 61 / behind 0**，
+   `git ls-remote origin` 可达，`origin/main` = `5c191f1`，**ahead 62 / behind 0**，
    远端期间没有移动过，推送是纯 fast-forward。
+   > **但 HTTPS 推不上去** —— 存的 PAT 没有 `workflow` scope，
+   > 凡是改动 `.github/workflows/**` 的推送都会被 GitHub 拒掉。
+   > 本次走 SSH 推成的，**那条路能一直用**，但每次都要带
+   > `GIT_SSH="C:\Windows\System32\OpenSSH\ssh.exe"`。
+   > 长期修法见「与主分支的关系」一节。
 2. ~~决定是否修 `add-node.sh:141`~~ —— **已完成**（第四轮）。
    根因不是「忘了建目录」，而是它的 chown 列表与 `cluster-config.sh` 的
    `create_dirs` 不一致：多了一个没人创建的 `/var/log/redis`，
