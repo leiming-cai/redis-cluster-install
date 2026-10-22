@@ -1,7 +1,7 @@
 # Redis Cluster 安装脚本 — 设计文档
 
 - **日期**: 2026-07-07
-- **状态**: 设计草案(待用户评审)
+- **状态**: ✅ 已实施
 
 ## 1. 目标与背景
 
@@ -158,7 +158,10 @@
 - systemd unit 中:
   - `User=redis`、`Group=redis`
   - `NoNewPrivileges=yes`、`ProtectSystem=strict`、`ProtectHome=yes`
-  - `ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis`
+  - `ReadWritePaths=-/var/lib/redis -/var/log/redis -/var/run/redis`
+    （`-` 前缀 = systemd 的「该路径不存在就忽略」。**不带 `-` 的是硬性要求**，
+    路径不存在时 systemd 直接以 `status=226/NAMESPACE` 拒绝启动该单元。
+    这是 2026-10-19 实测发现的真实缺陷，见 `32ac923`）
 
 ## 8. 测试策略
 

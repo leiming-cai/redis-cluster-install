@@ -1,7 +1,7 @@
 # Redis 集群配置脚本 — 设计文档
 
 - **日期**：2026-10-13
-- **状态**：设计草案（待评审）
+- **状态**：✅ 已实施（14 个 Task 已合并进 `main`，合并点 `96737d2`）
 
 ## 1. 目标与背景
 
@@ -419,7 +419,11 @@ bash cluster-config.sh --help
 - `redis.conf` 含 `cluster-config-file <prefix>/cluster/<port>/nodes.conf`
 - unit 含 `ExecStart=<prefix>/bin/redis-server`
 - unit 的 `ReadWritePaths` 同时包含 `/var/lib/redis` 与
-  `<prefix>/cluster`、`<prefix>/log` —— **守住 D8 的回归**
+  `<prefix>/cluster`、`<prefix>/log` —— **守住 D8 的回归**。
+  条目一律带 `-` 前缀（systemd 的「路径不存在就忽略」标记）；不带 `-` 的是
+  硬性要求，路径缺失时 systemd 以 `status=226/NAMESPACE` 拒绝启动单元。
+  这条契约由 `tests/cluster_config_render.bats` 的
+  「every real ReadWritePaths entry is optional」用例守着。
 - 端口出现在配置与 unit 中一致
 
 ### 6.3 E2E（scripts/e2e-cluster-config.sh）

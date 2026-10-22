@@ -732,12 +732,17 @@ Description=Redis %PORT% (%NODE_NAME%)
 User=redis
 EnvironmentFile=/etc/redis/cluster/auth.conf
 ExecStart=%REDIS_PREFIX%/bin/redis-server /etc/redis/cluster/redis-%PORT%.conf
-ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis %REDIS_PREFIX%/cluster %REDIS_PREFIX%/log
+ReadWritePaths=-/var/lib/redis -/var/log/redis -/var/run/redis -%REDIS_PREFIX%/cluster -%REDIS_PREFIX%/log
 
 [Install]
 WantedBy=multi-user.target
 EOF
 ```
+
+> **`ReadWritePaths` 的 `-` 前缀是 2026-10-19 补上的**（原文没有 `-`）。
+> systemd 里**不带 `-` 的条目是硬性要求**：路径不存在时单元直接以
+> `status=226/NAMESPACE` 失败。`/var/log/redis` 没有任何代码创建它，
+> 旧 E2E 底包恰好自带该目录而掩盖了它。修复见 `32ac923`。
 
 - [ ] **Step 2: Write the contract tests**
 

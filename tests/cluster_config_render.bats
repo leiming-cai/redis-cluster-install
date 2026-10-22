@@ -158,7 +158,7 @@ covered() {
     # path does not exist systemd aborts the unit with status=226/NAMESPACE.
     # /var/log/redis was named in the template while nothing in the repo ever
     # created it, so every unit failed on a host without the distro redis
-    # package — and all 148 tests still passed, because they only compared
+    # package — and every unit test still passed, because they only compared
     # rendered text. Assert the marker, not the path list.
     unit="$(render_systemd_unit "$REAL_UNIT" 6380 "node-6380" "$PASS" "$PREFIX")"
     raw="$(printf '%s\n' "$unit" | sed -n 's/^ReadWritePaths=//p')"

@@ -1,14 +1,14 @@
 # E2E 迁移到 Redis 8 — 设计文档
 
 - **日期**：2026-10-19
-- **状态**：设计草案（待评审）
+- **状态**：✅ **已实施**（`feature/e2e-redis-8`，已 fast-forward 合并进 `main`）
 - **取代**：`2026-10-19-redis-image-conf-e2e-design.md`（快速配置级验证，已否决）
 - **关联**：`docs/superpowers/specs/2026-10-13-redis-cluster-config-script-design.md` 第 6.3 节
 
 ## 1. 目标与背景
 
 `scripts/e2e-cluster-config.sh` 是 `cluster-config.sh` 唯一的真实运行验证。
-它目前用 ubuntu 22.04 的 apt 装 `redis-server`，即 **Redis 6.0.x**。
+**改造前**它用 ubuntu 22.04 的 apt 装 `redis-server`，即 **Redis 6.0.x**。
 
 而仓库携带 `redis-8.8.0.tar.gz`，说明目标版本是 **Redis 8**。两处模板注释
 已经记录了 Redis 8 的行为差异：
@@ -46,6 +46,11 @@ redis，每次运行都打 Ubuntu 归档，并为此加了 3 次重试。这不�
 ### 不包含
 
 - 不改 `cluster-config.sh`、`lib/`、`config/*.template` 任何一行
+  > **例外（实施期间由决策者拍板）：** E2E 换底包后第一次真跑就暴露了
+  > `config/redis-cluster.service.template` 里 `ReadWritePaths=` 缺少 `-` 前缀
+  > 的**真实生产缺陷**（路径不存在时 systemd 直接 `status=226/NAMESPACE`）。
+  > 该缺陷属于被测方，修复由决策者拍板，提交 `32ac923`。
+  > 本 spec 的其余部分仍按「被测方零改动」执行。
 - 不新增测试脚本（曾提议的「快速配置级验证」已否决：底包换成 Redis 8 后，
   配置语义已被真实 Redis 8 消费过一遍，快速测试成为冗余）
 - 不接入 CI
@@ -427,6 +432,6 @@ URIs: http://deb.debian.org/debian-security   Suites: trixie-security
 | DoD-3 | P0 版本断言生效：人为把底包改回非 Redis 8 时 E2E 必须失败 |
 | DoD-4 | DoD1/2/3/4/7 与负向 preflight、恢复用例全绿 |
 | DoD-5 | DoD5 按 §7.2 判定：人为不杀 master 时该断言必须**不**通过 |
-| DoD-6 | `cluster-config.sh`、`lib/`、`config/*.template` 零改动 |
-| DoD-7 | 现有测试基线不受影响：bats 148/0、`check_syntax.sh` 30/0、`validate_libs.sh` 50/0 |
+| DoD-6 | `cluster-config.sh`、`lib/`、`config/*.template` 零改动 —— **例外见 §2**：`config/redis-cluster.service.template` 的 `ReadWritePaths` 缺陷由决策者拍板修复（`32ac923`） |
+| DoD-7 | 现有测试基线不受影响：bats 149/0、`check_syntax.sh` 30/0、`validate_libs.sh` 50/0 |
 | DoD-8 | 脚本退出后无残留容器与网络 |

@@ -832,7 +832,7 @@ LimitNOFILE=10032
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis
+ReadWritePaths=-/var/lib/redis -/var/log/redis -/var/run/redis
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
@@ -843,6 +843,14 @@ ProtectControlGroups=yes
 WantedBy=multi-user.target
 EOF
 ```
+
+> **`ReadWritePaths` 的 `-` 前缀是 2026-10-19 补上的。** 原文写的是
+> `ReadWritePaths=/var/lib/redis /var/log/redis /var/run/redis`（没有 `-`）。
+> systemd 里**不带 `-` 的条目是硬性要求**：路径不存在时单元直接以
+> `status=226/NAMESPACE` 失败。而 `/var/log/redis` 没有任何代码创建它 ——
+> 当时的 E2E 底包（ubuntu 22.04 + apt redis 6）恰好自带了这个目录，
+> **意外地掩盖了这个缺陷**；换成官方 `redis:8` 底包后它立刻现形。
+> 发行版自己的 `redis-server.service` 五项也全带 `-`。修复见 `32ac923`。
 
 - [ ] **Step 5: Write lib/systemd.sh**
 
