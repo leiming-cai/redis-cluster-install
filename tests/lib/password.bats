@@ -25,6 +25,8 @@ gen_password_shape() {
         gen_password_residue "$output" >&2
         echo "whole output, alphanumerics masked:" >&2
         gen_password_shape "$output" >&2
+        echo "whole output, RAW:" >&2
+        printf '%s' "$output" | cat -A | head -20 >&2
         false
     }
 }
