@@ -1,9 +1,9 @@
 # cluster-config.sh 实施进度交接
 
-**更新时间**：2026-10-19
-**工作分支**：无 —— 第二轮已在 `main` 上（**已合并**）
+**更新时间**：2026-10-22
+**工作分支**：`fix/e2e-assertion-strength`（第三轮：E2E 断言加固 + 文档回改）
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = `d073da5`（第二轮 E2E 迁移 Redis 8 的最后一个提交）
+**基线**：`main` = `cf26fca`（第二轮收尾）
 
 ---
 
@@ -18,6 +18,11 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 **迁移过程暴露了一个真实的生产缺陷**：`ReadWritePaths=` 把 `/var/log/redis`
 写成了硬性要求，而仓库里没有任何代码创建这个目录 —— 单元直接以
 `status=226/NAMESPACE` 启动失败。已由提交 `32ac923` 修复。
+
+**第三轮修掉了 E2E 自己的三条断言**：它们是裸 `| grep`，脚本又没有 `set -e`，
+所以断言失败时脚本照样跑到 `=== E2E PASSED ===` 并退出 0。
+**实测复现过**：把匹配串换成永远不可能成立的值，E2E 依然报 PASSED、退出码 0。
+提交 `3b6d23a`，详见「已知问题二」。
 
 **下一步**：只剩推送与两个已记录的遗留项，见文末。
 
@@ -70,9 +75,25 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 | H | **生产修复**：`ReadWritePaths=` 五项全部加 `-` 前缀 | `32ac923` |
 | I | 文档同步（USAGE / VERIFICATION / HANDOFF） | 本次提交 |
 
+### 第三轮：E2E 断言加固 + 文档回改（`fix/e2e-assertion-strength`）
+
+| 步骤 | 内容 | 关键提交 |
+|---|---|---|
+| A | **E2E 修复**：三条裸 `\| grep` 加 `\| fail`；DoD3 三条件各自独立断言；改为先捕获再匹配 | `3b6d23a` |
+| B | 文档回改：实施计划里被实测证伪的结论（gosu/su-exec、`--tmpfs /data`、148 tests） | `15a6347` |
+| C | 文档回改：spec 状态改「已实施」；DoD-6 的例外、DoD-7 的 149 | `15a6347` |
+| D | 文档回改：4 份历史文档的 `ReadWritePaths` 补上 `-` 前缀 | `15a6347` |
+
 ---
 
 ## 提交清单（按时间倒序）
+
+### 第三轮 `fix/e2e-assertion-strength`
+
+```
+15a6347 docs: reconcile the plans and specs with what was actually built
+3b6d23a test(e2e): make the DoD2/DoD3 assertions actually fail the run
+```
 
 ### 第二轮 `feature/e2e-redis-8`（相对 `main` = `18dd8ef`，11 个提交，**已 fast-forward 合并**）
 
@@ -141,7 +162,12 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 | `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 
-> 149 是本轮 `32ac923` 补了渲染契约测试之后的数字（上一轮是 148）。
+> 149 是第二轮 `32ac923` 补了渲染契约测试之后的数字（更早是 148）。
+
+> **E2E 的退出码 0 现在是可信的**（第三轮 `3b6d23a` 之前不是）：
+> 当时 DoD2/DoD3 的断言是裸 `| grep`，失败也不会让脚本非零退出。
+> 现在三条断言都由 `|| fail` 守着，并且**验证过它们真的会失败** ——
+> 见「已知问题二」的 M1/M2/M3 三张实测结果。
 
 ---
 
@@ -447,31 +473,6 @@ _sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis "$REDIS_
 （列了/用了一个根本没人创建的路径），只是发生在 `add-node.sh` 而不是
 systemd 单元里。
 
----
-
-### 已知问题二（收尾时新发现，**未修**）：E2E 自己有两处断言不会让运行失败
-
-`scripts/e2e-cluster-config.sh` 第 232 行与第 346 行是**裸 `| grep`，没有 `|| fail`**：
-
-```bash
-232: ssh_root "$A_IP" "... --cluster check $A_IP:6379" | grep -E "All 16384 slots covered"
-346: ssh_root "$A_IP" "... cluster info" | grep "cluster_state:ok"
-```
-
-脚本用的是 `set -uo pipefail`，**没有 `set -e`**。所以这两处即使 grep 不到，
-脚本也会继续往下走，**最后照样退出 0**。
-
-后果：E2E 可能部署出一个**槽位没覆盖全**、或 `cluster_state` **不是 ok** 的集群，
-却返回一个绿色的退出码 —— 只会在日志里少一行，CI 不会红。
-
-这一轮没有踩到（有完整日志的绿跑里两行都在），但这正是本项目一直在打的
-「因为错误的原因得到绿灯」，只是这次长在**测试自己**身上。
-
-修法：两行各加一个 `|| fail`。**改动在 E2E 驱动里，不在被测方。**
-
-> 顺带一提，这也意味着**单看 `E2E_EXIT_CODE=0` 不足以证明 DoD2/DoD3 通过** ——
-> 断言强度不够。判断那两条时要看日志里对应行是否出现。
-
 **本轮刻意没有修** —— `add-node.sh` 属于生产代码，不在
 「E2E 迁移到 Redis 8」这个变更的范围里。要修的话，最小改动是
 在第 139-140 行的 `mkdir -p` 里补上 `/var/log/redis`
@@ -483,19 +484,85 @@ systemd 单元里。
 
 ---
 
+### 已知问题二（收尾时新发现，**已修**，提交 `3b6d23a`）：E2E 自己的断言不会让运行失败
+
+`scripts/e2e-cluster-config.sh` 里有**三处**断言是**裸 `| grep`，没有 `|| fail`**
+（交接文档原先写「两处」，**漏了第 233-234 行**那一处）：
+
+```bash
+232: ssh_root "$A_IP" "... --cluster check $A_IP:6379" | grep -E "All 16384 slots covered"
+233: ssh_root "$A_IP" "... -h $A_IP -p 6379 cluster info" \
+234:     | grep -E "cluster_state:ok|cluster_slots_assigned:16384|cluster_known_nodes:6"
+346: ssh_root "$A_IP" "... -h $A_IP -p 6380 cluster info" | grep "cluster_state:ok"
+```
+
+脚本用的是 `set -uo pipefail`，**没有 `set -e`**。所以这些 grep 不到时，
+脚本会继续往下走，**最后照样退出 0**。
+
+**而且 DoD3 那处还有第二重问题。** 第 234 行的 `|` 是正则的**择一**而不是管道，
+所以只要三个条件里**任意一个**成立就通过 —— `cluster_state` 是 `fail`
+但槽位仍然覆盖着的集群，也会被算作 DoD3 通过。
+
+**实测证据（不是推理）**：把 DoD2 的匹配串换成永远不可能出现的
+`ZZZ_NO_MATCH_ZZZ`（只改一行），跑真实 E2E ——
+
+```
+=== DoD2/3: cluster check + info ===
+Warning: Using a password with '-a' ...
+Warning: Using a password with '-a' ...
+cluster_state:ok
+...
+=== E2E PASSED ===
+E2E_EXIT_CODE=0
+```
+
+DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep 什么都没匹配到），
+而脚本一路跑到底，报告 PASSED，**退出码 0**。
+
+**修复**（`3b6d23a`，只动 E2E 驱动，不动被测方）：
+
+- 三处全部改成 `|| fail`
+- 输出先捕获、再匹配，**不直接管道给 grep**。这样守卫依赖的是
+  「报告里说了什么」，而不是 `redis-cli` 的退出码 —— 在 `pipefail` 下，
+  管道式守卫会在 `redis-cli` 返回非零时也失败，那是**另一个断言**
+- DoD3 的三个条件**各自独立断言**，不再用择一
+
+**验证**（真实 E2E 跑，每个探针都先确认自己只改了一行）：
+
+| 跑次 | 变异 | 要求的结果 | 实测 |
+|---|---|---|---|
+| 修复前 | DoD2 匹配串不可能成立 | （记录缺陷） | **PASSED，退出 0** ← 缺陷 |
+| M1 | DoD2 匹配串不可能成立 | 必须失败 | **失败**（`FAIL: cluster check did not report...`） |
+| M2 | DoD3 从一个没有实例的端口取报告 | 必须失败 | **失败**（`FAIL: cluster_state is not ok`） |
+| M3 | 收尾检查从一个没有实例的端口取报告 | 必须失败 | **失败**（`FAIL: cluster_state is not ok after...`） |
+| 干净 | 无 | 必须通过 | **PASSED，退出 0** |
+
+> 教训同 DoD5：**一个从不失败的断言等于没有断言**。这次它长在**测试自己**身上。
+> 而且光加 `|| fail` 还不够 —— DoD3 那个择一的 grep 即使加了守卫，
+> 仍然会因为「三个条件里任意一个成立」而放行。
+> **断言的强度和断言的强制性是两件事。**
+
+---
+
 ## 与主分支的关系
 
-- 主仓库 `D:\work\rediscluterproject`，当前检出 `main` = `d073da5`，工作区干净
+- 主仓库 `D:\work\rediscluterproject`，当前分支 `fix/e2e-assertion-strength`，`main` = `cf26fca`
 - **上一轮**（14 个 Task）已合并进 main：`git merge --no-ff feature/cluster-config-script`（`54438d8` → `96737d2`）
   - 合并前用 `git merge-tree` 预检过，exit 0、无冲突标记；实际合并也确实干净
   - 合并后在主仓库重跑：`bats 148/0`、`check_syntax 30/0`、`validate_libs 50/0`、E2E 全绿
-- **本轮**（E2E 迁 Redis 8）**已合并进 main**：`git merge --ff-only feature/e2e-redis-8`（`18dd8ef` → `d073da5`）
+- **第二轮**（E2E 迁 Redis 8）**已合并进 main**：`git merge --ff-only feature/e2e-redis-8`（`18dd8ef` → `d073da5`）
   - 相对 `main` = `18dd8ef` 领先 11 个提交，因 main 未动过，故为**纯 fast-forward，无需预检**
   - 分支 `feature/e2e-redis-8` 已 `git branch -d` 删除
   - 合并后在主仓库重跑：`bats 149/0`、`check_syntax 30/0`、`validate_libs 50/0`、E2E 退出码 0
-- **⚠️ main 领先 `origin/main` 54 个提交，从未推送。** 且合并时 `git pull` **失败**
-  （GitHub 不可达：`Recv failure: Connection was reset`），所以**无法确认 origin/main
-  期间是否移动过**。推送前请先确认网络可达并核对。
+- **第三轮**（E2E 断言加固 + 文档回改）在 `fix/e2e-assertion-strength` 上，`main` = `cf26fca` 未动过，
+  因此同样是**纯 fast-forward**
+  - 代码提交 `3b6d23a` 只改 `scripts/e2e-cluster-config.sh`
+  - 验证：`bats 149/0`、`check_syntax 30/0`、`validate_libs 50/0`，E2E 干净跑退出码 0，
+    三个变异探针全部按预期失败（见「已知问题二」）
+- **⚠️ main 领先 `origin/main` 55 个提交，从未推送。** 第二轮合并时 `git pull` **失败**
+  （GitHub 不可达：`Recv failure: Connection was reset`），第三轮开工前再次实测
+  `git ls-remote origin` **仍然连不上**（`Failed to connect to github.com:443`），
+  所以**无法确认 origin/main 期间是否移动过**。推送前请先确认网络可达并核对。
 - 旧的 worktree `C:\Users\蔡雷鸣\.local\share\opencode\worktree\3e438c\cluster-config-script`
   （分支 `feature/cluster-config-script`）**仍保留在原处**，内容与 main 一致，可随时清理
 
@@ -510,19 +577,16 @@ systemd 单元里。
 
 ## 下一步具体动作
 
-**本轮（Redis 8 迁移）已收尾并合并，没有遗留的实现任务。** 剩下的动作：
+**第三轮（E2E 断言加固 + 文档回改）已完成，没有遗留的实现任务。** 剩下的动作：
 
-1. **推送 main**（领先 origin 54 个提交，从未推送）。
-   ⚠️ 合并时 `git pull` 因 GitHub 不可达而失败，**无法确认 origin/main 是否移动过**。
-   推送前请先确认网络可达，并核对远端是否分叉。
+1. **推送 main**（领先 origin 55 个提交，从未推送）。
+   ⚠️ `git ls-remote origin` 2026-10-22 实测仍连不上 GitHub，
+   **无法确认 origin/main 是否移动过**。推送前请先确认网络可达，并核对远端是否分叉。
 2. **决定是否修 `add-node.sh:141`**（见上面的「已知问题」）。
-   它是生产代码，本轮刻意未动。修的话最小改动是在 `mkdir -p` 里补
+   它是生产代码，仍未动。修的话最小改动是在 `mkdir -p` 里补
    `/var/log/redis`。
-3. **修 E2E 里两处裸 `| grep` 断言**（本轮收尾时新发现，见「已知问题」）：
-   `scripts/e2e-cluster-config.sh:232` 与 `:346`。脚本是 `set -uo pipefail`、
-   **没有** `set -e`，所以这两条 grep 失败也不会让脚本非零退出 ——
-   意味着 E2E 可能「槽位没覆盖全 / cluster_state 不是 ok」却依然返回 0。
-   修法是各加一个 `|| fail`。
+3. ~~修 E2E 里两处裸 `| grep` 断言~~ —— **已完成**（`3b6d23a`）。
+   实际是**三处**，且 DoD3 那处还有「择一即通过」的第二重问题，见「已知问题二」。
 4. 删除旧 worktree 与 `feature/cluster-config-script` 分支
    （内容已全部在 main 上，两者均未被本轮改动）：
    ```powershell
@@ -533,10 +597,13 @@ systemd 单元里。
    ```
    ⚠️ **顺序有讲究**：分支正被该 worktree 检出，必须先删 worktree 再删分支，
    否则 `git branch -d` 会失败。
-4. 计划文档（`docs/superpowers/plans/...`）里的代码片段与仓库现状已有出入
-   （上一轮修了计划中的多处错误）。若要让它成为可信参考，需要按仓库代码回改。
-5. spec §8 的 DoD 清单里，`tests/lib/preflight.bats` 计划要求存在，
+5. ~~计划文档里的代码片段与仓库现状有出入~~ —— **已完成**（本分支）。
+   两份实施计划与两份 spec 的 `ReadWritePaths` 都补了 `-` 前缀；
+   2026-10-19 的计划里被实测证伪的结论（gosu/su-exec、`--tmpfs /data`、
+   148 tests）也已在原处标注证伪过程。
+6. spec §8 的 DoD 清单里，`tests/lib/preflight.bats` 计划要求存在，
    实际从未创建 —— preflight 走真实 SSH，按设计只由 E2E 覆盖，没有单元测试。
+   这是**有意的设计决定**，不是遗漏。
 
 ### 给下一个执行者的提醒
 
@@ -552,6 +619,11 @@ systemd 单元里。
 - 计划给的测试 3 永远不可能通过（Task 6 已修）。
 
 结论：**不要照抄计划**。以仓库代码为准，遇到可疑之处直接改并说明。
+
+> **适用范围**：上面这些是**第一轮**计划
+> （`docs/superpowers/plans/2026-10-13-redis-cluster-config-script.md`）的 Task 7-10。
+> 第二轮的计划（`2026-10-19-e2e-on-redis-8.md`）已在第三轮回改过，
+> 代码块与仓库现状一致、可直接照抄，被证伪的结论也都标注了证伪过程。
 
 **Task 6 阶段已确认计划文档本身有错**，改法记在这里备查：
 
