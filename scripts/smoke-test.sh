@@ -10,6 +10,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO_ROOT/lib/common.sh"
+. "$REPO_ROOT/lib/password.sh"
 
 require_cmd docker sshpass
 
@@ -54,7 +55,13 @@ for port in 2222 2223; do
 done
 
 # Generate a shared password
-PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
+# gen_password, not an inline `tr ... </dev/urandom | head -c 32`: that pipes
+# an INFINITE stream into head, so the writer is killed by SIGPIPE and the
+# pipeline's status is 141 -- which, under this script's `set -euo pipefail`,
+# aborted the whole smoke test right here. On some coreutils builds tr also
+# reports "tr: write error: Broken pipe" on stderr, which then lands in
+# whatever captured the output.
+PASS="$(gen_password 32)"
 echo "$PASS" > "$REPO_ROOT/secrets/cluster_password.txt"
 chmod 600 "$REPO_ROOT/secrets/cluster_password.txt"
 

@@ -25,8 +25,6 @@ gen_password_shape() {
         gen_password_residue "$output" >&2
         echo "whole output, alphanumerics masked:" >&2
         gen_password_shape "$output" >&2
-        echo "whole output, RAW:" >&2
-        printf '%s' "$output" | cat -A | head -20 >&2
         false
     }
 }
@@ -55,4 +53,39 @@ gen_password_shape() {
     a=$(gen_password)
     b=$(gen_password)
     [ "$a" != "$b" ]
+}
+
+# Every production script here runs under `set -euo pipefail`, so the library
+# has to work under those options -- not only under whatever the test shell
+# happens to use.
+#
+# The implementation used to be
+#     tr -dc 'A-Za-z0-9' </dev/urandom | head -c N
+# which pipes an INFINITE stream into head. head closes the pipe after N
+# characters, and then:
+#   * the writer is killed by SIGPIPE, so the pipeline's status is 141 and
+#     `set -e` aborts the caller before it can use the password, and
+#   * on a coreutils build that reports the error rather than dying silently,
+#     "tr: write error: Broken pipe" lands in the captured output -- so the
+#     password arrives with 44 characters of noise attached.
+# The second symptom made this test fail only on CI, where nobody could see
+# why: the assertion said the length was wrong and nothing else.
+@test "gen_password works under the shell options the production scripts use" {
+    run bash -c 'set -euo pipefail; . "$1/lib/password.sh"; gen_password 32' _ "$REPO_ROOT"
+    [ "$status" -eq 0 ] || {
+        echo "status=$status (141 means the writer was killed by SIGPIPE)" >&2
+        gen_password_shape "$output" >&2
+        false
+    }
+    [ "${#output}" -eq 32 ] || {
+        echo "length=${#output}" >&2
+        echo "non-alphanumeric residue:" >&2
+        gen_password_residue "$output" >&2
+        false
+    }
+    [[ "$output" =~ ^[A-Za-z0-9]+$ ]] || {
+        echo "non-alphanumeric residue:" >&2
+        gen_password_residue "$output" >&2
+        false
+    }
 }
