@@ -7,7 +7,7 @@ load_lib password
 # nobody could see why. The diagnostic prints the LENGTH and the characters
 # that are not [A-Za-z0-9]; it never prints the password itself.
 gen_password_residue() {
-    printf '%s' "$1" | LC_ALL=C tr -d 'A-Za-z0-9' | od -c | head -5
+    printf '%s' "$1" | LC_ALL=C tr -d 'A-Za-z0-9' | cat -A | head -20
 }
 
 @test "gen_password returns 32 chars by default" {
