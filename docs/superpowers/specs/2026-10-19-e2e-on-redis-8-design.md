@@ -433,5 +433,5 @@ URIs: http://deb.debian.org/debian-security   Suites: trixie-security
 | DoD-4 | DoD1/2/3/4/7 与负向 preflight、恢复用例全绿 |
 | DoD-5 | DoD5 按 §7.2 判定：人为不杀 master 时该断言必须**不**通过 |
 | DoD-6 | `cluster-config.sh`、`lib/`、`config/*.template` 零改动 —— **例外见 §2**：`config/redis-cluster.service.template` 的 `ReadWritePaths` 缺陷由决策者拍板修复（`32ac923`） |
-| DoD-7 | 现有测试基线不受影响：bats 149/0、`check_syntax.sh` 30/0、`validate_libs.sh` 50/0 |
+| DoD-7 | 现有测试基线不受影响：bats / `check_syntax.sh` / `validate_libs.sh` 全绿（具体条数见 `docs/HANDOFF.md` 的「当前测试基线」） |
 | DoD-8 | 脚本退出后无残留容器与网络 |

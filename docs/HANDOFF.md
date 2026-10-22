@@ -1,9 +1,9 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-22
-**工作分支**：`fix/e2e-assertion-strength`（第三轮：E2E 断言加固 + 文档回改）
+**工作分支**：`fix/add-node-missing-dir`（第四轮：修 `add-node.sh` 的目录准备 + 补回归覆盖）
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = `cf26fca`（第二轮收尾）
+**基线**：`main` = `16a1765`（第三轮收尾）
 
 ---
 
@@ -23,6 +23,12 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 所以断言失败时脚本照样跑到 `=== E2E PASSED ===` 并退出 0。
 **实测复现过**：把匹配串换成永远不可能成立的值，E2E 依然报 PASSED、退出码 0。
 提交 `3b6d23a`，详见「已知问题二」。
+
+**第四轮修掉了 `add-node.sh` 的目录准备**：它 chown 了一个谁都不创建的
+`/var/log/redis`，`chown` 非零退出、`set -e` 之下整个远端脚本当场中止 ——
+**`systemctl` 一次都没跑到，实例根本没被启动**。现在它的 chown 列表与
+`cluster-config.sh` 的 `create_dirs` 完全一致，并且**第一次有了自动化覆盖**：
+把远端脚本抽出来在沙箱里真跑一遍。
 
 **下一步**：只剩推送与两个已记录的遗留项，见文末。
 
@@ -84,9 +90,47 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 | C | 文档回改：spec 状态改「已实施」；DoD-6 的例外、DoD-7 的 149 | `15a6347` |
 | D | 文档回改：4 份历史文档的 `ReadWritePaths` 补上 `-` 前缀 | `15a6347` |
 
+### 第四轮：修 `add-node.sh` 的目录准备 + 补回归覆盖（`fix/add-node-missing-dir`）
+
+| 步骤 | 内容 | 关键提交 |
+|---|---|---|
+| A | **生产修复**：`add-node.sh` 的 chown 列表与 `create_dirs` 对齐（去掉 `/var/log/redis`，补上 `/etc/redis`） | `0fae866` |
+| B | **回归覆盖**：`tests/add_node.bats` 两条新用例 + `tests/helpers/remote_sandbox.sh` | `0fae866` |
+| C | `check_syntax.sh` 把新的测试支撑脚本纳入语法检查（TOTAL 30 → 31） | `0fae866` |
+| D | 文档：基线数字、spec/plan 不再硬编码会漂移的条数 | 见「提交清单」 |
+
+**这一轮第一次给 `add-node.sh` 加了自动化覆盖。** 它此前**三轮都没被测到**：
+不在 E2E 范围内，单元测试也只比文本。
+
+新用例的做法：把 `add-node.sh` 的四段远端脚本**从文件里抽出来**，在沙箱里
+**按脚本真实的顺序真跑一遍**。沙箱靠两个 shim 实现：
+
+- `sudo` —— 丢掉 sudo 自己的参数，把所有绝对路径重定向进 `$SANDBOX`，
+  并把属主 `redis:redis` 映射成当前用户（`chown` 别人需要 root，
+  而 CI 是以非特权用户跑这些测试的）
+- `systemctl` —— 记录调用并成功，于是测试能**看见脚本到底有没有走到启动服务那一步**
+
+因此**不需要 root，也不会碰真实文件系统**，CI 的裸 ubuntu runner 上直接能跑。
+
+**验证过的 RED→GREEN**（把修复回退后在副本上跑同一条用例）：
+
+```
+not ok 3 add-node.sh's remote setup reaches systemctl when /var/log/redis is absent
+#   remote body 4 failed:
+#   chown: cannot access '.../var/log/redis': No such file or directory
+not ok 4 add-node.sh never chowns a directory it does not create
+#   add-node.sh chowns '/var/log/redis' but never creates it; chown exits non-zero
+```
+
 ---
 
 ## 提交清单（按时间倒序）
+
+### 第四轮 `fix/add-node-missing-dir`
+
+```
+0fae866 fix(add-node): never chown a directory that does not exist
+```
 
 ### 第三轮 `fix/e2e-assertion-strength`
 
@@ -156,13 +200,15 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 
 | 命令 | 预期结果 |
 |---|---|
-| `bats tests/lib/*.bats tests/*.bats` | **149 通过 / 0 失败** |
-| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **149 通过 / 0 失败**（CI 调用方式） |
-| `bash tests/check_syntax.sh` | `TOTAL=30 FAIL=0` |
+| `bats tests/lib/*.bats tests/*.bats` | **151 通过 / 0 失败** |
+| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **151 通过 / 0 失败**（CI 调用方式） |
+| `bash tests/check_syntax.sh` | `TOTAL=31 FAIL=0` |
 | `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 
-> 149 是第二轮 `32ac923` 补了渲染契约测试之后的数字（更早是 148）。
+> 151 是第四轮补了 `tests/add_node.bats` 两条用例之后的数字（第三轮 149）。
+> `TOTAL=31` 是第四轮把 `tests/helpers/remote_sandbox.sh` 纳入语法检查之后的数字
+> （之前 30）。
 
 > **E2E 的退出码 0 现在是可信的**（第三轮 `3b6d23a` 之前不是）：
 > 当时 DoD2/DoD3 的断言是裸 `| grep`，失败也不会让脚本非零退出。
@@ -441,7 +487,15 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
 却是绿的；`ReadWritePaths` 缺目录（上面 13 条）从来没在真实部署里跑过，
 单元测试也只比文本，全绿。
 
-这类错误 149 个单元测试一个都抓不到。**判断标准是：这条代码路径被真正执行过吗？**
+**第三轮又犯了一次**：E2E 自己的三条断言是裸 `| grep`，脚本又没有 `set -e`，
+所以断言失败也照样 PASSED、退出 0（见「已知问题二」）。
+
+**第四轮同样**：下面那条 `add-node.sh` 的缺陷，**三轮里一次都没被测到**，
+因为它不在 E2E 覆盖范围内，而单元测试只比文本 —— 直到第四轮把它抽出来
+**在沙箱里真跑了一遍**，才第一次看到「脚本在 chown 那一行就死了、
+`systemctl` 一次都没跑到」。
+
+这类错误 151 个单元测试一个都抓不到。**判断标准是：这条代码路径被真正执行过吗？**
 
 ### 待处理（审查已报告，未修）
 
@@ -450,11 +504,9 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
 - UTF-8 BOM 的配置首行解析失败，报错难懂
 - `set -u` 在 bash < 4.4 下访问空数组会报错（项目声明支持 Bash 4+）
 
-### 已知问题（本轮发现，**未修**）
+### 已知问题（第二轮发现，**第四轮已修**）：`add-node.sh` 的 `chown` 引用了没人创建的目录
 
-**`add-node.sh:141` 的 `chown` 会引用一个没人创建的目录。**
-
-`add-node.sh` 的远端脚本在 `set -e` 下运行，第 139-140 行只 `mkdir -p` 了
+**原症状**：`add-node.sh` 的远端脚本在 `set -e` 下运行，第 139-140 行只 `mkdir -p` 了
 `/var/lib/redis/cluster/${PORT}`、`/var/run/redis/cluster/${PORT}`、
 `$REDIS_PREFIX/cluster/${PORT}` 和 `$REDIS_PREFIX/log` ——
 **从来不创建 `/var/log/redis`**。但第 141 行是：
@@ -464,23 +516,44 @@ _sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis "$REDIS_
 ```
 
 `chown` 遇到不存在的路径会**以非零退出**，在 `set -e` 下**整个脚本就此中止** ——
-节点加不进去，而且报错信息指向 `chown`，完全看不出真正的原因是「目录没建」。
+节点加不进去。
 
-触发条件：**目标机器上没有 `/var/log/redis`**。
-装过发行版 redis 包的机器有（apt 建的），手工规划的机器没有。
+**实测（第四轮，不是推理）**：把 `add-node.sh` 的远端脚本体抽出来在沙箱里跑，
+`/var/log/redis` 不存在时：
 
-这跟 `32ac923` 修掉的那个 `ReadWritePaths` 缺陷是**同一类问题**
-（列了/用了一个根本没人创建的路径），只是发生在 `add-node.sh` 而不是
-systemd 单元里。
+```
+BODY EXIT=1
+```
 
-**本轮刻意没有修** —— `add-node.sh` 属于生产代码，不在
-「E2E 迁移到 Redis 8」这个变更的范围里。要修的话，最小改动是
-在第 139-140 行的 `mkdir -p` 里补上 `/var/log/redis`
-（或者给 `chown` 加 `|| true` / 改成只 chown 已存在的路径）。
+而且 **`systemctl daemon-reload` 一次都没出现** —— 脚本在 chown 那一行就死了，
+**实例根本没被启动**。
 
-> 注意：`add-node.sh` **不在 `cluster-config.sh` 的 E2E 覆盖范围内** ——
-> E2E 跑的是 `cluster-config.sh` 的 9 步流程，`add-node.sh` 是独立脚本。
-> 所以这个缺陷**至今没有任何自动化测试覆盖**。
+还有一个更阴的地方：`_sudo` 的密码分支是
+`echo "$SUDO_PASS" | sudo -S -p '' "$@" 2>/dev/null`，
+**stderr 被丢掉了**。所以在需要密码的机器上，操作员看到的是「脚本莫名中止」，
+**连 chown 这个词都看不到**。
+
+**根因不是「忘了建目录」，而是「两个脚本对同一件事的做法不一致」。**
+`cluster-config.sh` 的 `create_dirs` 是这件事的参考实现，它 chown 的是：
+
+```bash
+_sudo chown -R redis:redis /etc/redis /var/lib/redis /var/run/redis \
+    "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
+```
+
+**五个路径全部是它自己 `mkdir` 出来的**，所以它不可能撞上缺失路径。
+`add-node.sh` 多了第六个 `/var/log/redis`（没人建），
+**同时又少了 `/etc/redis`**（`2eb4aee` 修过父目录 chown，`add-node.sh` 没跟上）。
+
+**修复**（第四轮）：`add-node.sh` 的 chown 列表改成与 `create_dirs` **完全一致** ——
+去掉 `/var/log/redis`，补上 `/etc/redis`。
+
+> 顺带说明「为什么不干脆把 `/var/log/redis` 建出来」：
+> 没有任何部署路径创建它（`cluster-config.sh` 的 `create_dirs`、`install.sh` 的
+> 源码安装路径都不建，只有 `scripts/smoke-test.sh` 建，而它不是部署路径），
+> redis 的 `logfile` 指向 `$REDIS_PREFIX/log`，这个目录**根本没人写**。
+> 单元模板自己的注释已经写明了这一点，`ReadWritePaths` 的那一项也早就加了
+> `-` 前缀（路径不存在就忽略）。**建一个没人写的目录，只是把症状藏起来。**
 
 ---
 
@@ -582,9 +655,10 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 1. **推送 main**（领先 origin 55 个提交，从未推送）。
    ⚠️ `git ls-remote origin` 2026-10-22 实测仍连不上 GitHub，
    **无法确认 origin/main 是否移动过**。推送前请先确认网络可达，并核对远端是否分叉。
-2. **决定是否修 `add-node.sh:141`**（见上面的「已知问题」）。
-   它是生产代码，仍未动。修的话最小改动是在 `mkdir -p` 里补
-   `/var/log/redis`。
+2. ~~决定是否修 `add-node.sh:141`~~ —— **已完成**（第四轮）。
+   根因不是「忘了建目录」，而是它的 chown 列表与 `cluster-config.sh` 的
+   `create_dirs` 不一致：多了一个没人创建的 `/var/log/redis`，
+   又少了一个 `2eb4aee` 修过的 `/etc/redis`。现已完全对齐，并补了回归验证。
 3. ~~修 E2E 里两处裸 `| grep` 断言~~ —— **已完成**（`3b6d23a`）。
    实际是**三处**，且 DoD3 那处还有「择一即通过」的第二重问题，见「已知问题二」。
 4. 删除旧 worktree 与 `feature/cluster-config-script` 分支
