@@ -1,9 +1,9 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-22
-**工作分支**：`fix/conf-parser-issues`（第六轮：修配置解析器的 4 条审查遗留项 + 修好 CI）
+**工作分支**：无 —— 第六轮已合并进 main 并推送到 `origin/main`
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = 与 `origin/main` 一致（第六轮之前）
+**基线**：`main` = 本仓库 HEAD（已推送，`origin/main` 与之同步）
 
 ---
 
@@ -30,7 +30,17 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 `cluster-config.sh` 的 `create_dirs` 完全一致，并且**第一次有了自动化覆盖**：
 把远端脚本抽出来在沙箱里真跑一遍。
 
-**下一步**：只剩推送与两个已记录的遗留项，见文末。
+**第五轮推翻了第二轮自己的一个错误结论**：`/etc/redis` **确实是** apt 装的
+`2770 redis:redis`（第二轮读错了包）。所以 `2eb4aee` 的归因本来就是对的，
+而且「父目录 chown」对**任何装了发行版 redis 包的主机**都是必须的。
+
+**第六轮修掉了 4 条审查遗留项，并且发现 CI 一直是红的**（两个独立原因，
+都只在 CI 的环境中才看得见）：一条测试用了 bats 1.4 才有的变量（以 root 跑绿、
+以非特权用户跑红），以及 `gen_password` 把无限流灌进 `head` —— CI 的 coreutils
+会报 `tr: write error: Broken pipe` 混进输出，本地那份静默地死。
+**`9b0a6f6` 上 Actions 第一次变成 success。**
+
+**下一步**：只剩两件收尾的事，见文末。
 
 ---
 
@@ -137,10 +147,14 @@ not ok 4 add-node.sh never chowns a directory it does not create
 | B | **同一作用域里重复的键直接报错**（原先后者静默覆盖前者） | 见「提交清单」 |
 | C | **忽略文件开头的 UTF-8 BOM** | 见「提交清单」 |
 | D | **空数组展开改成 bash 4.0+ 都能用的写法** | 见「提交清单」 |
-| E | **修好一直是红的 CI**（见下） | 见「提交清单」 |
-| F | 新增 `scripts/check-bash-compat.sh`：在 bash 4.3 上跑整套 bats | 见「提交清单」 |
+| E | **`gen_password` 不再把无限流灌进 `head`**（CI 红的主因，见下） | 见「提交清单」 |
+| F | `scripts/smoke-test.sh` 改用 `gen_password`（它那条同样的写法**每次都会中止脚本**） | 见「提交清单」 |
+| G | 新增 `scripts/check-bash-compat.sh`：在 bash 4.3 上跑整套 bats | 见「提交清单」 |
 
-**这一轮最重要的发现不是那 4 条遗留项，是 CI 一直是红的。**
+**这一轮最重要的发现不是那 4 条遗留项，是 CI 一直是红的 —— 而且是两个独立的
+原因，两个都只在 CI 的**环境**里才看得见。**
+
+## CI 红的原因之一：`$BATS_TEST_TMPDIR`（bats 版本）
 
 `tests/lib/common.bats` 里那条 `die writes message to stderr` 用了
 `$BATS_TEST_TMPDIR` —— **这个变量 bats 1.4 才有**，而 CI runner 装的是
@@ -149,17 +163,55 @@ ubuntu 22.04 的 **bats 1.2.1**，于是路径变成空串，文件被写到 **`
 - 本地容器是 **root** → 写得进去 → **这条测试一直是绿的**
 - CI 以**非特权用户**跑 → `Permission denied` → **这条测试一直是红的**
 
-也就是说：**这条测试在本地绿、在 CI 红**，而本地绿是因为跑成了 root。
-用 GitHub API 查 `origin/main` 的 Actions 记录，**两次运行都是 `failure`**，
-失败步骤正是 `Run unit tests`。
+已改用 `mktemp`（任何 bats 版本、任何用户都对）。
 
-已改用 `mktemp`（任何 bats 版本、任何用户都对）。**现在整套 bats 在非特权
-用户下全绿** —— 这才是 CI 看到的。
+## CI 红的原因之二：`tr: write error: Broken pipe`（coreutils 构建）
 
-> **教训和之前那些一模一样，只是换了主角**：不是「探测要小心」，而是
-> **「你测的环境未必是别人跑的环境」**。之前是「看的对象不对」
-> （读错包、看错文件），这次是「跑的身份不对」（root vs 非特权）。
-> **验证环境必须和目标环境一致。**
+`lib/password.sh` 的 `gen_password` 原来是：
+
+```bash
+tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len"
+echo
+```
+
+`/dev/urandom` 是**无限流**，`head` 拿够 N 个字符就关管道，写端于是被 SIGPIPE
+杀掉。**这台机器的 coreutils 静默地死，CI runner 的那份不是** —— 它把错误报出来：
+
+```
+m1xvebqa2ZG7dq3Bo2cdMQ3toPHudu5utr: write error: Broken pipe
+tr: write error
+```
+
+于是 CI 上捕获到的 output = 密码 + 44 个字符的噪音，长度变成 76/60/108 而不是
+32/16/64，也不再是纯字母数字。**本地一次都复现不出来** —— 这正是它只能在 CI 上
+红的原因。
+
+**同一行还有第二个后果，而且这才是生产问题**：管道的状态是 **141**，在
+`set -e` 下**直接中止调用方**。实测：
+
+```
+$ bash -c 'set -euo pipefail; . lib/password.sh; gen_password 32; echo REACHED'
+xBuMU24vk9GsaLeoQNXBaa0qhlH9eWwB     <- 密码打出来了
+$ echo $?
+141                                   <- 下一行永远没跑
+```
+
+`scripts/smoke-test.sh` 里有**一模一样的一行**，而它开头就是
+`set -euo pipefail` —— **那个 smoke test 每次都在生成密码这一步中止。**
+
+**修复**：先读**有界**的一段随机字节，再过滤。这样 `tr` 是从**文件**读，不是从
+一个别人会关掉的管道读：没人被杀、没人报错、状态是 0。另外加 `LC_ALL=C`，
+让 `tr` 按字节而不是按字符工作 —— 密码不该取决于它是在哪个 locale 下生成的。
+
+**怎么定位到的**：本地怎么都复现不了，所以给测试加了诊断（打印长度和**非字母
+数字的残留**，不打印密码本身），推到 CI 上让日志说话。第 1 次只看到残留是
+10 个字节的 `:  :  \n:  `；第 2 次把字母数字遮掉看结构；第 3 次直接打印原文，
+才看到 `tr: write error: Broken pipe`。**三轮 CI 换一句实话，比继续猜便宜。**
+
+> **教训**：这已经是同一个模式的**第四次**了。
+> 「你测的环境未必是别人跑的环境」——
+> root vs 非特权（原因一）、这份 coreutils vs 那份 coreutils（原因二）。
+> **本地绿不是证据，除非本地和目标环境一致。**
 
 另外，bats 套件此前**没有开 `set -u`**，而生产脚本都是 `set -uo pipefail`。
 这就是空数组缺陷能藏三轮的原因：函数在测试里没有 `set -u` 时是安全的，
@@ -171,15 +223,17 @@ CI 本来就红的那条）。
 
 | 验证 | 结果 |
 |---|---|
-| 整套 bats，bash 5.1，**非特权用户**（= CI） | **162 / 0** |
-| 整套 bats，**bash 4.3**（`scripts/check-bash-compat.sh`） | **162 / 0** |
+| 整套 bats，bash 5.1，**非特权用户**（= CI） | **163 / 0** |
+| 整套 bats，**bash 4.3**（`scripts/check-bash-compat.sh`） | **163 / 0** |
 | `check_syntax.sh` | `TOTAL=32 FAIL=0` |
 | `validate_libs.sh` | `PASS=50 FAIL=0` |
 | E2E on Redis 8 | 退出码 0 |
+| **GitHub Actions（`Run unit tests`）** | ✅ **success**（`9b0a6f6`）—— **此前每一次都是 failure** |
 
-**新增的 11 条用例全部验证过 RED→GREEN**（把 `lib/conf.sh` 换回修复前的版本
-再跑）。其中 9 条在 bash 5.1 上就是红的；空数组那 2 条**只在 bash 4.3 上
-才是红的** —— 这正是 `check-bash-compat.sh` 存在的理由。
+**新增的 12 条用例全部验证过 RED→GREEN**（把 `lib/conf.sh` / `lib/password.sh`
+换回修复前的版本再跑）。其中 10 条在 bash 5.1 上就是红的；空数组那 2 条**只在
+bash 4.3 上才是红的** —— 这正是 `check-bash-compat.sh` 存在的理由。
+`gen_password` 那条（生产 shell 选项下状态 141）在本地就是红的。
 
 ---
 
@@ -191,6 +245,22 @@ CI 本来就红的那条）。
 7d1a364 docs: record the fourth round and stop duplicating the test counts
 0fae866 fix(add-node): never chown a directory that does not exist
 ```
+
+### 第六轮 `fix/conf-parser-issues`
+
+```
+9b0a6f6 fix(password): stop piping an infinite stream into head
+1d1a0d6 test(password): print the raw captured output once, to identify the source
+0960fd2 test(password): also show the shape of the captured output
+3e852f8 test(password): dump the residue verbatim instead of through od
+3546a85 test(password): show what came back when the length assertion fails
+1ed7036 docs: record the sixth round, and the CI that had been red
+a1b0fd7 fix(conf): four parser defects, and the CI that was hiding one of them
+```
+
+> 中间 4 个 `test(password):` 提交是**定位 CI 失败用的脚手架**，一次比一次多打印
+> 一点东西，最后才看到 `tr: write error: Broken pipe`。它们保留在历史里是有意的
+> —— 下一次再遇到「只有 CI 红」时，这条路可以直接照着走。
 
 ### 第五轮 `docs/correct-apt-attribution`
 
@@ -267,18 +337,17 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 
 | 命令 | 预期结果 |
 |---|---|
-| `bats tests/lib/*.bats tests/*.bats` | **162 通过 / 0 失败** |
-| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **162 通过 / 0 失败**（CI 调用方式） |
+| `bats tests/lib/*.bats tests/*.bats` | **163 通过 / 0 失败** |
+| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **163 通过 / 0 失败**（CI 调用方式） |
 | `bash tests/check_syntax.sh` | `TOTAL=32 FAIL=0` |
 | `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
 | `bash scripts/check-bash-compat.sh` | `BASH_COMPAT: PASS`（在 bash 4.3 上跑同一套 bats） |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 
-> 162 是第六轮补了 11 条解析器用例之后的数字（第五轮 151）。
-> `TOTAL=32` 是第六轮把 `scripts/check-bash-compat.sh` 纳入语法检查之后的数字。
+> 163 是第六轮补了 12 条用例之后的数字（第五轮 151）。
 
 > ⚠️ **跑 bats 请用非特权用户。** 整套 bats 现在开了 `set -u`（与生产脚本一致），
-> 而**以 root 跑会掩盖以非特权用户跑才会暴露的问题** —— 上一轮就有一条测试
+> 而**以 root 跑会掩盖以非特权用户跑才会暴露的问题** —— 第六轮就有一条测试
 > 因为「以 root 跑」而在本地绿、在 CI 红。CI runner 就是非特权用户。
 > **验证环境必须和目标环境一致。**
 
@@ -813,7 +882,7 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第六轮（修配置解析器的 4 条审查遗留项 + 修好 CI）已收尾。** 剩下的动作：
+**第六轮（修配置解析器的 4 条审查遗留项 + 修好 CI）已完成并推送。** 剩下的动作：
 
 1. ~~推送 main~~ —— **已完成**（2026-10-22）。推送前重新核对过：
    `git ls-remote origin` 可达，`origin/main` = `5c191f1`，**ahead 62 / behind 0**，
@@ -842,9 +911,14 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 7. ~~审查已报的 4 条解析器遗留项~~ —— **已完成**（第六轮）：
    `unset -f` 删掉调用方同名函数、同组内重复键静默覆盖、UTF-8 BOM 首行解析失败、
    `set -u` 在 bash < 4.4 下访问空数组报错。四条全部修掉，并各配了回归用例。
-8. **CI 一直是红的** —— **已修**（第六轮）。根因是一条测试用了 bats 1.4 才有的
-   `$BATS_TEST_TMPDIR`，在 CI 的 bats 1.2.1 上路径变成 `/die.err`，
-   **以 root 跑绿、以非特权用户跑红**。改用 `mktemp`。
+8. **CI 一直是红的** —— **已修**（第六轮，`9b0a6f6` 上 Actions 变成 success）。
+   **两个独立原因**，都只在 CI 的环境中才看得见：
+   (a) 一条测试用了 bats 1.4 才有的 `$BATS_TEST_TMPDIR`，在 CI 的 bats 1.2.1 上
+   路径变成 `/die.err` —— **以 root 跑绿、以非特权用户跑红**；
+   (b) `gen_password` 把无限流灌进 `head`，CI runner 的 coreutils 会报
+   `tr: write error: Broken pipe` 到 stderr，噪音混进捕获的输出 —— 本地那份
+   coreutils 静默地死，所以**本地一次都复现不出来**。
+   详见上面「第六轮」。
    > **顺手发现的一个系统性缺口**：bats 套件此前**没有开 `set -u`**，
    > 而生产脚本都是 `set -uo pipefail` —— 这就是空数组缺陷能藏三轮的原因。
    > 现在 `tests/setup.bash` 的 `setup()` 里开了 `set -u`。
