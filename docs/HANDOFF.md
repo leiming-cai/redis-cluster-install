@@ -1,9 +1,9 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-22
-**工作分支**：无 —— 第四、五轮均已合并进 main 并**推送到 `origin/main`**
+**工作分支**：`fix/conf-parser-issues`（第六轮：修配置解析器的 4 条审查遗留项 + 修好 CI）
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = 本仓库 HEAD（已推送，`origin/main` 与之同步）
+**基线**：`main` = 与 `origin/main` 一致（第六轮之前）
 
 ---
 
@@ -99,13 +99,6 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 | C | `check_syntax.sh` 把新的测试支撑脚本纳入语法检查（TOTAL 30 → 31） | `0fae866` |
 | D | 文档：基线数字、spec/plan 不再硬编码会漂移的条数 | `7d1a364` |
 
-### 第五轮：更正 apt 归因（`docs/correct-apt-attribution`）
-
-| 步骤 | 内容 | 关键提交 |
-|---|---|---|
-| A | 实测推翻第二轮的「更正」：`/etc/redis` **确实是** apt 装的 `2770 redis:redis` | `8a8e4a3` |
-| B | 修正 5 处文档 + 2 处生产代码注释（**生产文件只改注释**） | `8a8e4a3` |
-
 **这一轮第一次给 `add-node.sh` 加了自动化覆盖。** 它此前**三轮都没被测到**：
 不在 E2E 范围内，单元测试也只比文本。
 
@@ -128,6 +121,65 @@ not ok 3 add-node.sh's remote setup reaches systemctl when /var/log/redis is abs
 not ok 4 add-node.sh never chowns a directory it does not create
 #   add-node.sh chowns '/var/log/redis' but never creates it; chown exits non-zero
 ```
+
+### 第五轮：更正 apt 归因（`docs/correct-apt-attribution`）
+
+| 步骤 | 内容 | 关键提交 |
+|---|---|---|
+| A | 实测推翻第二轮的「更正」：`/etc/redis` **确实是** apt 装的 `2770 redis:redis` | `8a8e4a3` |
+| B | 修正 5 处文档 + 2 处生产代码注释（**生产文件只改注释**） | `8a8e4a3` |
+
+### 第六轮：修配置解析器的 4 条审查遗留项（`fix/conf-parser-issues`）
+
+| 步骤 | 内容 | 关键提交 |
+|---|---|---|
+| A | **不再删掉调用方的函数**：`_conf_flush_node` 挪到顶层 `conf_flush_node`，去掉 `unset -f` | 见「提交清单」 |
+| B | **同一作用域里重复的键直接报错**（原先后者静默覆盖前者） | 见「提交清单」 |
+| C | **忽略文件开头的 UTF-8 BOM** | 见「提交清单」 |
+| D | **空数组展开改成 bash 4.0+ 都能用的写法** | 见「提交清单」 |
+| E | **修好一直是红的 CI**（见下） | 见「提交清单」 |
+| F | 新增 `scripts/check-bash-compat.sh`：在 bash 4.3 上跑整套 bats | 见「提交清单」 |
+
+**这一轮最重要的发现不是那 4 条遗留项，是 CI 一直是红的。**
+
+`tests/lib/common.bats` 里那条 `die writes message to stderr` 用了
+`$BATS_TEST_TMPDIR` —— **这个变量 bats 1.4 才有**，而 CI runner 装的是
+ubuntu 22.04 的 **bats 1.2.1**，于是路径变成空串，文件被写到 **`/die.err`**：
+
+- 本地容器是 **root** → 写得进去 → **这条测试一直是绿的**
+- CI 以**非特权用户**跑 → `Permission denied` → **这条测试一直是红的**
+
+也就是说：**这条测试在本地绿、在 CI 红**，而本地绿是因为跑成了 root。
+用 GitHub API 查 `origin/main` 的 Actions 记录，**两次运行都是 `failure`**，
+失败步骤正是 `Run unit tests`。
+
+已改用 `mktemp`（任何 bats 版本、任何用户都对）。**现在整套 bats 在非特权
+用户下全绿** —— 这才是 CI 看到的。
+
+> **教训和之前那些一模一样，只是换了主角**：不是「探测要小心」，而是
+> **「你测的环境未必是别人跑的环境」**。之前是「看的对象不对」
+> （读错包、看错文件），这次是「跑的身份不对」（root vs 非特权）。
+> **验证环境必须和目标环境一致。**
+
+另外，bats 套件此前**没有开 `set -u`**，而生产脚本都是 `set -uo pipefail`。
+这就是空数组缺陷能藏三轮的原因：函数在测试里没有 `set -u` 时是安全的，
+在生产里不是。**现在 `tests/setup.bash` 的 `setup()` 里开了 `set -u`**，
+整套 bats 都按生产的 shell 选项跑（开完只多出一个失败，就是上面那条
+CI 本来就红的那条）。
+
+### 第六轮的验证
+
+| 验证 | 结果 |
+|---|---|
+| 整套 bats，bash 5.1，**非特权用户**（= CI） | **162 / 0** |
+| 整套 bats，**bash 4.3**（`scripts/check-bash-compat.sh`） | **162 / 0** |
+| `check_syntax.sh` | `TOTAL=32 FAIL=0` |
+| `validate_libs.sh` | `PASS=50 FAIL=0` |
+| E2E on Redis 8 | 退出码 0 |
+
+**新增的 11 条用例全部验证过 RED→GREEN**（把 `lib/conf.sh` 换回修复前的版本
+再跑）。其中 9 条在 bash 5.1 上就是红的；空数组那 2 条**只在 bash 4.3 上
+才是红的** —— 这正是 `check-bash-compat.sh` 存在的理由。
 
 ---
 
@@ -215,15 +267,20 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 
 | 命令 | 预期结果 |
 |---|---|
-| `bats tests/lib/*.bats tests/*.bats` | **151 通过 / 0 失败** |
-| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **151 通过 / 0 失败**（CI 调用方式） |
-| `bash tests/check_syntax.sh` | `TOTAL=31 FAIL=0` |
+| `bats tests/lib/*.bats tests/*.bats` | **162 通过 / 0 失败** |
+| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **162 通过 / 0 失败**（CI 调用方式） |
+| `bash tests/check_syntax.sh` | `TOTAL=32 FAIL=0` |
 | `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
+| `bash scripts/check-bash-compat.sh` | `BASH_COMPAT: PASS`（在 bash 4.3 上跑同一套 bats） |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 
-> 151 是第四轮补了 `tests/add_node.bats` 两条用例之后的数字（第三轮 149）。
-> `TOTAL=31` 是第四轮把 `tests/helpers/remote_sandbox.sh` 纳入语法检查之后的数字
-> （之前 30）。
+> 162 是第六轮补了 11 条解析器用例之后的数字（第五轮 151）。
+> `TOTAL=32` 是第六轮把 `scripts/check-bash-compat.sh` 纳入语法检查之后的数字。
+
+> ⚠️ **跑 bats 请用非特权用户。** 整套 bats 现在开了 `set -u`（与生产脚本一致），
+> 而**以 root 跑会掩盖以非特权用户跑才会暴露的问题** —— 上一轮就有一条测试
+> 因为「以 root 跑」而在本地绿、在 CI 红。CI runner 就是非特权用户。
+> **验证环境必须和目标环境一致。**
 
 > **E2E 的退出码 0 现在是可信的**（第三轮 `3b6d23a` 之前不是）：
 > 当时 DoD2/DoD3 的断言是裸 `| grep`，失败也不会让脚本非零退出。
@@ -552,12 +609,17 @@ $ stat -c '%n %a %U:%G' /etc/redis /var/log/redis
 
 这类错误 151 个单元测试一个都抓不到。**判断标准是：这条代码路径被真正执行过吗？**
 
-### 待处理（审查已报告，未修）
+### 待处理（审查已报告，第六轮全部修完）
 
-- `unset -f` 会删掉调用方同名函数（`lib/conf.sh` 的嵌套 `_conf_flush_node` 有此问题）
-- 同组内重复键静默后者覆盖前者（`host` / `ports` 都会）
-- UTF-8 BOM 的配置首行解析失败，报错难懂
-- `set -u` 在 bash < 4.4 下访问空数组会报错（项目声明支持 Bash 4+）
+- ~~`unset -f` 会删掉调用方同名函数~~ —— **已修**（第六轮）。嵌套的
+  `_conf_flush_node` 挪到顶层 `conf_flush_node`，`parse_conf` 不再定义、
+  也不再 `unset -f` 任何东西。
+- ~~同组内重复键静默后者覆盖前者~~ —— **已修**（第六轮）。同一作用域里
+  重复的键现在直接报错，并指出第一次出现的位置。
+- ~~UTF-8 BOM 的配置首行解析失败，报错难懂~~ —— **已修**（第六轮）。BOM 被忽略。
+- ~~`set -u` 在 bash < 4.4 下访问空数组会报错~~ —— **已修**（第六轮）。
+  展开改成 `"${arr[@]+"${arr[@]}"}"` 这种 bash 4.0+ 都能用的写法，
+  并且新增 `scripts/check-bash-compat.sh` 在 bash 4.3 上跑整套 bats。
 
 ### 已知问题（第二轮发现，**第四轮已修**）：`add-node.sh` 的 `chown` 引用了没人创建的目录
 
@@ -751,7 +813,7 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第四轮（修 `add-node.sh` + 更正 apt 归因）已完成并推送，没有遗留的实现任务。** 剩下的动作：
+**第六轮（修配置解析器的 4 条审查遗留项 + 修好 CI）已收尾。** 剩下的动作：
 
 1. ~~推送 main~~ —— **已完成**（2026-10-22）。推送前重新核对过：
    `git ls-remote origin` 可达，`origin/main` = `5c191f1`，**ahead 62 / behind 0**，
@@ -777,9 +839,19 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 6. spec §8 的 DoD 清单里，`tests/lib/preflight.bats` 计划要求存在，
    实际从未创建 —— preflight 走真实 SSH，按设计只由 E2E 覆盖，没有单元测试。
    这是**有意的设计决定**，不是遗漏。
-7. **待处理（审查已报告，未修）**（见上面「待处理」一节）：
+7. ~~审查已报的 4 条解析器遗留项~~ —— **已完成**（第六轮）：
    `unset -f` 删掉调用方同名函数、同组内重复键静默覆盖、UTF-8 BOM 首行解析失败、
-   `set -u` 在 bash < 4.4 下访问空数组报错。
+   `set -u` 在 bash < 4.4 下访问空数组报错。四条全部修掉，并各配了回归用例。
+8. **CI 一直是红的** —— **已修**（第六轮）。根因是一条测试用了 bats 1.4 才有的
+   `$BATS_TEST_TMPDIR`，在 CI 的 bats 1.2.1 上路径变成 `/die.err`，
+   **以 root 跑绿、以非特权用户跑红**。改用 `mktemp`。
+   > **顺手发现的一个系统性缺口**：bats 套件此前**没有开 `set -u`**，
+   > 而生产脚本都是 `set -uo pipefail` —— 这就是空数组缺陷能藏三轮的原因。
+   > 现在 `tests/setup.bash` 的 `setup()` 里开了 `set -u`。
+9. **把 `scripts/check-bash-compat.sh` 接进 CI**（还没做）——
+   它是**唯一能看见 bash 4.0-4.3 那类 bug 的地方**（CI 跑的是 bash 5.1）。
+   CI 的 `container:` 作业需要容器里有 node 才能跑 `actions/checkout`，
+   这条路要自己验一下，不是加一行就完事。
 
 ### 给下一个执行者的提醒
 

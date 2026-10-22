@@ -273,6 +273,12 @@ bash cluster-config.sh --help
 - 解析器**只做键值切分，绝不执行文件内容**
 - `#` 只支持整行注释。值后面写 `# ...` 会**直接报错**而不是被吞掉 ——
   密码里出现 `#` 是合法字符，静默截断比报错更危险
+- **同一个作用域里一个键不能写两次**。重复的 `host` / `ports` / `ssh_port`
+  （节点组内）或 `redis_prefix` / `cluster_password` / `bind_addr`（顶层）
+  会**直接报错并指出第一次出现的位置**。原先是后者静默覆盖前者 ——
+  操作员写的第一个值凭空消失，用上的是第二个，而且没有任何提示。
+  不同节点组里写同名的键是正常的，不受影响
+- 文件开头的 **UTF-8 BOM** 会被忽略（Windows 编辑器可能自动加上）
 - `redis_prefix` 必须与目标机器上的实际路径一致，否则 `redis.conf` 与 unit
   会指向不同目录，在 `ProtectSystem=strict` 下导致 Redis 起不来
 - `ports` 每个元素和 `ssh_port` 都必须是 1-65535 的十进制整数，逗号分隔
@@ -644,6 +650,9 @@ find tests -name '*.bats' -print0 | xargs -0 bats
 bash tests/check_syntax.sh
 bash tests/validate_libs.sh
 
+# 在项目支持的最老 bash（4.3）上跑整套 bats（需要 docker）
+bash scripts/check-bash-compat.sh
+
 # Docker 端到端（需要 docker + sshpass）
 bash scripts/smoke-test.sh
 
@@ -655,7 +664,14 @@ bash scripts/e2e-cluster-config.sh
 > 它在两个 Docker 容器里用 apt 装的 redis-server 手工复刻了一遍集群搭建流程，
 > 因此**它通过不代表 `install.sh` 本身可用**，只能作为 redis-cli 行为的参考验证。
 
-CI（`.github/workflows/ci.yml`）跑 bats + `bash -n` 语法检查，不跑 smoke test。
+> ⚠️ **`scripts/check-bash-compat.sh` 不是可有可无的。**
+> 本项目声明支持 **bash 4+**，但 **bash 4.4 之前**，`set -u` 下展开一个**空数组**
+> 会直接报 `unbound variable`；而 CI 跑的是 ubuntu 22.04 的 **bash 5.1**，
+> 那条路径在 CI 上根本走不到。
+> 这个脚本在 `bash:4.3` 容器里跑同一套 bats，**唯一能看见那类 bug 的地方**。
+
+CI（`.github/workflows/ci.yml`）跑 bats + `bash -n` 语法检查，不跑 smoke test，
+也不跑 `check-bash-compat.sh`（那需要 docker）。
 
 ---
 
