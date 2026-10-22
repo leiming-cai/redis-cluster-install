@@ -34,7 +34,8 @@ done
 
 echo
 echo "=== Test support script syntax check ==="
-for f in tests/setup.bash; do
+for f in tests/setup.bash tests/helpers/*.sh; do
+    [ -e "$f" ] || continue
     TOTAL=$((TOTAL+1))
     if bash -n "$f" 2>"$TMP_ERR"; then
         echo "OK: $f"

@@ -138,7 +138,25 @@ _sudo() {
 }
 _sudo mkdir -p "/var/lib/redis/cluster/${PORT}" "/var/run/redis/cluster/${PORT}"
 _sudo mkdir -p "$REDIS_PREFIX/cluster/${PORT}" "$REDIS_PREFIX/log"
-_sudo chown -R redis:redis /var/lib/redis /var/log/redis /var/run/redis "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
+# Chown the same set cluster-config.sh's create_dirs chowns: the parents of
+# the directories created above, plus /etc/redis, which the earlier blocks
+# populated. Every path named here exists by the time this runs, so chown
+# cannot fail on a missing directory.
+#
+# /var/log/redis is deliberately NOT in this list. Nothing in the deployment
+# path creates it -- the redis logfile lives under $REDIS_PREFIX/log -- so
+# naming it here made chown exit non-zero on any host without the distro
+# redis package. The remote script runs under `set -e`, so that aborted it
+# right here, before systemctl ever ran: the instance was never started. The
+# error was invisible whenever sudo needed a password, because _sudo's
+# password branch sends stderr to /dev/null.
+#
+# /etc/redis IS in this list, for the same reason cluster-config.sh chowns it
+# (commit 2eb4aee): on a host where /etc/redis is 0770 redis:redis with the
+# setgid bit, a redis user recreated with a new uid cannot traverse the
+# parent, and the instance cannot read its auth.conf.
+_sudo chown -R redis:redis /etc/redis /var/lib/redis /var/run/redis \
+    "$REDIS_PREFIX/cluster" "$REDIS_PREFIX/log"
 _sudo systemctl daemon-reload
 _sudo systemctl enable "redis-${PORT}"
 _sudo systemctl restart "redis-${PORT}"
