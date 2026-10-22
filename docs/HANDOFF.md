@@ -1,9 +1,9 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-22
-**工作分支**：`fix/add-node-missing-dir`（第四轮：修 `add-node.sh` 的目录准备 + 补回归覆盖）
+**工作分支**：无 —— 第四、五轮均已合并进 main 并**推送到 `origin/main`**
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = `16a1765`（第三轮收尾）
+**基线**：`main` = 本仓库 HEAD（已推送，`origin/main` 与之同步）
 
 ---
 
@@ -97,7 +97,14 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 | A | **生产修复**：`add-node.sh` 的 chown 列表与 `create_dirs` 对齐（去掉 `/var/log/redis`，补上 `/etc/redis`） | `0fae866` |
 | B | **回归覆盖**：`tests/add_node.bats` 两条新用例 + `tests/helpers/remote_sandbox.sh` | `0fae866` |
 | C | `check_syntax.sh` 把新的测试支撑脚本纳入语法检查（TOTAL 30 → 31） | `0fae866` |
-| D | 文档：基线数字、spec/plan 不再硬编码会漂移的条数 | 见「提交清单」 |
+| D | 文档：基线数字、spec/plan 不再硬编码会漂移的条数 | `7d1a364` |
+
+### 第五轮：更正 apt 归因（`docs/correct-apt-attribution`）
+
+| 步骤 | 内容 | 关键提交 |
+|---|---|---|
+| A | 实测推翻第二轮的「更正」：`/etc/redis` **确实是** apt 装的 `2770 redis:redis` | `8a8e4a3` |
+| B | 修正 5 处文档 + 2 处生产代码注释（**生产文件只改注释**） | `8a8e4a3` |
 
 **这一轮第一次给 `add-node.sh` 加了自动化覆盖。** 它此前**三轮都没被测到**：
 不在 E2E 范围内，单元测试也只比文本。
@@ -129,7 +136,14 @@ not ok 4 add-node.sh never chowns a directory it does not create
 ### 第四轮 `fix/add-node-missing-dir`
 
 ```
+7d1a364 docs: record the fourth round and stop duplicating the test counts
 0fae866 fix(add-node): never chown a directory that does not exist
+```
+
+### 第五轮 `docs/correct-apt-attribution`
+
+```
+8a8e4a3 docs: the 0770+setgid /etc/redis shape IS apt's doing
 ```
 
 ### 第三轮 `fix/e2e-assertion-strength`
@@ -660,25 +674,37 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 与主分支的关系
 
-- 主仓库 `D:\work\rediscluterproject`，当前分支 `fix/e2e-assertion-strength`，`main` = `cf26fca`
-- **上一轮**（14 个 Task）已合并进 main：`git merge --no-ff feature/cluster-config-script`（`54438d8` → `96737d2`）
+- 主仓库 `D:\work\rediscluterproject`，当前检出 `main`，工作区干净
+- **第一轮**（14 个 Task）已合并进 main：`git merge --no-ff feature/cluster-config-script`（`54438d8` → `96737d2`）
   - 合并前用 `git merge-tree` 预检过，exit 0、无冲突标记；实际合并也确实干净
   - 合并后在主仓库重跑：`bats 148/0`、`check_syntax 30/0`、`validate_libs 50/0`、E2E 全绿
 - **第二轮**（E2E 迁 Redis 8）**已合并进 main**：`git merge --ff-only feature/e2e-redis-8`（`18dd8ef` → `d073da5`）
   - 相对 `main` = `18dd8ef` 领先 11 个提交，因 main 未动过，故为**纯 fast-forward，无需预检**
   - 分支 `feature/e2e-redis-8` 已 `git branch -d` 删除
   - 合并后在主仓库重跑：`bats 149/0`、`check_syntax 30/0`、`validate_libs 50/0`、E2E 退出码 0
-- **第三轮**（E2E 断言加固 + 文档回改）在 `fix/e2e-assertion-strength` 上，`main` = `cf26fca` 未动过，
-  因此同样是**纯 fast-forward**
-  - 代码提交 `3b6d23a` 只改 `scripts/e2e-cluster-config.sh`
+- **第三轮**（E2E 断言加固 + 文档回改）**已合并进 main**：`git merge --ff-only fix/e2e-assertion-strength`（`cf26fca` → `16a1765`）
+  - 分支已 `git branch -d` 删除
   - 验证：`bats 149/0`、`check_syntax 30/0`、`validate_libs 50/0`，E2E 干净跑退出码 0，
     三个变异探针全部按预期失败（见「已知问题二」）
-- **⚠️ main 领先 `origin/main` 55 个提交，从未推送。** 第二轮合并时 `git pull` **失败**
-  （GitHub 不可达：`Recv failure: Connection was reset`），第三轮开工前再次实测
-  `git ls-remote origin` **仍然连不上**（`Failed to connect to github.com:443`），
-  所以**无法确认 origin/main 期间是否移动过**。推送前请先确认网络可达并核对。
-- 旧的 worktree `C:\Users\蔡雷鸣\.local\share\opencode\worktree\3e438c\cluster-config-script`
-  （分支 `feature/cluster-config-script`）**仍保留在原处**，内容与 main 一致，可随时清理
+- **第四轮**（修 `add-node.sh` + 补回归覆盖）**已合并进 main**：`git merge --ff-only fix/add-node-missing-dir`（`16a1765` → `7d1a364`）
+  - 分支已 `git branch -d` 删除
+  - 验证：`bats 151/0`、`check_syntax 31/0`、`validate_libs 50/0`、E2E 退出码 0；
+    新增的两条用例**在修复前确认会失败**（见「第四轮」一节）
+- **第五轮**（更正 apt 归因）**已合并进 main**：`git merge --ff-only docs/correct-apt-attribution`（`7d1a364` → `8a8e4a3`）
+  - 生产文件**只改注释**（已用 `git diff` 逐行核过）
+- **✅ main 已推送到 `origin/main`**。2026-10-22 推送前重新核对过：
+  `git ls-remote origin` **可达**，`origin/main` = `5c191f1`，与本地是
+  **纯 fast-forward（ahead 61 / behind 0）**，远端期间**没有移动过**。
+  推送后两者一致 —— 以 `git log origin/main -1` 为准。
+  > 前三轮之所以推不了，是 GitHub 从这台机器不可达
+  > （`Recv failure: Connection was reset` / `Failed to connect to github.com:443`），
+  > **不是**配置问题。网络恢复后一次推成功。
+- 旧的 worktree 与 `feature/cluster-config-script` 分支**已清理**：
+  `git worktree remove` 删掉了全部内容并注销了登记（`git worktree list` 只剩主仓库），
+  分支已 `git branch -d` 删除（它相对 main 的独有提交数为 0）。
+  目录本身还剩一个**空壳** —— `opencode.exe` 进程把它当工作目录占着，
+  Windows 拒绝删除被占用的目录。**那个目录归 harness 管**，
+  等占用它的会话退出后（或重启）删掉即可，git 状态已经是干净的。
 
 ### 合并时处理的一件事（上一轮）
 
@@ -691,34 +717,30 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第三轮（E2E 断言加固 + 文档回改）已完成，没有遗留的实现任务。** 剩下的动作：
+**第四轮（修 `add-node.sh` + 更正 apt 归因）已完成并推送，没有遗留的实现任务。** 剩下的动作：
 
-1. **推送 main**（领先 origin 55 个提交，从未推送）。
-   ⚠️ `git ls-remote origin` 2026-10-22 实测仍连不上 GitHub，
-   **无法确认 origin/main 是否移动过**。推送前请先确认网络可达，并核对远端是否分叉。
+1. ~~推送 main~~ —— **已完成**（2026-10-22）。推送前重新核对过：
+   `git ls-remote origin` 可达，`origin/main` = `5c191f1`，**ahead 61 / behind 0**，
+   远端期间没有移动过，推送是纯 fast-forward。
 2. ~~决定是否修 `add-node.sh:141`~~ —— **已完成**（第四轮）。
    根因不是「忘了建目录」，而是它的 chown 列表与 `cluster-config.sh` 的
    `create_dirs` 不一致：多了一个没人创建的 `/var/log/redis`，
    又少了一个 `2eb4aee` 修过的 `/etc/redis`。现已完全对齐，并补了回归验证。
 3. ~~修 E2E 里两处裸 `| grep` 断言~~ —— **已完成**（`3b6d23a`）。
    实际是**三处**，且 DoD3 那处还有「择一即通过」的第二重问题，见「已知问题二」。
-4. 删除旧 worktree 与 `feature/cluster-config-script` 分支
-   （内容已全部在 main 上，两者均未被本轮改动）：
-   ```powershell
-   cd D:\work\rediscluterproject
-   git worktree remove "C:\Users\蔡雷鸣\.local\share\opencode\worktree\3e438c\cluster-config-script"
-   git worktree prune
-   git branch -d feature/cluster-config-script
-   ```
-   ⚠️ **顺序有讲究**：分支正被该 worktree 检出，必须先删 worktree 再删分支，
-   否则 `git branch -d` 会失败。
-5. ~~计划文档里的代码片段与仓库现状有出入~~ —— **已完成**（本分支）。
+4. ~~删除旧 worktree 与 `feature/cluster-config-script` 分支~~ —— **已完成**。
+   git 登记已注销、文件已删净、分支已删除；只剩一个被 `opencode.exe`
+   占用的**空目录**，等占用它的会话退出后删掉即可（见「与主分支的关系」）。
+5. ~~计划文档里的代码片段与仓库现状有出入~~ —— **已完成**（第三轮）。
    两份实施计划与两份 spec 的 `ReadWritePaths` 都补了 `-` 前缀；
    2026-10-19 的计划里被实测证伪的结论（gosu/su-exec、`--tmpfs /data`、
    148 tests）也已在原处标注证伪过程。
 6. spec §8 的 DoD 清单里，`tests/lib/preflight.bats` 计划要求存在，
    实际从未创建 —— preflight 走真实 SSH，按设计只由 E2E 覆盖，没有单元测试。
    这是**有意的设计决定**，不是遗漏。
+7. **待处理（审查已报告，未修）**（见上面「待处理」一节）：
+   `unset -f` 删掉调用方同名函数、同组内重复键静默覆盖、UTF-8 BOM 首行解析失败、
+   `set -u` 在 bash < 4.4 下访问空数组报错。
 
 ### 给下一个执行者的提醒
 
