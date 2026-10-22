@@ -229,9 +229,29 @@ for spec in "$A_IP:6379" "$A_IP:6380" "$A_IP:6381" \
 done
 
 log "DoD2/3: cluster check + info"
-ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --cluster check $A_IP:6379" | grep -E "All 16384 slots covered"
-ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -h $A_IP -p 6379 cluster info" \
-    | grep -E "cluster_state:ok|cluster_slots_assigned:16384|cluster_known_nodes:6"
+# Every assertion in this script is guarded with `|| fail`. These two used to
+# be bare pipelines, and because the script runs under `set -uo pipefail`
+# WITHOUT `set -e`, a grep that did not match was swallowed: the run carried
+# on to "=== E2E PASSED ===" and exited 0 while the cluster was in exactly the
+# state the assertion existed to reject.
+#
+# The output is captured and matched afterwards rather than piped straight
+# into grep, so the guard depends on WHAT THE REPORT SAYS and not on
+# redis-cli's exit status. Under `pipefail` a piped guard would also fail the
+# run whenever redis-cli returned non-zero -- a different assertion from the
+# one being made here.
+check_report="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --cluster check $A_IP:6379")"
+grep -E "All 16384 slots covered" <<< "$check_report" \
+    || fail "cluster check did not report all 16384 slots covered"
+
+# One capture, then require EACH condition. The old form was a single grep
+# with `|` alternation, which passes as soon as ANY ONE of the three holds:
+# a cluster whose slots were covered but whose state was not ok still counted
+# as DoD3 passing.
+cluster_report="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS -h $A_IP -p 6379 cluster info")"
+grep -E "^cluster_state:ok"             <<< "$cluster_report" || fail "cluster_state is not ok"
+grep -E "^cluster_slots_assigned:16384" <<< "$cluster_report" || fail "not all 16384 slots are assigned"
+grep -E "^cluster_known_nodes:6"        <<< "$cluster_report" || fail "cluster_known_nodes is not 6"
 
 log "DoD4: cross-machine read/write"
 # -h and -p are mandatory here: `redis-cli -c` without them talks to
@@ -343,6 +363,11 @@ echo "  promotion OK"
 
 ssh_root "$A_IP" "systemctl start redis-6379"
 sleep 8
-ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 cluster info" | grep "cluster_state:ok"
+# Same shape as the DoD2/3 assertions: capture, then require the condition,
+# so a report that does not say the cluster is ok fails the run instead of
+# scrolling past.
+final_report="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 cluster info")"
+grep -E "^cluster_state:ok" <<< "$final_report" \
+    || fail "cluster_state is not ok after the killed master was restarted"
 
 log "E2E PASSED"
