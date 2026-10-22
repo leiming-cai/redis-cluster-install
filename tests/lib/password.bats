@@ -10,6 +10,12 @@ gen_password_residue() {
     printf '%s' "$1" | LC_ALL=C tr -d 'A-Za-z0-9' | cat -A | head -20
 }
 
+# The whole captured output, with every alphanumeric masked, so the STRUCTURE
+# is visible without printing a password.
+gen_password_shape() {
+    printf '%s' "$1" | LC_ALL=C tr 'A-Za-z0-9' 'X' | cat -A | head -20
+}
+
 @test "gen_password returns 32 chars by default" {
     run gen_password
     [ "$status" -eq 0 ]
@@ -17,6 +23,8 @@ gen_password_residue() {
         echo "length=${#output}" >&2
         echo "non-alphanumeric residue:" >&2
         gen_password_residue "$output" >&2
+        echo "whole output, alphanumerics masked:" >&2
+        gen_password_shape "$output" >&2
         false
     }
 }
