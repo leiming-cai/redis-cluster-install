@@ -45,7 +45,14 @@ conf_normalise_ports() {
     if [ -n "$raw" ]; then
         IFS=',' read -r -a raw_parts <<< "$raw"
     fi
-    for p in "${raw_parts[@]}"; do
+    # The ${raw_parts[@]+...} wrapper is the portable way to expand an array
+    # that may be EMPTY. On bash 4.4 and newer an empty array expands to
+    # nothing even under `set -u`; on bash 4.3 and older the plain
+    # "${raw_parts[@]}" is an unbound variable, and the script dies with
+    # "raw_parts[@]: unbound variable" instead of parsing the file. This
+    # project supports bash 4.0+, and the empty case is reached by a config
+    # with an empty `ports =` value.
+    for p in "${raw_parts[@]+"${raw_parts[@]}"}"; do
         p="$(conf_trim "$p")"
         [ -n "$p" ] || continue
         if [ -n "$out" ]; then out="$out,$p"; else out="$p"; fi
@@ -162,6 +169,68 @@ $key"
     fi
 }
 
+# conf_reject_duplicate FILE LINE SCOPE KEY FIRST_LINE
+# A key repeated in the SAME scope silently overrides the earlier value: the
+# operator's first `host = 10.0.0.1` vanishes and the second one is used,
+# with nothing said. That is exactly the "a wrong value carried forward"
+# this parser exists to refuse, so it is refused here rather than merged.
+#
+# FIRST_LINE is empty when the key has not been seen yet.
+conf_reject_duplicate() {
+    local file="$1" line="$2" scope="$3" key="$4" first_line="$5"
+    if [ -n "$first_line" ]; then
+        die "$file:$line: duplicate key '$key' in $scope (first seen at line $first_line); a repeated key silently overrides the earlier value"
+    fi
+}
+
+# conf_flush_node FILE IDX LABEL LINENO HOST PORTS SSH_PORT
+# Validate one node group's values and write them into the CONF_NODE_* arrays.
+# Dies with a message naming the file and the group's OWN header line.
+#
+# This is a top-level helper on purpose. It used to be a function nested
+# inside parse_conf and then removed with `unset -f` -- and `unset -f` on a
+# name the caller may also own deletes the CALLER's function, leaving it with
+# no function at all. A helper that lives in the parser's own conf_*
+# namespace never touches anything the caller owns, and needs no cleanup:
+# parse_conf defines nothing and unsets nothing.
+conf_flush_node() {
+    local file="$1" idx="$2" group="$3" group_lineno="$4"
+    local pending_host="$5" pending_ports="$6" pending_ssh_port="$7"
+
+    if [ -z "$pending_host" ]; then
+        conf_die "$file" "$group_lineno" "host (in [node.$group])"
+    fi
+    # Normalise BEFORE the required-key check (spec 3.2 rule 5). A raw
+    # value such as `ports = , ,` is non-empty yet yields an empty list,
+    # which would silently register a zero-instance node group.
+    local norm_ports
+    norm_ports="$(conf_normalise_ports "$pending_ports")"
+    if [ -z "$norm_ports" ]; then
+        conf_die "$file" "$group_lineno" "ports (in [node.$group])"
+    fi
+    # Every element must be a port number. Without this the instance count
+    # in spec 3.4 is computed from whatever the operator typed: a
+    # space-separated `ports = 6379 6380 6381` counts as ONE instance (so
+    # five such groups clear the 3-master floor) and `ports = abc,def,ghi`
+    # counts as THREE. Both sail through every other check and surface
+    # much later as a redis-6379 6380 6381.service unit name.
+    local part
+    local -a norm_parts=()
+    IFS=',' read -r -a norm_parts <<< "$norm_ports"
+    for part in "${norm_parts[@]+"${norm_parts[@]}"}"; do
+        if ! conf_is_valid_port "$part"; then
+            die "$file:$group_lineno: invalid value for key 'ports (in [node.$group])': '$part' is not a TCP port; ports must be a comma-separated list of integers in 1-65535, e.g. '6379,6380,6381'"
+        fi
+    done
+    local ssh_port="${pending_ssh_port:-22}"
+    if ! conf_is_valid_port "$ssh_port"; then
+        die "$file:$group_lineno: invalid value for key 'ssh_port (in [node.$group])': '$ssh_port' is not a port; expected an integer in 1-65535"
+    fi
+    CONF_NODE_HOST[$idx]="$pending_host"
+    CONF_NODE_PORTS[$idx]="$norm_ports"
+    CONF_NODE_SSH_PORT[$idx]="$ssh_port"
+}
+
 # parse_conf FILE
 # Populates the CONF_* variables described at the top of this file.
 # Aborts (via die) on: missing file, malformed line, missing required key,
@@ -199,48 +268,23 @@ parse_conf() {
     # Pointing the operator at an unrelated line sends them to the wrong place.
     local group_lineno=0
     local pending_host="" pending_ports="" pending_ssh_port=""
-
-    _conf_flush_node() {
-        [ "$in_node" = "1" ] || return 0
-        local group="${CONF_NODE_GROUP[$cur]}"
-        if [ -z "$pending_host" ]; then
-            conf_die "$file" "$group_lineno" "host (in [node.$group])"
-        fi
-        # Normalise BEFORE the required-key check (spec 3.2 rule 5). A raw
-        # value such as `ports = , ,` is non-empty yet yields an empty list,
-        # which would silently register a zero-instance node group.
-        local norm_ports
-        norm_ports="$(conf_normalise_ports "$pending_ports")"
-        if [ -z "$norm_ports" ]; then
-            conf_die "$file" "$group_lineno" "ports (in [node.$group])"
-        fi
-        # Every element must be a port number. Without this the instance count
-        # in spec 3.4 is computed from whatever the operator typed: a
-        # space-separated `ports = 6379 6380 6381` counts as ONE instance (so
-        # five such groups clear the 3-master floor) and `ports = abc,def,ghi`
-        # counts as THREE. Both sail through every other check and surface
-        # much later as a redis-6379 6380 6381.service unit name.
-        local part
-        local -a norm_parts=()
-        IFS=',' read -r -a norm_parts <<< "$norm_ports"
-        for part in "${norm_parts[@]}"; do
-            if ! conf_is_valid_port "$part"; then
-                die "$file:$group_lineno: invalid value for key 'ports (in [node.$group])': '$part' is not a TCP port; ports must be a comma-separated list of integers in 1-65535, e.g. '6379,6380,6381'"
-            fi
-        done
-        local ssh_port="${pending_ssh_port:-22}"
-        if ! conf_is_valid_port "$ssh_port"; then
-            die "$file:$group_lineno: invalid value for key 'ssh_port (in [node.$group])': '$ssh_port' is not a port; expected an integer in 1-65535"
-        fi
-        CONF_NODE_HOST[$cur]="$pending_host"
-        CONF_NODE_PORTS[$cur]="$norm_ports"
-        CONF_NODE_SSH_PORT[$cur]="$ssh_port"
-        pending_host=""; pending_ports=""; pending_ssh_port=""
-    }
+    # Line of the FIRST occurrence of each key in the current scope, for
+    # duplicate detection. The node-group ones are reset with the group; the
+    # top-level ones live for the whole file.
+    local pending_host_line="" pending_ports_line="" pending_ssh_port_line=""
+    local seen_prefix_line="" seen_password_line="" seen_bind_line=""
 
     while IFS= read -r line || [ -n "$line" ]; do
         lineno=$((lineno + 1))
         line="${line%$'\r'}"
+        # A UTF-8 BOM (EF BB BF) at the very start of the file is three bytes
+        # that belong to no key and no section name. Without stripping them
+        # they end up inside the first key or section name, and the parse
+        # error that follows points at something the operator never typed:
+        # "expected 'key = value', got: <BOM>[node.a]".
+        if [ "$lineno" = "1" ]; then
+            line="${line#$'\xef\xbb\xbf'}"
+        fi
         trimmed="$(conf_trim "$line")"
 
         # Blank or comment
@@ -254,7 +298,16 @@ parse_conf() {
                 # would otherwise fold the comment into the node label and the
                 # group would claim a NODE_A___THE_FIRST_NODE namespace.
                 conf_reject_inline_comment "$file" "$lineno" "$trimmed" "section name"
-                _conf_flush_node
+                # Close the PREVIOUS group before starting this one. The
+                # values are validated against the previous group's own
+                # header line, which is why the group label and line are
+                # passed in rather than read from a global.
+                if [ "$in_node" = "1" ]; then
+                    conf_flush_node "$file" "$cur" "${CONF_NODE_GROUP[$cur]}" "$group_lineno" \
+                                   "$pending_host" "$pending_ports" "$pending_ssh_port"
+                fi
+                pending_host=""; pending_ports=""; pending_ssh_port=""
+                pending_host_line=""; pending_ports_line=""; pending_ssh_port_line=""
                 local section label
                 section="$(conf_trim "${trimmed#\[}")"
                 section="${section%\]}"
@@ -339,9 +392,21 @@ parse_conf() {
 
         if [ "$in_node" = "1" ]; then
             case "$key" in
-                host)     pending_host="$value" ;;
-                ports)    pending_ports="$value" ;;
-                ssh_port) pending_ssh_port="$value" ;;
+                host)
+                    conf_reject_duplicate "$file" "$lineno" "[node.${CONF_NODE_GROUP[$cur]}]" "$key" "$pending_host_line"
+                    pending_host_line="$lineno"
+                    pending_host="$value"
+                    ;;
+                ports)
+                    conf_reject_duplicate "$file" "$lineno" "[node.${CONF_NODE_GROUP[$cur]}]" "$key" "$pending_ports_line"
+                    pending_ports_line="$lineno"
+                    pending_ports="$value"
+                    ;;
+                ssh_port)
+                    conf_reject_duplicate "$file" "$lineno" "[node.${CONF_NODE_GROUP[$cur]}]" "$key" "$pending_ssh_port_line"
+                    pending_ssh_port_line="$lineno"
+                    pending_ssh_port="$value"
+                    ;;
                 *)        conf_record_unknown "$key" ;;
             esac
         else
@@ -351,16 +416,31 @@ parse_conf() {
             # the 3-master floor. It now falls through to the unknown-key
             # branch so the operator is told the key is not supported.
             case "$key" in
-                redis_prefix)     CONF_REDIS_PREFIX="$value" ;;
-                cluster_password) CONF_PASSWORD="$value" ;;
-                bind_addr)        CONF_BIND_ADDR="$value" ;;
+                redis_prefix)
+                    conf_reject_duplicate "$file" "$lineno" "the top level" "$key" "$seen_prefix_line"
+                    seen_prefix_line="$lineno"
+                    CONF_REDIS_PREFIX="$value"
+                    ;;
+                cluster_password)
+                    conf_reject_duplicate "$file" "$lineno" "the top level" "$key" "$seen_password_line"
+                    seen_password_line="$lineno"
+                    CONF_PASSWORD="$value"
+                    ;;
+                bind_addr)
+                    conf_reject_duplicate "$file" "$lineno" "the top level" "$key" "$seen_bind_line"
+                    seen_bind_line="$lineno"
+                    CONF_BIND_ADDR="$value"
+                    ;;
                 *)                conf_record_unknown "$key" ;;
             esac
         fi
     done < "$file"
 
-    _conf_flush_node
-    unset -f _conf_flush_node
+    # Close the last group.
+    if [ "$in_node" = "1" ]; then
+        conf_flush_node "$file" "$cur" "${CONF_NODE_GROUP[$cur]}" "$group_lineno" \
+                       "$pending_host" "$pending_ports" "$pending_ssh_port"
+    fi
 
     CONF_NODE_COUNT="$cur"
 

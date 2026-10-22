@@ -1094,3 +1094,245 @@ CONFEOF
     [ "${CONF_NODE_PORTS[1]}" = "6379,6380,6381" ]
     [ "${CONF_NODE_SSH_PORT[1]}" = "22" ]
 }
+
+##############################################################################
+# Defect 7: parse_conf deleted a function the CALLER owned.
+#
+# The parser defined a nested `_conf_flush_node` and removed it afterwards
+# with `unset -f`. `unset -f` deletes whatever function carries that name,
+# whoever defined it -- so a caller that had its own _conf_flush_node was
+# left with no function at all, and the caller's own code broke with a
+# "command not found" far from the parser.
+#
+# The helper now lives in the parser's own conf_* namespace, next to the
+# other helpers, and parse_conf defines and removes nothing.
+##############################################################################
+
+@test "parse_conf leaves a function the caller defined under the same name intact" {
+    _conf_flush_node() { echo "caller version"; }
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383
+[node.c]
+host  = h3
+ports = 6384
+CONFEOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    # Still defined, and still the caller's own function.
+    declare -F _conf_flush_node >/dev/null
+    run _conf_flush_node
+    [ "$output" = "caller version" ]
+}
+
+@test "parse_conf does not leave a helper function behind in the caller's namespace" {
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383
+[node.c]
+host  = h3
+ports = 6384
+CONFEOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    # The parser used to leave _conf_flush_node defined if it died before its
+    # own cleanup ran. Nothing should be defined under a private-looking
+    # name after a parse.
+    run declare -F _conf_flush_node
+    [ "$status" -ne 0 ]
+}
+
+##############################################################################
+# Defect 8: a key repeated in the SAME scope silently overrode the earlier
+# value. The operator's first `host = 10.0.0.1` simply vanished and the
+# second one was used, with nothing said -- the same "a wrong value carried
+# forward" the parser refuses everywhere else.
+##############################################################################
+
+@test "a repeated host in a node group is rejected instead of silently overriding" {
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host  = 10.0.0.1
+host  = 10.0.0.99
+ports = 6379,6380,6381
+CONFEOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate key 'host'"* ]]
+    [[ "$output" == *"node.a"* ]]
+    # The message must say where the earlier value was, or the operator has
+    # to hunt for it.
+    [[ "$output" == *"first seen at line"* ]]
+}
+
+@test "a repeated ports in a node group is rejected" {
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380
+ports = 6381,6382
+CONFEOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate key 'ports'"* ]]
+}
+
+@test "a repeated ssh_port in a node group is rejected" {
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host     = h1
+ssh_port = 22
+ssh_port = 2222
+ports    = 6379,6380,6381
+CONFEOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate key 'ssh_port'"* ]]
+}
+
+@test "a repeated top-level key is rejected instead of silently overriding" {
+    write_conf <<'CONFEOF'
+cluster_password = first
+cluster_password = second
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+CONFEOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate key 'cluster_password'"* ]]
+    [[ "$output" == *"top level"* ]]
+}
+
+@test "the same key in DIFFERENT node groups is not a duplicate" {
+    # Every group has its own host and ports. That is the whole point of a
+    # node group, so it must stay legal.
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host  = 10.0.0.1
+ports = 6379,6380,6381
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383,6384
+[node.c]
+host  = 10.0.0.3
+ports = 6385
+CONFEOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_NODE_COUNT" -eq 3 ]
+    [ "${CONF_NODE_HOST[1]}" = "10.0.0.1" ]
+    [ "${CONF_NODE_HOST[2]}" = "10.0.0.2" ]
+    [ "${CONF_NODE_HOST[3]}" = "10.0.0.3" ]
+}
+
+##############################################################################
+# Defect 9: a UTF-8 BOM (EF BB BF) at the start of the file became part of
+# the first key or section name, so the parse error pointed at something the
+# operator never typed:
+#     "expected 'key = value', got: <BOM>[node.a]"
+# A BOM is three bytes of encoding metadata that belong to no key at all.
+##############################################################################
+
+@test "a UTF-8 BOM at the start of the config is ignored" {
+    printf '\xef\xbb\xbf' > "$CONF_TMP/cluster.conf"
+    cat >> "$CONF_TMP/cluster.conf" <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383
+[node.c]
+host  = h3
+ports = 6384
+CONFEOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_PASSWORD" = "pw" ]
+    [ "$CONF_NODE_COUNT" -eq 3 ]
+    [ "${CONF_NODE_GROUP[1]}" = "a" ]
+    [ "${CONF_NODE_HOST[1]}" = "h1" ]
+    [ "$CONF_TOTAL_INSTANCES" -eq 6 ]
+}
+
+@test "a UTF-8 BOM before the first key is ignored" {
+    printf '\xef\xbb\xbf' > "$CONF_TMP/cluster.conf"
+    cat >> "$CONF_TMP/cluster.conf" <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383
+[node.c]
+host  = h3
+ports = 6384
+CONFEOF
+    # The BOM is on the same line as the first KEY here, not a section header.
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_PASSWORD" = "pw" ]
+    [ "$CONF_UNKNOWN_KEYS" = "" ]
+}
+
+##############################################################################
+# Defect 10: on bash < 4.4, "${arr[@]}" on an EMPTY array is an unbound
+# variable under `set -u`. conf_normalise_ports expanded an array that is
+# empty exactly when the value was empty, so on bash 4.3 (the project
+# supports bash 4.0+) an empty `ports =` killed the parser with
+#     "lib/conf.sh: line 48: raw_parts[@]: unbound variable"
+# instead of the parser's own "missing or invalid key 'ports'" message.
+#
+# The CI runner is bash 5.1, where an empty array expands to nothing and the
+# bug is invisible. scripts/check-bash-compat.sh runs this suite under
+# bash 4.3 for that reason.
+##############################################################################
+
+@test "an empty ports value is reported as a missing key, not as a shell error" {
+    write_conf <<'CONFEOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports =
+[node.b]
+host  = h2
+ports = 6382,6383
+[node.c]
+host  = h3
+ports = 6384
+CONFEOF
+    # `set -u` on purpose: the production scripts run with `set -uo pipefail`,
+    # and that is exactly the setting under which an empty array expansion is
+    # an unbound variable on bash < 4.4. The bats suite itself does not turn
+    # it on, so without this the bug is invisible here.
+    run bash -c 'set -uo pipefail; . "$1/lib/common.sh"; . "$1/lib/conf.sh"; parse_conf "$2" 2>&1' \
+        _ "$REPO_ROOT" "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    # The parser's own message...
+    [[ "$output" == *"ports"* ]]
+    [[ "$output" == *"node.a"* ]]
+    # ...and not a shell expansion error.
+    [[ "$output" != *"unbound variable"* ]]
+}
+
+@test "conf_normalise_ports accepts an empty value without a shell error" {
+    # Same reason as above: `set -u` is what makes an empty array expansion
+    # fatal on bash < 4.4, and the production scripts set it.
+    run bash -c 'set -uo pipefail; . "$1/lib/common.sh"; . "$1/lib/conf.sh"; conf_normalise_ports "" 2>&1' \
+        _ "$REPO_ROOT"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [[ "$output" != *"unbound variable"* ]]
+}

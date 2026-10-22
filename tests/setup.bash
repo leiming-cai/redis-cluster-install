@@ -36,6 +36,12 @@ export REPO_ROOT
 
 setup() {
     export REPO_ROOT
+    # The production scripts run under `set -uo pipefail`, and the library
+    # code has to behave the same way when it is called from them. Without
+    # `set -u` here, a function that is only safe when an array is non-empty
+    # passes in the test suite and dies on a bash 4.3 host -- which is how
+    # the empty-array bug in lib/conf.sh stayed invisible for three rounds.
+    set -u
 }
 
 # bats helper: load a lib file relative to REPO_ROOT.

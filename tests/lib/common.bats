@@ -71,10 +71,18 @@ stderr_of() {
     # die calls exit, so run it in a subshell and capture stderr to a file.
     # (Command substitution would let die's exit tear down the capturing
     # subshell before bats could inspect the result.)
-    local errfile="$BATS_TEST_TMPDIR/die.err"
+    #
+    # mktemp, NOT $BATS_TEST_TMPDIR: that variable only exists in bats 1.4+
+    # and on the CI runner's bats 1.2.1 it expands to the empty string, which
+    # made the path "/die.err" -- writable when the tests run as root, and a
+    # "Permission denied" failure for the non-root user CI actually runs as.
+    # The test was green locally and red on CI for exactly that reason.
+    local errfile
+    errfile="$(mktemp)"
     ( die "fatal" ) 2>"$errfile" || true
     grep -q "fatal" "$errfile"
     grep -q "\[ERROR\]" "$errfile"
+    rm -f "$errfile"
 }
 
 @test "die honors non-zero exit code override" {
