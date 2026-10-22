@@ -141,10 +141,12 @@ id redis >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin redis
 # 0770 parent, so every file below it is EACCES no matter how it is owned).
 #
 # The shape is recreated deliberately, not inherited. The redis:8 image has no
-# /etc/redis at all, and apt does not produce this shape either: redis-server
-# 6.0.16-1ubuntu1.2 (Ubuntu 22.04) and 7.0.15-1~deb12u10 (Debian bookworm) both
-# ship it 0755 root:root, and neither postinst touches it. Without these lines
-# the E2E would never exercise the parent-chown path at all.
+# /etc/redis at all, and while the distro package DOES produce this shape
+# (redis-tools' postinst runs `Setup_dir /etc/redis 2770 ${USER}` -- measured
+# 2026-10-22 on Ubuntu 22.04's 5:6.0.16-1ubuntu1.2 and Debian 12's
+# 5:7.0.15-1~deb12u10), the base image has no package manager state to
+# inherit it from. Without these lines the E2E would never exercise the
+# parent-chown path at all.
 install -d -o redis -g redis -m 0770 /etc/redis
 chmod g+s /etc/redis
 

@@ -312,9 +312,9 @@ NODE_<X>_SSH_PASS    无默认值，缺失时静默提问
 
 归属也会被重新修正为 `redis:redis`。这一点在 `redis` 用户被重建过
 （容器重建、从备份恢复）之后尤其重要：此时 uid 会变，而如果 `/etc/redis`
-本身是 `0770 redis:redis` 且带 setgid 位（部分发行版打包方式、以及手工
-规划的机器上会出现；`apt` 的 `redis-server` 包**并不**产生这种形态，它装出来
-的是 `0755 root:root`），那么只修正子目录是不够的，
+本身是 `0770 redis:redis` 且带 setgid 位（**发行版的 redis 包装出来就是这个
+形态** —— `redis-tools` 的 postinst 里有一行 `Setup_dir /etc/redis 2770
+${USER}`；手工规划的机器上也可能出现），那么只修正子目录是不够的，
 redis 会因为无法穿越父目录而报
 `Fatal error, can't open config file ...: Permission denied`，
 哪怕配置文件本身的归属完全正确。

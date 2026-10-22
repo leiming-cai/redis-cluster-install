@@ -217,9 +217,11 @@ mkdir -p "$PREFIX/bin" "$PREFIX/cluster" "$PREFIX/log" \
 
 # 显式造出 0770 redis:redis + setgid 的形态（而非从 base 继承）：该形态正是
 # create_dirs 必须 chown 父目录树的原因（提交 2eb4aee）。
-# redis:8 镜像里根本没有 /etc/redis；apt 的 redis-server 包也不产生这个形态
-# （6.0.16-1ubuntu1.2 与 7.0.15-1~deb12u10 都是 0755 root:root，postinst 不碰它）。
-# 不造出来，这条父目录 chown 的回归防线就完全不会被触发。
+# redis:8 镜像里根本没有 /etc/redis；发行版的 redis 包虽然**确实**产生这个形态
+# （redis-tools 的 postinst 里有 `Setup_dir /etc/redis 2770 ${USER}`，
+# 2026-10-22 实测 Ubuntu 22.04 与 Debian 12 的 redis-tools 均如此），
+# 但 base 镜像没有包管理器状态可供继承。不造出来，这条父目录 chown 的
+# 回归防线就完全不会被触发。
 install -d -o redis -g redis -m 0770 /etc/redis
 chmod g+s /etc/redis
 

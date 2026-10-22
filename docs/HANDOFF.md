@@ -146,6 +146,7 @@ not ok 4 add-node.sh never chowns a directory it does not create
 917fff1 fix(e2e): make the DoD5 promotion check actually observe a promotion
 0611710 test(e2e): refuse to run unless the nodes are actually Redis 8
 4fc12d8 docs: the 0770+setgid /etc/redis shape is not apt's doing
+         ^ 这条提交信息是错的，见下面第 11 条的「2026-10-22 再更正」
 8671bd5 test(e2e): provision from the image instead of a runtime apt-get
 b0579b5 test(e2e): explain the control fixture's choices in-file
 0dc6974 docs: drop the procps claim; it is not in the redis:8 base
@@ -404,13 +405,27 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
     新 redis **无法穿越 0770 目录** —— 哪怕下面每个文件的归属都完全正确，
     依然报 `Fatal error, can't open config file ...: Permission denied`。
 
-    > 更正：本条原先写「apt 装出来的是 `0770 redis:redis` 且带 setgid」，**这是错的**。
-    > 实测 `redis-server 6.0.16-1ubuntu1.2`（Ubuntu 22.04）与 `7.0.15-1~deb12u10`
-    > （Debian bookworm）都把 `/etc/redis` 装成 `0755 root:root`，且 postinst 完全
-    > 不碰它。缺陷本身真实、修复也仍然必要（该形态见于其它打包方式与手工规划的机器），
-    > 但来源不是 apt。
+    > **2026-10-22 再更正：第二轮那条「更正」本身是错的。**
+    > 实测（`redis-tools` 的 postinst，不是 `redis-server` 的）：
+    > ```
+    > Setup_dir /var/log/redis 2750 adm
+    > Setup_dir /etc/redis 2770 ${USER}
+    > ```
+    > Ubuntu 22.04 的 `redis-tools 5:6.0.16-1ubuntu1.2` 与 Debian 12 的
+    > `redis-tools 5:7.0.15-1~deb12u10` **都**把 `/etc/redis` 装成
+    > **2770 redis:redis**（0770 + setgid），`/var/log/redis` 装成 2750 redis:adm。
+    >
+    > 第二轮为什么会搞反：当时读的是 `redis-server` 包的 postinst（里面没有
+    > `Setup_dir`）和 data.tar 里的条目（`drwxr-xr-x root/root`），
+    > **没看到真正改权限的是 `redis-tools` 的 postinst**。
+    > 于是「tarball 里是 0755 root:root」被读成了「装出来是 0755 root:root」。
+    >
+    > **结论反过来：`2eb4aee` 最初的归因是对的**，而且这个形态**不是冷门角落**
+    > —— **凡是装了发行版 redis 包的主机上都是这个形态**。父目录 chown 不是
+    > 有备无患，是**必须**的。
+    缺陷本身真实、修复也仍然必要（该形态见于其它打包方式与手工规划的机器），
     这是最难查的一类：看起来一切正常，就是打不开。
-    **只有真实跑一遍才会暴露，149 个单元测试全都测不到**（只在 uid 变化时触发）。
+    **只有真实跑一遍才会暴露，单元测试全都测不到**（只在 uid 变化时触发）。
     `/var/lib/redis`、`/var/run/redis` 同理，已一并修。
 
 12. **`is_cluster_healthy` 写死 `known_nodes >= 6`**（`1df5075`，已修）：
@@ -434,6 +449,8 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
     在**没装过发行版 redis 包**的机器上，这个目录从来就不存在 ——
     之前的 E2E 用的 Ubuntu 22.04 底包正好自带了 apt 装的 redis 6，
     顺手把 `/var/log/redis` 一起装了出来，**把这个 bug 掩盖住了**。
+    （2026-10-22 实测确认：发行版的 `redis-tools` postinst 里有
+    `Setup_dir /var/log/redis 2750 adm`，Ubuntu 22.04 与 Debian 12 都一样。）
 
     **修复**：五个条目全部加 `-` 前缀（systemd 的「该路径不存在就忽略」标记）。
     Debian/Ubuntu 自己的 `redis-server.service` 五项也全带 `-`，原因相同。
@@ -494,6 +511,30 @@ docker run --rm -v "${wt}:/repo" -v "${tmp}:/v" -w /repo rc-control:bats bash /v
 因为它不在 E2E 覆盖范围内，而单元测试只比文本 —— 直到第四轮把它抽出来
 **在沙箱里真跑了一遍**，才第一次看到「脚本在 chown 那一行就死了、
 `systemctl` 一次都没跑到」。
+
+**第四轮还抓出了第二轮自己写下的一个错误结论**，而且是**同一个套路的第三次**：
+
+第二轮「更正」说「apt 装出来的是 `0755 root:root`，这个形态不是 apt 干的」。
+第四轮实测（**装出来看**，不是读包）：
+
+```
+$ stat -c '%n %a %U:%G' /etc/redis /var/log/redis
+/etc/redis 2770 redis:redis
+/var/log/redis 2750 redis:adm
+```
+
+**第二轮的探测坏在哪儿**：它读的是 `redis-server` 包的 postinst（里面没有
+`Setup_dir`）和 data.tar 里的条目（`drwxr-xr-x root/root`），
+**没看到真正改权限的是 `redis-tools` 的 postinst**。于是
+「tarball 里是 0755 root:root」被读成了「装出来是 0755 root:root」。
+
+**同一个错误形状已经出现三次**：
+（a）诊断探针漏写 `-v` 就宣布「路径可用」；
+（b）`setpriv` 不存在却把「命令找不到」读成「文件不可读」；
+（c）**这次** ——「包里是 0755」被读成了「装出来是 0755」。
+
+**规律不是「探测要小心」，而是「探测的对象可能不是出问题的那一个」。**
+（b）看错了文件，（c）看错了包。**下结论之前先确认自己看的是不是同一份东西。**
 
 这类错误 151 个单元测试一个都抓不到。**判断标准是：这条代码路径被真正执行过吗？**
 
