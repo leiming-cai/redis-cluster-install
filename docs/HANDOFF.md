@@ -78,16 +78,53 @@ AOF/RDB 反复触发，噪声盖过了差值）；再要提速就做消费/解�
 
 ### 改动（Java 侧）
 
-| 文件 | 改动 |
-|---|---|
-| `common/oms/.../utils/RedisClusterHashPipeline.java` | **新增**（约 430 行）：`CLUSTER SLOTS` 槽位快照 → 按节点分组 → 每节点一条 pipeline → 检查返回值 → 逐 key 兜底 |
-| `common/oms/.../config/RedisUtilConfig.java` | 新增 `redisClusterHashPipeline` Bean（+7 行） |
-| `plugins/rtdata-module/.../RedisRealDataServiceImpl.java` | 集群分支从 for 循环 `putAll` 改为一次 `putAllHashes`；单机/哨兵分支**未动**（+15/-7） |
-| 测试 | `RedisClusterHashPipelineTest` 27 条、`RedisRealDataServiceImplTest` 4 条 |
+**Java 源码不在本仓库**（`D:\javawork\1.2\...` 不是 git 仓库），基线目录是：
 
-**Java 源码不在本仓库**（`D:\javawork\1.2\...` 不是 git 仓库），所以改动以统一 diff 留痕：
-`docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`（5 个文件，约 65 KB，
+```
+D:\javawork\1.2\cpscloud1.0\code\platform\backend\realserver\
+```
+
+**5 个文件（2 改 + 3 新）**，行数是改完后文件里的行数：
+
+| # | 绝对路径（相对上面基线） | 状态 | 行数 | patch |
+|---|---|---|---|---|
+| 1 | `common\oms\src\main\java\com\sac\platform\realserver\oms\config\RedisUtilConfig.java` | 改 | 342 | +7 |
+| 2 | `common\oms\src\main\java\com\sac\platform\realserver\oms\utils\RedisClusterHashPipeline.java` | **新增** | 566 | +566 |
+| 3 | `common\oms\src\test\java\com\sac\platform\realserver\oms\utils\RedisClusterHashPipelineTest.java` | **新增** | 648 | +648 |
+| 4 | `plugins\rtdata-module\src\main\java\com\sac\platform\realserver\service\impl\RedisRealDataServiceImpl.java` | 改 | 189 | +27/-7 |
+| 5 | `plugins\rtdata-module\src\test\java\com\sac\platform\realserver\service\impl\RedisRealDataServiceImplTest.java` | **新增** | 106 | +106 |
+
+`git apply --stat` 合计：**5 files changed, 1345 insertions(+), 9 deletions(-)**。
+
+**改动落在哪几处**（行号 = 改完后文件里的行号）：
+
+- **① `RedisUtilConfig.java`（2 处）**
+  - **L15** `import ...oms.utils.RedisClusterHashPipeline;`
+  - **L336–341** 新增 `@Bean("redisClusterHashPipeline")`，参数是
+    `RedisTemplate<String, Object>` + `RedisConnectionFactory`
+- **④ `RedisRealDataServiceImpl.java`（4 处）**
+  - **L4–9** 类头 `@Description` 改写（集群不再是「按 key 自动分片」）
+  - **L30** import
+  - **L44 / L47–52** 新字段 `private final RedisClusterHashPipeline clusterPipeline;`，
+    构造器加第三个参数并赋值
+  - **L124–135** `batchWirteOmsByRedisCluster()` —— **唯一的行为改动**：
+    先 `grouped.isEmpty()` 短路返回 true，再只遍历求 `fieldCount`（不再写），
+    然后一次 `clusterPipeline.putAllHashes(grouped)`，
+    替换掉原来 for 循环里的 `redisTemplate.opsForHash().putAll(...)`
+  - 单机/哨兵路径（`wirteOmsPip` **L63**、`wirteOmsPipByJedis` **L113**）**一行没动**；
+    计数语义也没变（整批成功后一次性累加）
+- **② `RedisClusterHashPipeline.java`（新）**：唯一对外入口 `putAllHashes(...)` **L150**，
+  内部是 `CLUSTER SLOTS` 快照 → 按 slot 属主分组 → 每节点一条 pipeline → 检查返回值 → 逐 key 兜底
+- **③ / ⑤ 测试（新）**：27 条 + 4 条用例
+
+**留痕与一致性核对**：
+`docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`（5 个文件，66,582 B，
 UTF-8/LF，`git apply --check` 通过；应用到基线上后 5 个文件与新源码 **SHA-256 完全一致**）。
+
+> **2026-10-27 复核（比 SHA 更直接的一种查法）**：在 `realserver\` 下跑
+> `git -c core.autocrlf=false apply --reverse --check <patch>` → **退出码 0**，
+> 即磁盘上这 5 个文件**仍等于 patch 的后像**，跑完 A/B 之后没人再改过它们。
+> 这个反向检查比逐个比 SHA-256 便宜，**以后核对「源码有没有漂移」直接用它**。
 
 ### 设计要点（都是实测过的，不是推理）
 
