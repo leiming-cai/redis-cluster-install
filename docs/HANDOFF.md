@@ -1,9 +1,9 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-27
-**工作分支**：无 —— 第七/八/九/十轮都在 `main` 上（第八轮已推送；第九轮之前的推送见文末）
+**工作分支**：无 —— 第七/八/九/十轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` 与 `origin/main` 的差距以 `git status -sb` 为准；第十轮改动**尚未推送**
+**基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十轮改动**已推送**（`0de6426..02db42a`）
 **第七轮（2026-10-27）**：在 CPS 节点镜像上部署集群 + 跑 `RTListener.onMessage`
 写入测试，并固化成 `scripts/e2e-cpsweb-nodes.sh`。
 **已提交**（`e2d01b4`），详见下文「第七轮」。
@@ -18,7 +18,7 @@
 **Java 源码不在本仓库**，改动以 patch 形式落在
 `docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`，详见下文「第十轮」。
 
-**下一步**：第十轮改动待推送；下一轮若还要提速，先看「第十轮」里的瓶颈结论。
+**下一步**：第十轮已推送（`origin/main` = `02db42a`）；下一轮若还要提速，先看「第十轮」里的瓶颈结论。
 
 ---
 
@@ -1303,7 +1303,7 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
   - `scripts/e2e-cpsweb-nodes.sh` 在本轮完整跑过 4 次，最后一次 `KEEP=1`
 - **第八轮**（ZooKeeper + Kafka 两节点集群）直接提交在 main 上，**已推送**：`3a2856d`
   - 验证：`check_syntax 35/0`、`validate_libs 50/0`、bats 163/0；脚本 A1–A7 全绿
-- **✅ `origin/main` 当前 = `3a2856d`**（HTTPS 仍被网络重置，两次都是走 SSH 推成的）。
+- **✅ `origin/main` 当前 = `02db42a`**（第十轮 + 文档提交，2026-10-27 推送；HTTPS 仍被网络重置/PAT scope 挡住，两次都是走 SSH 推成的）。
   > 前三轮之所以推不了，是 GitHub 从这台机器不可达
   > （`Recv failure: Connection was reset` / `Failed to connect to github.com:443`），
   > **不是**配置问题。网络恢复后一次推成功。
@@ -1359,14 +1359,14 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第七/八/九/十轮都已提交。第十轮尚未推送**（`main` 领先 `origin/main` 8 个提交）。
+**第七/八/九/十轮都已提交并推送**（`origin/main` = `02db42a`，`git status -sb` 无 ahead/behind）。
 
 ### 下一次会话从这里开始（第十轮结束时）
 
 ```powershell
 cd D:\work\rediscluterproject
-git status -sb            # main...origin/main [ahead 8]，工作区干净
-git log --oneline -9      # 从 0de6426 到 c8560a8
+git status -sb            # main...origin/main，工作区干净
+git log --oneline -3      # 02db42a / c8560a8 / ea648cd
 ```
 
 环境（本轮结束时仍在跑，没有拆）：
@@ -1384,7 +1384,8 @@ Docker VM          2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
    当前环境的键数增长 + 每轮触发的 25 秒 RDB 保存让差值不可信。
    做法：新建集群（或清掉 benchmark 键）→ 用
    `scripts/bench-consumer-write.sh` 交替跑旧/新各 3 轮 → 比中位数。
-2. **决定是否推送** `main`（8 个提交）。走 SSH：
+2. ~~**决定是否推送** `main`~~ —— **已完成**（`0de6426..02db42a`，9 个提交，走 SSH）。
+   下次再要推送仍然只能走 SSH（HTTPS 的 PAT 缺 `workflow` scope，见「与主分支的关系」）：
    ```powershell
    $env:GIT_SSH='C:\Windows\System32\OpenSSH\ssh.exe'
    git -c remote.origin.pushurl=git@github.com:leiming-cai/redis-cluster-install.git push origin main
