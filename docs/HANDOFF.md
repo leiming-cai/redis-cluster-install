@@ -1,14 +1,18 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-27
-**工作分支**：无 —— 第七/八轮直接提交在 `main` 上，已推送（`origin/main` = `384a42f`）
+**工作分支**：无 —— 第七/八/九轮都在 `main` 上（第八轮已推送，第九轮仅文档）
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` 与 `origin/main` 同步在 `384a42f`；**第八轮改动尚未提交**
+**基线**：`main` 与 `origin/main` 的差距以 `git status -sb` 为准；第九轮改动**尚未提交**
 **第七轮（2026-10-27）**：在 CPS 节点镜像上部署集群 + 跑 `RTListener.onMessage`
 写入测试，并固化成 `scripts/e2e-cpsweb-nodes.sh`。
 **已提交**（`e2d01b4`），详见下文「第七轮」。
 **第八轮（2026-10-27）**：ZooKeeper + Kafka 两节点集群，固化成
 `scripts/e2e-kafka-cluster.sh`，详见下文「第八轮」。
+**第九轮（2026-10-27）**：端到端写入性能测量（均值 ~1.33 万/秒）+ 写入路径诊断；
+**集群 pipeline 任务已挂起，未实现**，详见下文「第九轮」。
+
+**下一步**：第九轮的文档改动待提交；是否实现集群 pipeline 待定（设计已在「第九轮」里）。
 
 ---
 
@@ -48,7 +52,126 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 **第七轮把 `cluster-config.sh` 第一次放到真正的目标镜像（`cpsweb-env:1.0`）上跑，
 并用真实消费者写入取证；已提交（`e2d01b4`）。**
 
-**下一步**：只剩推送 main（必须走 SSH），见文末。
+**第八轮把 ZooKeeper/Kafka 做成两节点集群（`3a2856d`，已推送）；
+第九轮测出端到端写入上限约 1.33 万/秒，并把写入路径诊断到「每点一次同步往返」。**
+
+**下一步**：第九轮的文档改动待提交；集群 pipeline 实现待定。
+
+---
+
+## 第九轮（2026-10-27）：端到端写入性能测量 + 写入路径诊断
+
+**这一轮不改任何生产代码。** 它测出「Kafka → `RTListener.onMessage` → Redis Cluster」
+这条链路到底能写多快，并回答「加消费者并发有没有用」。**结论：没用；瓶颈是集群模式下
+每个数据点一次同步 `HMSET` 往返。** 对应的修复（集群 pipeline）**已挂起，尚未实现**。
+
+### 测法：积压式排空，不是边产边耗
+
+先停消费者，把 N 条合法报文灌进 `INCDATA` 两个分区，再启动消费者测**纯排空速度**。
+理由：边产边耗时生产端本身会限速（实测生产端只有 8.5k/s，比消费者还慢），测出来的
+是生产端而不是写入端。用 key 固定落分区（`a`→p0，`d`→p1），保证两个分区都有数据。
+
+报文格式必须是 `<obid>;Value,1,<值>,<时间戳>`，`obid ∈ [11<<32, 12<<32)`，
+否则 `SystemIDUtil.extractOType` 建不出 `real_data:11:<obid>` 这个 key。
+
+### 结果
+
+| 配置 | 积压 | 峰值/秒 | 活跃秒均值 | 失败 | 守恒 |
+|---|---|---|---|---|---|
+| 1 partition × concurrency=1（边产边耗） | 20,000 | 16,239 | 6,623 | 0 | 19,870（130 条重复键合并） |
+| 2 partition × **concurrency=1** | 200,000 | 20,000 | 13,233 | 0 | 精确 |
+| 2 partition × **concurrency=2** | 200,000 | 20,500 | 13,333 | 0 | 精确 |
+| 2 partition × 2（**双 broker Kafka, RF=2**） | 200,000 ×3 | 18,582–28,098 | **12,499–14,214（合计 600,000/45s = 13,333）** | 0 | 精确 |
+
+**对外报数请用均值 ~1.33 万/秒。** 峰值只是**一个 1 秒采样点**，批次边界落在哪个整秒
+会显著改变它（同一配置 18.6k 与 28.1k 都出现过），拿它当 SLA 会误导。
+
+**关键否定结果**：concurrency 从 1 加到 2，**接收速率几乎翻倍（峰值 47,500 → 91,229），
+写入速率完全不变（13,233 → 13,333）**。所以「加消费者」不是提升写入的手段。
+
+### 诊断：为什么是 1.33 万
+
+| 证据 | 内容 |
+|---|---|
+| 线程采样 12 次 × 16 个写线程 = 192 样本 | **59 个卡在 `socketRead0`**，3 个 `socketWrite0`，**2 个在字符串解析**；`BLOCKED` **0**；其余 128 个是空闲（`Unsafe.park`） |
+| `jstat -gcutil` 1s×25 | 老年代峰值 32%，**GC 总耗时 1.3%** —— GC 不是原因 |
+| 服务端 `cmdstat_hmset` | `usec_per_call ≈ 35µs` |
+| 反推客户端 | 13k/s ÷ 约 5 个并发线程 ≈ **380µs/条** → **91% 时间在客户端往返与栈开销** |
+
+即：**每条数据点 = 一次同步网络往返**，加线程只能把等待摊薄，不能减少往返次数。
+
+### 根因（源码位置）
+
+| 位置 | 事实 |
+|---|---|
+| `RedisRealDataServiceImpl.java:118-128` | 集群路径：`for (entry : grouped) redisTemplate.opsForHash().putAll(...)` —— **每 key 一次同步命令** |
+| `RedisRealDataServiceImpl.java:90-100` | 单机路径：`executePipelined` 批量 —— **集群这条路没有对应实现** |
+| `RedisPipelineUtil.java:150-169` | 同一个取舍重复了一遍：`isCluster()` 为真就 `forEach putAll` |
+| `OmsWriteByKafkaServiceImpl.java:183-199` | `batchWirtePip` 是 `@Async("consumerRunExecutor")`，监听线程只提交 |
+| `ThreadExecutorConfig.java:32-40` | 写线程池 **core=max=16**、队列 6000、`CallerRunsPolicy` → 并发已经够，加消费者/加线程都不会更快 |
+| `RedisUtilConfig.java:145-148` | Jedis 池 `maxTotal=200 / maxIdle=50 / minIdle=10` —— **不是瓶颈**（已排除） |
+| `RTListener.java:59-78` | 同一批数据被解析三次：这里 split 一次只为计数，`parseToPointList` 一次，`groupByKey` 一次 |
+
+### 挂起的任务：集群按节点 pipeline（**未实现**）
+
+**目标**：把「每点一次往返」变成「每节点一次往返」。
+
+**已验证可用的 API**（在容器的 `jedis-3.10.0.jar` 上用 `javap` 确认过）：
+
+- `redis.clients.jedis.BinaryJedisCluster#getConnectionFromSlot(int)` → `Jedis`
+- `BinaryJedisCluster#getClusterNodes()` → `Map<String, JedisPool>`
+- `org.springframework.data.redis.connection.jedis.JedisClusterConnection#getNativeConnection()` → `JedisCluster`
+
+**做法**：算 slot（`JedisClusterCRC16`）→ 按 slot 属主分组 → 每节点借一个 `Jedis` 开
+`Pipeline` → `hset(byte[], Map)` → `sync()` → **还连接**。
+
+**必须先想清楚的三点**：
+
+1. **pipeline 里的 MOVED/ASK 是「错误回复」不是异常**。`sync()` 不会抛，必须用
+   `syncAndReturnAll()` 检查返回，遇到重定向就刷新 slot 映射重试（或整批回退到逐 key）。
+2. **连接必须归还**，否则 16 个写线程跑几分钟就会把池打空。
+3. **序列化器要沿用 `redisTemplate` 的**（`GenericJackson2JsonRedisSerializer`），
+   否则新旧数据格式不一致。
+
+**预期**：3–10 倍；但改完要立刻重测 —— profile 里「16 个线程有一大半空闲」说明
+**瓶颈可能转移到消费/解析侧**，那时再去做 `RTListener` 的重复解析。
+
+### 复现命令
+
+```bash
+# 灌积压（key a -> p0, d -> p1；参数：条数、基准 obid）
+# 停消费者 -> 灌 N 条 -> 启动 -> 轮询应用日志的「共计写入」直到 5 秒不变
+# 指标来源（三路互校）：
+#   应用日志：每秒从kafka接收的数量 / 每秒已处理实时数据变化数量 / 共计写入 / 每秒写入失败点数
+#   消费组：kafka-consumer-groups --describe 的 LAG
+#   Redis：三个主节点 cmdstat_hmset 的 calls 增量之和
+BROKERS=172.21.0.2:9092,172.21.0.3:9092
+docker stop rc-cpsweb-app
+# ... 用 kafka-console-producer --property parse.key=true 灌 ...
+docker start rc-cpsweb-app
+```
+
+> 探针脚本当时放在 `%TEMP%\opencode\`（`drain-cluster.sh` / `bench2.sh` / `profile-drain.sh`），
+> **没有进仓库**。要固化成 `scripts/bench-consumer-write.sh` 就说一声。
+
+### 这一轮的两个方法论收获
+
+1. **「生产端限速」会把结论测反**：边产边耗那一轮生产端只有 8.5k/s，看起来像消费者只能
+   写 7k/s；停掉生产端做纯排空后才发现真实上限是 13k/s。**测量的对象必须是被测的那一个。**
+2. **1 秒采样的峰值不可当结论**：同一配置三次跑出 18.6k / 21.0k / 28.1k，而均值稳定在
+   12.5k–14.2k。**报数用均值，说明抖动来源。**
+
+### 环境现状（这一轮结束时）
+
+```
+Kafka       双 broker RF=2（第八轮建的），INCDATA 4 万/分区已消费完，lag=0
+消费者      rc-kafka-cluster-1793069287，concurrency=2
+Redis       cluster_state:ok，744,579 keys，每主约 28.8MB
+容器资源    node-a 624MB / node-b 640MB / app 391MB（Docker VM 共 2 vCPU / 3.8GB）
+```
+
+> 重复跑用的是**同一批 obid**，所以第 2、3 轮是**覆盖写**（`dbsize` 不增长）。
+> 数字代表写入速率，不含新建 key 的分配开销；用全新键那次同样是 20,238 / 13,323。
 
 ---
 
@@ -220,7 +343,7 @@ docker network rm rc-cpsweb-net
    （缺 `workflow` scope），必须走 SSH，见文末推送一节。
 3. ~~`scripts/e2e-cluster-config.sh` 不在 `check_syntax.sh` 列表~~ —— **已完成**，
    与 `e2e-cpsweb-nodes.sh` 一并纳入（TOTAL 32 → 34）。
-4. **推送 main**（尚未推送，领先 `origin/main` 2 个提交）。**必须走 SSH**，原因同上。
+4. ~~推送 main~~ —— **已完成**（`384a42f`；之后的 `3a2856d` 也已推送）。
 
 ### 环境约束（这一轮新增的）
 
@@ -1013,12 +1136,12 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 - **第五轮**（更正 apt 归因）**已合并进 main**：`git merge --ff-only docs/correct-apt-attribution`（`7d1a364` → `8a8e4a3`）
   - 生产文件**只改注释**（已用 `git diff` 逐行核过）
 - **第六轮**（解析器 4 条遗留项 + 修好 CI）直接提交在 main 上，已推送：`2160c75`
-- **第七轮**（CPS 节点镜像 E2E）**直接提交在 main 上，尚未推送**：
-  `e2d01b4`（7 个文件，+722/-2）+ 紧随其后的本次文档提交
+- **第七轮**（CPS 节点镜像 E2E）直接提交在 main 上，**已推送**：`e2d01b4` + `384a42f`
   - 验证：`check_syntax 34/0`、`validate_libs 50/0`、`bats 163/0`（bash 5.1，非特权 uid 1000）
   - `scripts/e2e-cpsweb-nodes.sh` 在本轮完整跑过 4 次，最后一次 `KEEP=1`
-- **✅ `origin/main` 当前 = `2160c75`**（2026-10-22 那次推送成功之后又推送过）。
-  **本地 main 领先 2 个提交，待推送**；远端期间没有移动过。
+- **第八轮**（ZooKeeper + Kafka 两节点集群）直接提交在 main 上，**已推送**：`3a2856d`
+  - 验证：`check_syntax 35/0`、`validate_libs 50/0`、bats 163/0；脚本 A1–A7 全绿
+- **✅ `origin/main` 当前 = `3a2856d`**（HTTPS 仍被网络重置，两次都是走 SSH 推成的）。
   > 前三轮之所以推不了，是 GitHub 从这台机器不可达
   > （`Recv failure: Connection was reset` / `Failed to connect to github.com:443`），
   > **不是**配置问题。网络恢复后一次推成功。
@@ -1074,16 +1197,17 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第七轮（CPS 节点镜像 E2E）已提交在 main 上，尚未推送。** 剩下的动作：
+**第七/八轮都已提交并推送（`origin/main` = `3a2856d`）。** 第九轮只剩文档与一个待定决策：
 
-1. **推送 main**（领先 `origin/main` 2 个提交）。
-   > **必须走 SSH**：本轮提交碰了 `.github/workflows/ci.yml`，
-   > 而 HTTPS 用的 PAT 没有 `workflow` scope，会被 GitHub 拒掉。
-   > 推送命令见「与主分支的关系」一节的 SSH 那条路。
-2. ~~提交这一轮的改动~~ —— **已完成**（`e2d01b4`）。
-3. ~~把 E2E 脚本纳入语法检查~~ —— **已完成**：
-   `check_syntax.sh` 纳入了 `e2e-cpsweb-nodes.sh` 与一直缺席的 `e2e-cluster-config.sh`（TOTAL 34），
-   CI 的 `bash -n` 列表纳入了 `e2e-cpsweb-nodes.sh`。
+1. **提交第九轮的 HANDOFF 改动**（本轮不动生产代码）。
+2. **决定是否实现集群 pipeline** —— 设计、API 验证、风险点都写在「第九轮」里。
+   做到一半时必须先 profile 复测，因为 profile 显示写线程有一大半时间是空的，
+   改完瓶颈很可能转移到消费/解析侧。
+3. 可选：把积压式排空的探针固化成 `scripts/bench-consumer-write.sh`
+   （目前只在 `%TEMP%\opencode\`，没进仓库）。
+
+**已完成的旧动作（保留备查）：**
+
 2. ~~决定是否修 `add-node.sh:141`~~ —— **已完成**（第四轮）。
    根因不是「忘了建目录」，而是它的 chown 列表与 `cluster-config.sh` 的
    `create_dirs` 不一致：多了一个没人创建的 `/var/log/redis`，
