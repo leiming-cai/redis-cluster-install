@@ -242,7 +242,7 @@ LOG=/tmp/bench-consumer-write.log
 docker logs --since "$tstart" "$APP" > "$LOG" 2>&1
 [ -s "$LOG" ] || fail "consumer log is empty; nothing to measure"
 
-written=$(total_written); written=${written:-0}
+written=$(sed -n 's/.*共计写入：\([0-9]*\)条数据.*/\1/p' "$LOG" | tail -1); written=${written:-0}
 lag=""
 for _ in $(seq 1 10); do
     # A batch listener commits after the listener returns, so lag can trail the
