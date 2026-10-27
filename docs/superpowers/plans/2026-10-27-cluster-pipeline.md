@@ -102,7 +102,8 @@ GROUP=${GROUP:-$(docker inspect -f '{{range .Config.Cmd}}{{.}} {{end}}' "$APP" \
 [ -n "$GROUP" ] || fail "cannot determine the consumer group; pass GROUP=..."
 JAR=${NEW_JAR:-$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/app.jar"}}{{.Source}}{{end}}{{end}}' "$APP")}
 [ -n "$JAR" ] || fail "cannot determine the app.jar mount; pass NEW_JAR=..."
-[ -f "$JAR" ] || fail "jar not found: $JAR"
+# NOTE: JAR is resolved by the Docker daemon, not by this container, so we must
+# not test it with [ -f ]. An invalid path fails on `docker run` instead.
 
 lag_sum() {
     docker exec "$NODE" $K/bin/kafka-consumer-groups.sh --bootstrap-server "$BROKERS" \
@@ -155,9 +156,11 @@ masters() { # host:port, one per line
         | awk '$3 ~ /master/ {split($2,a,"@"); print a[1]}'
 }
 
-hset_calls() { # $1 host:port
+hset_calls() { # $1 host:port -- the app writes hash data via HMSET (putAll)
     docker exec "$NODE" $REDIS_CLI -h "${1%%:*}" -p "${1##*:}" -a "$CLUSTER_PW" --no-auth-warning \
-        info commandstats 2>/dev/null | sed -n 's/^cmdstat_hset:calls=\([0-9]*\).*/\1/p'
+        info commandstats 2>/dev/null \
+        | sed -n 's/^cmdstat_\(hset\|hmset\):calls=\([0-9]*\).*/\2/p' \
+        | awk '{s+=$1} END{print s+0}'
 }
 
 verify_sample() { # $1 partition base, $2 index
@@ -238,14 +241,14 @@ while read -r hp; do
     d=$(( after - ${BEFORE[$hp]:-0} ))
     delta_sum=$(( delta_sum + d ))
     delta_report="$delta_report $hp=$d"
-    [ "$d" -gt 0 ] || fail "no HSET reached master $hp (delta=$d)"
+    [ "$d" -gt 0 ] || fail "no HSET/HMSET reached master $hp (delta=$d)"
 done < <(masters)
 
 # --- assertions -------------------------------------------------------------
 [ "$written" = "$N" ] || fail "conservation: written=$written expected=$N"
 [ "$failcnt" = "0" ] || fail "write failures: $failcnt"
 [ "$lag" = "0" ] || fail "consumer lag after drain: $lag"
-[ "$delta_sum" -ge "$N" ] || fail "server-side HSET delta $delta_sum < $N"
+[ "$delta_sum" -ge "$N" ] || fail "server-side HSET/HMSET delta $delta_sum < $N"
 
 verify_sample "$B0" 0
 verify_sample "$B0" 1
@@ -309,16 +312,18 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${repo}:/repo" 
   rc-e2e-runner:local bash /repo/scripts/bench-consumer-write.sh
 ```
 
-Expected（第九轮的基线，允许 ±10% 抖动）：
+Expected（本机实测基线；第九轮同一方法曾报 13,233，本机当前偏低约 20%，以本次实测为准）：
 
 ```
-mean_active_per_s : 12000~14000
+mean_active_per_s : 9000~11500
 write_failures    : 0
 samples           : 8/8 matched
 BENCH PASSED
 ```
 
-**把 `mean_active_per_s`、`active_seconds`、`wall_sec`、`publish_sec`、`hset_delta` 五个数字抄下来**，Task 7 要用它们做对比；记不住的写进 `%TEMP%\opencode\baseline-numbers.txt`。
+把 `mean_active_per_s`、`active_seconds`、`wall_sec`、`publish_sec`、`hset_delta` 五个数字写进
+`C:\Users\蔡雷鸣\AppData\Local\Temp\opencode\baseline-numbers.txt`。
+**至少跑两次**（本机方差约 ±20%，三次实测为 10,526 / 11,083 / 9,068），取中位数当基线。
 
 - [ ] **Step 6: 提交仓库改动**
 
@@ -1540,7 +1545,7 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${repo}:/repo" 
 Expected:
 
 ```
-mean_active_per_s : >= 40000      # 验收线：>= 3x 基线
+mean_active_per_s : >= 31600      # 验收线：>= 3x 实测基线中位数 10526
 write_failures    : 0
 written           : 200000
 lag               : 0
@@ -1730,7 +1735,7 @@ Expected: `main -> main` 成功。若用户不希望本轮推送，跳过这一�
 
 1. `mvn -o -pl realserver/common/oms,realserver/plugins/rtdata-module -am test` 全绿（新增 14 条用例）。
 2. `mvn -o -pl realserver/plugins/rtdata-consumer -am -DskipTests package` 成功，`mvnRepo` 未被覆盖。
-3. `scripts/bench-consumer-write.sh` 在**未改代码**时跑出 ~1.2–1.4 万/秒（基线可复现）。
+3. `scripts/bench-consumer-write.sh` 在**未改代码**时跑出 0.9–1.15 万/秒（本机实测 10,526 / 11,083 / 9,068，基线可复现）。
 4. 换新 jar 后同脚本 `BENCH PASSED`，均值 ≥ 3× 基线，失败 0，守恒精确。
 5. patch 能 `git apply --check` 通过；本仓库**两个**提交（bench 脚本 / 本计划 + patch + HANDOFF）齐全。
 6. 若未达标：Task 8 的 jstack 结论已写进 HANDOFF，且明确说明瓶颈在哪一侧。
