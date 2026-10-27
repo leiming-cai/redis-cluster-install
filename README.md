@@ -64,6 +64,7 @@ bash uninstall.sh --force     # 实际执行删除
 | `scripts/smoke-test.sh` | Docker 端到端集成测试 |
 | `scripts/e2e-cluster-config.sh` | `cluster-config.sh` 的 Docker 双节点端到端测试 |
 | `scripts/e2e-cpsweb-nodes.sh` | 在 **CPS Web 环境镜像**派生的节点上部署集群并跑消费者写入测试 |
+| `scripts/e2e-kafka-cluster.sh` | 在两个 CPS 节点上建 **2-voter ZooKeeper + 2-broker Kafka(RF=2)** 集群并验证副本 |
 | `tests/fixtures/Dockerfile.node.cpsweb` | 节点镜像:从 `cpsweb-env:1.0` 派生,补 systemd/sshd/`redis` 用户 |
 | `tests/fixtures/Dockerfile.control.cpsweb` | 控制端镜像:在节点镜像上加 `sshpass` |
 | `docs/superpowers/specs/2026-07-07-redis-cluster-install-design.md` | 设计文档 |

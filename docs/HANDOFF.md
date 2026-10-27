@@ -1,12 +1,14 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-27
-**工作分支**：无 —— 第七轮已直接提交在 `main` 上（**尚未推送**）
+**工作分支**：无 —— 第七/八轮直接提交在 `main` 上，已推送（`origin/main` = `384a42f`）
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` 领先 `origin/main` 2 个提交（`e2d01b4` + 本次文档提交），工作区干净
+**基线**：`main` 与 `origin/main` 同步在 `384a42f`；**第八轮改动尚未提交**
 **第七轮（2026-10-27）**：在 CPS 节点镜像上部署集群 + 跑 `RTListener.onMessage`
 写入测试，并固化成 `scripts/e2e-cpsweb-nodes.sh`。
 **已提交**（`e2d01b4`），详见下文「第七轮」。
+**第八轮（2026-10-27）**：ZooKeeper + Kafka 两节点集群，固化成
+`scripts/e2e-kafka-cluster.sh`，详见下文「第八轮」。
 
 ---
 
@@ -47,6 +49,73 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 并用真实消费者写入取证；已提交（`e2d01b4`）。**
 
 **下一步**：只剩推送 main（必须走 SSH），见文末。
+
+---
+
+## 第八轮（2026-10-27）：ZooKeeper + Kafka 也做成两节点集群
+
+**这一轮同样不改 `cluster-config.sh`（它只管 Redis）。它把 E2E 环境里的消息中间件
+从「cpsweb 上的一套单机」变成「两个节点上的真集群」，并固化成
+`scripts/e2e-kafka-cluster.sh`。**
+
+### 拓扑
+
+```
+node-a 172.21.0.2                        node-b 172.21.0.3
+├─ ZooKeeper myid=1                      ├─ ZooKeeper myid=2
+└─ Kafka     broker.id=1                 └─ Kafka     broker.id=2
+     advertised.listeners = 节点 IP           advertised.listeners = 节点 IP
+```
+
+**2 个 voter，quorum=2**（这是刻意的选择：E2E 环境里最小的「真集群」）。
+`zoo.cfg` 与 `server.properties` 里的 IP **每次运行从 docker 读**，不写死。
+
+### 交付
+
+`scripts/e2e-kafka-cluster.sh`：停掉 cpsweb 的单机 ZK/Kafka → 写两节点配置与
+systemd 单元 → 起 ZK → 起 Kafka → 建 4 个 topic（RF=2）→ 7 条断言。
+`WITH_CONSUMER=1` 时顺带把 `rc-cpsweb-app` 接到新集群。
+
+### 验证（脚本里的断言，全部实测通过）
+
+| # | 断言 | 结果 |
+|---|---|---|
+| A1 | 两个 ZK 都有 mode（一 leader 一 follower） | ✅ |
+| A2 | 两个 broker 都注册进 ZK | ✅ `[1, 2]` |
+| A3 | **Kafka JVM 的 `MaxHeapSize` 真是 256MB** | ✅ 用 `jinfo` 从运行中的 JVM 读，不看配置文件 |
+| A4 | **ZooKeeper JVM 也是 256MB** | ✅ 同上 |
+| A5 | 4 个 topic 的 `ReplicationFactor=2` 且每个分区 ISR 里 2 个副本 | ✅ |
+| A6 | `under-replicated` / `unavailable` 都为空 | ✅ |
+| A7 | 冒烟：写一条、读回来（用一次性 topic，不污染 INCDATA） | ✅ |
+
+端到端回归（20 万条积压 → 真实消费者排空）：
+
+```
+publish 7s（p0=100000 / p1=100000 均分）
+排空 15 个活跃秒，峰值 20,238 条/秒，均值 13,323，失败 0
+```
+
+**与单 broker 时一致（20,238 vs 20,500）—— 说明 Kafka 换集群没有影响写入路径，
+瓶颈仍在消费者的 Redis 写入侧。**
+
+### 两个坑（都做成了断言，不是注释）
+
+1. **systemd 的 `Environment=` 值含空格必须加引号。** 写成
+   `Environment=KAFKA_HEAP_OPTS=-Xms256m -Xmx256m` 时第二个词被静默丢弃，
+   实测 `MaxHeapSize=1027604480`（JVM 按内存 1/4 自己算的），只有 `-Xms` 生效。
+   **A3/A4 就是为这件事存在的** —— 只检查配置文件是发现不了的。
+2. **ZooKeeper 默认堆是 1GB**（`zkEnv.sh` 写死），两个 ZK 就是 2GB。
+   用 `SERVER_JVMFLAGS` 压到 256MB。
+
+### 三条限制（写在这里，别当成 bug）
+
+1. **2-voter 不是高可用**：任一节点挂掉就失去 quorum，Kafka 立刻不可写。
+   所以**「杀掉一个 broker 验证副本切换」在这个拓扑下做不了**，不是没做。
+2. **容器 IP 进了 `advertised.listeners`**：容器**重建**（不是重启）后 IP 会变，
+   必须重跑脚本改配置并重启 broker。
+3. **`cpsweb` 的 PID 1 是 `entrypoint.sh`**：被停掉的单机 ZK/Kafka 在**该容器重启**时
+   会自动回来，变成两套集群并存。旧的 49 万条压测消息仍在
+   `cpsweb:/opt/software/kafka/data`，孤立但没删。
 
 ---
 
@@ -103,7 +172,7 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 
 | 检查 | 结果 |
 |---|---|
-| `bash tests/check_syntax.sh` | `TOTAL=34 FAIL=0` |
+| `bash tests/check_syntax.sh` | `TOTAL=35 FAIL=0` |
 | `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
 | `bats`（CI 调用方式） | `163 通过 / 0 失败` |
 | `bash scripts/e2e-cpsweb-nodes.sh` | 4 次运行，最后一次 `KEEP=1`；全部 `E2E PASSED` |
@@ -458,7 +527,7 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 |---|---|
 | `bats tests/lib/*.bats tests/*.bats` | **163 通过 / 0 失败** |
 | `find tests -name '*.bats' -print0 \| xargs -0 bats` | **163 通过 / 0 失败**（CI 调用方式） |
-| `bash tests/check_syntax.sh` | `TOTAL=34 FAIL=0` |
+| `bash tests/check_syntax.sh` | `TOTAL=35 FAIL=0` |
 | `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
 | `bash scripts/check-bash-compat.sh` | `BASH_COMPAT: PASS`（在 bash 4.3 上跑同一套 bats） |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
