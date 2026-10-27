@@ -18,7 +18,7 @@
 **Java 源码不在本仓库**，改动以 patch 形式落在
 `docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`，详见下文「第十轮」。
 
-**下一步**：第十轮已推送（`origin/main` = `02db42a`）；下一轮若还要提速，先看「第十轮」里的瓶颈结论。
+**下一步**：第十轮已推送；下一轮若还要提速，先看「第十轮」里的瓶颈结论。
 
 ---
 
@@ -1303,7 +1303,9 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
   - `scripts/e2e-cpsweb-nodes.sh` 在本轮完整跑过 4 次，最后一次 `KEEP=1`
 - **第八轮**（ZooKeeper + Kafka 两节点集群）直接提交在 main 上，**已推送**：`3a2856d`
   - 验证：`check_syntax 35/0`、`validate_libs 50/0`、bats 163/0；脚本 A1–A7 全绿
-- **✅ `origin/main` 当前 = `02db42a`**（第十轮 + 文档提交，2026-10-27 推送；HTTPS 仍被网络重置/PAT scope 挡住，两次都是走 SSH 推成的）。
+- **✅ `origin/main` 与 `main` 同步**（`git status -sb` 无 ahead/behind）。第十轮推于
+  `0de6426..02db42a`，之后只有文档提交；两次推送都走的 SSH
+  （HTTPS 被网络重置/PAT scope 挡住，见下）。
   > 前三轮之所以推不了，是 GitHub 从这台机器不可达
   > （`Recv failure: Connection was reset` / `Failed to connect to github.com:443`），
   > **不是**配置问题。网络恢复后一次推成功。
@@ -1359,7 +1361,7 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第七/八/九/十轮都已提交并推送**（`origin/main` = `02db42a`，`git status -sb` 无 ahead/behind）。
+**第七/八/九/十轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
 
 ### 下一次会话从这里开始（第十轮结束时）
 
