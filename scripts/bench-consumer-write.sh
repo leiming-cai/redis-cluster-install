@@ -99,7 +99,10 @@ lag_sum() {
     printf '%s\n' "$out" | awk '
         $2 == "INCDATA" { rows++; if ($6 ~ /^[0-9]+$/) { s += $6; numeric++ } }
         END {
-            if (rows == 0 || numeric == 0) exit 3
+            # A partially non-numeric LAG column (a partition with no committed
+            # offset) must also abort: summing only the numeric rows would
+            # understate the backlog and pass the "caught up" gate.
+            if (rows == 0 || numeric != rows) exit 3
             print s + 0
         }'
 }
@@ -251,10 +254,10 @@ for _ in $(seq 1 10); do
     [ "$lag" = "0" ] && break
     sleep 1
 done
+# Without a numeric label there is no evidence of zero failures -- the sum would
+# be 0 because nothing matched, not because nothing failed.
+grep -q '每秒写入失败点数：[0-9]' "$LOG" || fail "failure-counter label/value is missing from the log; cannot claim 0 failures"
 failcnt=$(sed -n 's/.*每秒写入失败点数：\([0-9]*\).*/\1/p' "$LOG" | awk '{s+=$1} END{print s+0}')
-# Without the label there is no evidence of zero failures -- the sum would be 0
-# because nothing matched, not because nothing failed.
-grep -q '每秒写入失败点数：' "$LOG" || fail "failure-counter label is missing from the log; cannot claim 0 failures"
 psum=$(sed -n 's/.*每秒已处理实时数据变化数量：\([0-9]*\).*/\1/p' "$LOG" | awk '{s+=$1} END{print s+0}')
 active=$(sed -n 's/.*每秒已处理实时数据变化数量：\([0-9]*\).*/\1/p' "$LOG" | awk '$1>0{c++} END{print c+0}')
 peak=$(sed -n 's/.*每秒已处理实时数据变化数量：\([0-9]*\).*/\1/p' "$LOG" | sort -n | tail -1)
@@ -305,6 +308,7 @@ echo "===== RESULT: Kafka -> RTListener -> Redis Cluster ====="
 echo "group             : $GROUP"
 echo "concurrency       : $CONC"
 echo "jar               : $JAR"
+echo "consumer_state    : $app_status"
 echo "sent              : $N"
 echo "publish_sec       : $(( t1 - t0 ))"
 echo "wall_sec_incl_startup : $(( tend - tstart ))"

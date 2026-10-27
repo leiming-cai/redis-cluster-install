@@ -1533,30 +1533,65 @@ Expected: `APPLY_CHECK_EXIT=0`，无输出。
 
 **Files:** 无（测量与取证）
 
-- [ ] **Step 1: 用新 jar 跑一次完整排空**
+- [ ] **Step 1: 交替跑旧/新 jar（A/B/A/B），比中位数**
+
+> 为什么要交替：Redis 开着 AOF+RDB，每次 20 万写入都会触发一次后台 RDB 保存
+> （本机实测一次 25 秒）。撞上保存的那一轮会掉到 5–7k/s。基线 10 次样本的范围是
+> 4,987–13,333，拿单一数字对比会得出错误结论。交替跑让环境抖动同时作用于两侧。
+
+**先准备旧 jar 的副本**（`mvnRepo` 里那份未改动）：
 
 ```powershell
-$jar  = 'D:/javawork/1.2/cpscloud1.0/code/platform/backend/realserver/plugins/rtdata-consumer/target/rtdata-consumer-1.0.14.jar'
+$old = 'C:\Users\蔡雷鸣\AppData\Local\Temp\opencode\rtdata-consumer-1.0.14-old.jar'
+Copy-Item 'D:\java\apache-maven\mvnRepo\com\sac\platform\rtdata-consumer\1.0.14\rtdata-consumer-1.0.14.jar' $old
+(Get-Item $old).Length
+```
+
+Expected: `140507290`。
+
+然后按 **旧 / 新 / 旧 / 新** 跑四次（每次都 `MIN_MEAN=0`，阈值最后自己判）：
+
+```powershell
+$old  = 'C:/Users/蔡雷鸣/AppData/Local/Temp/opencode/rtdata-consumer-1.0.14-old.jar'
+$new  = 'D:/javawork/1.2/cpscloud1.0/code/platform/backend/realserver/plugins/rtdata-consumer/target/rtdata-consumer-1.0.14.jar'
 $repo = 'D:\work\rediscluterproject'
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${repo}:/repo" `
-  -e NEW_JAR=$jar -e CONC=1 rc-e2e-runner:local bash /repo/scripts/bench-consumer-write.sh
+foreach ($round in 1..2) {
+  foreach ($pair in @(@('OLD',$old), @('NEW',$new))) {
+    "=== round $round $($pair[0]) ==="
+    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${repo}:/repo" `
+      -e NEW_JAR=$($pair[1]) -e CONC=1 -e MIN_MEAN=0 `
+      rc-e2e-runner:local bash /repo/scripts/bench-consumer-write.sh
+  }
+}
 ```
 
-Expected:
+记录四次的 `mean_active_per_s`，**取各自中位数**（两次取平均）比较。
+
+- [ ] **Step 2: 判定**
 
 ```
-mean_active_per_s : >= 31600      # 验收线：>= 3x 实测基线中位数 10526
+验收：new 中位数 >= 3 x old 中位数
+并且：每次都是 BENCH PASSED（守恒、失败 0、lag 0、三个主节点、8/8 抽样）
+参考：最好的旧 jar 观测值 13,333；第九轮 13,233
+```
+
+Expected（若 pipeline 达到 3–10 倍预期，new 应在 3 万以上）：
+
+```
+OLD : 9000 ~ 13500
+NEW : >= 3 x OLD
 write_failures    : 0
 written           : 200000
 lag               : 0
+delta_per_record  : 1.00
 samples           : 8/8 matched
 BENCH PASSED
 ```
 
-脚本自己会断言：点数守恒、失败点 0、lag 0、三个主节点都收到 HSET、8 个抽样值逐字匹配。
+脚本自己会断言：点数守恒、失败点 0、lag 0、三个主节点都收到 HSET/HMSET、8 个抽样值逐字匹配。
 **任何一条不满足都会以 `FAIL:` 退出，不得跳过。**
 
-- [ ] **Step 2: 手工复核一个抽样（防止脚本自己的算式有错）**
+- [ ] **Step 3: 手工复核一个抽样（防止脚本自己的算式有错）**
 
 ```powershell
 docker exec rc-cpsweb-node-a /opt/software/redis/bin/redis-cli -c -p 6379 -a CpsE2eClusterPw --no-auth-warning `
@@ -1573,18 +1608,18 @@ Value
 > 如果基准 B0 与上面不同（脚本按当前时间取 B0），用脚本输出里 `p0 base=` 的值替换 obid；
 > 时间戳 = `1793095000000 + B0 + index`。
 
-- [ ] **Step 3: 记录结果并做对比**
+- [ ] **Step 4: 记录结果并做对比**
 
 把以下内容写进 `%TEMP%\opencode\pipeline-result.txt`（Task 9 要用）：
 
-- 基线 `mean_active_per_s` / `active_seconds` / `wall_sec`
-- 新版同样三项
-- 倍数 = 新版 / 基线
-- `hset_delta`、`written`、`lag`、`write_failures`
+- 旧 jar 两次的 `mean_active_per_s` / `active_seconds`
+- 新 jar 两次的同样两项
+- 两个中位数与倍数
+- 每次的 `written` / `lag` / `write_failures` / `delta_per_record`
 
-- [ ] **Step 4: 判定**
+- [ ] **Step 5: 判定**
 
-- 均值 ≥ 3× 基线 **且** 脚本 `BENCH PASSED`：进入 Task 9。
+- 新中位数 ≥ 3× 旧中位数 **且** 每次都是 `BENCH PASSED`：进入 Task 9。
 - 否则进入 Task 8，**不要**修改断言或测量口径。
 
 ---
