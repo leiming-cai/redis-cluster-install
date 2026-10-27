@@ -1359,14 +1359,70 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第七/八轮都已提交并推送（`origin/main` = `3a2856d`）。** 第九轮只剩文档与一个待定决策：
+**第七/八/九/十轮都已提交。第十轮尚未推送**（`main` 领先 `origin/main` 8 个提交）。
 
-1. **提交第九轮的 HANDOFF 改动**（本轮不动生产代码）。
-2. **决定是否实现集群 pipeline** —— 设计、API 验证、风险点都写在「第九轮」里。
-   做到一半时必须先 profile 复测，因为 profile 显示写线程有一大半时间是空的，
-   改完瓶颈很可能转移到消费/解析侧。
-3. 可选：把积压式排空的探针固化成 `scripts/bench-consumer-write.sh`
-   （目前只在 `%TEMP%\opencode\`，没进仓库）。
+### 下一次会话从这里开始（第十轮结束时）
+
+```powershell
+cd D:\work\rediscluterproject
+git status -sb            # main...origin/main [ahead 8]，工作区干净
+git log --oneline -9      # 从 0de6426 到 c8560a8
+```
+
+环境（本轮结束时仍在跑，没有拆）：
+
+```
+rc-cpsweb-app      跑的是**新 jar**（target/rtdata-consumer-1.0.14.jar，140,518,878 B）
+rc-cpsweb-node-a/b Redis 6 节点集群，cluster_state:ok；每主 ~160 万 keys（合计 ~480 万）
+Kafka/ZooKeeper    两节点集群，未改动
+Docker VM          2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
+```
+
+三个待定/待办，按优先级：
+
+1. **在干净集群上重测倍率**（唯一能把结论从「1.7–4.1×，中位数 2.8×」收紧的事）。
+   当前环境的键数增长 + 每轮触发的 25 秒 RDB 保存让差值不可信。
+   做法：新建集群（或清掉 benchmark 键）→ 用
+   `scripts/bench-consumer-write.sh` 交替跑旧/新各 3 轮 → 比中位数。
+2. **决定是否推送** `main`（8 个提交）。走 SSH：
+   ```powershell
+   $env:GIT_SSH='C:\Windows\System32\OpenSSH\ssh.exe'
+   git -c remote.origin.pushurl=git@github.com:leiming-cai/redis-cluster-install.git push origin main
+   ```
+3. **可选**：把 `scripts/check-bash-compat.sh` 接进 CI（旧待办，仍未做）。
+
+**第九轮的旧动作（保留备查）：**
+
+- ~~把积压式排空的探针固化成 `scripts/bench-consumer-write.sh`~~ —— **已完成**（第十轮，
+  并且补了 5 类断言，见「第十轮」）。
+
+### 第十轮的产物（下次接手直接看这里）
+
+| 东西 | 位置 |
+|---|---|
+| 设计 | `docs/superpowers/specs/2026-10-27-cluster-pipeline-design.md` |
+| 计划（含执行后的补注） | `docs/superpowers/plans/2026-10-27-cluster-pipeline.md` |
+| 代码补丁（权威 diff） | `docs/superpowers/patches/2026-10-27-cluster-pipeline.patch` |
+| 测量脚本 | `scripts/bench-consumer-write.sh` |
+| 交接正文 | 本文件「第十轮」 |
+| 12 轮原始数字 | `%TEMP%\opencode\pipeline-result.txt` |
+| 旧 jar 副本（A/B 用） | `%TEMP%\opencode\rtdata-consumer-1.0.14-old.jar` |
+| 改动前的两个源文件备份 | `%TEMP%\opencode\pipeline-baseline\` |
+| 单轮原始日志 | `%TEMP%\opencode\bench-run*.txt`、`task8-bench.txt` |
+
+> `%TEMP%` 是临时的。**要长期保留的是 patch**——它能从基线重建全部改动：
+> 在 `realserver/` 下 `git -c core.autocrlf=false apply <patch>`。
+> 新版 jar 不在了就重新 `mvn -o -pl realserver/plugins/rtdata-consumer -am -DskipTests package`。
+
+**跑一次测量的最短路径**（环境还在时）：
+
+```powershell
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
+  -v "D:/work/rediscluterproject:/repo" `
+  -e NEW_JAR=D:/javawork/1.2/cpscloud1.0/code/platform/backend/realserver/plugins/rtdata-consumer/target/rtdata-consumer-1.0.14.jar `
+  -e CONC=1 -e MIN_MEAN=0 `
+  rc-e2e-runner:local bash /repo/scripts/bench-consumer-write.sh
+```
 
 **已完成的旧动作（保留备查）：**
 
