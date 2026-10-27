@@ -8,7 +8,7 @@ TOTAL=0
 TMP_ERR=$(mktemp)
 
 echo "=== Script syntax check ==="
-for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh scripts/check-bash-compat.sh tests/validate_libs.sh; do
+for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh scripts/e2e-cluster-config.sh scripts/e2e-cpsweb-nodes.sh scripts/check-bash-compat.sh tests/validate_libs.sh; do
     TOTAL=$((TOTAL+1))
     if bash -n "$f" 2>"$TMP_ERR"; then
         echo "OK: $f"

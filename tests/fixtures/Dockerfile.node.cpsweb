@@ -1,0 +1,76 @@
+# Redis Cluster 节点镜像（从 cpsweb-install 的 cpsweb-env:1.0 派生）
+#
+# 目的：让 rediscluterproject 的 cluster-config.sh 能在两个节点上真正跑完
+#       9 步部署 —— 该脚本的前置条件是「Redis 二进制已在 $REDIS_PREFIX/bin、
+#       redis 系统用户已存在」，并且它用 systemd 单元来托管实例。
+#
+# 基底：cpsweb-env:1.0（= D:\work\cpsweb-install\docker\Dockerfile 构建出来的镜像）
+#       它自带 Redis 8.10.0（/opt/software/redis-8.10.0）与 JDK8。
+#
+# 本文件补上 cluster-config.sh 需要、而基座没有的东西：
+#   1. systemd（PID 1 = /sbin/init，单元才起得来）
+#   2. openssh-server + root 密码登录（cluster-config.sh 全程走 sshpass）
+#   3. redis 系统用户
+#   4. $REDIS_PREFIX/bin 下的 redis-server / redis-cli
+#
+# ⚠️ ENTRYPOINT [] 必须清空：基座的 entrypoint 是 /usr/local/bin/entrypoint.sh，
+#    它会拉起整套业务栈（PG + nacos + kafka ...），跟集群节点无关，
+#    而且它不会 exec systemd —— PID 1 必须是 init，否则 systemd 单元无法托管。
+#
+# ⚠️ systemd 需要 /sys/fs/cgroup 可写，且容器要 --privileged + --cgroupns=host，
+#    否则 systemctl 会报 226/NAMESPACE。见 docs/VERIFICATION.md D8。
+
+FROM cpsweb-env:1.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------------------------------------------------------
+# 1) systemd + sshd + sudo
+#    policy-rc.d(exit 101) 阻止构建期 dpkg 拉起服务：构建容器里没有 init，
+#    systemd 正是此刻要装的东西。
+# ---------------------------------------------------------------------------
+RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
+ && chmod +x /usr/sbin/policy-rc.d \
+ && apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends \
+        systemd systemd-sysv openssh-server sudo procps psmisc iproute2 net-tools \
+ && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# 2) redis 系统用户 + $REDIS_PREFIX/bin
+#    cluster-config.sh 的 preflight 硬性检查这两项：
+#      -x $REDIS_PREFIX/bin/redis-server
+#      -x $REDIS_PREFIX/bin/redis-cli
+#      id redis
+#    基座的 Redis 装在 /opt/software/redis-8.10.0（不在 bin/ 下），
+#    所以这里建 /opt/software/redis 作为 $REDIS_PREFIX，用符号链接指过去。
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    id redis >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin redis; \
+    mkdir -p /opt/software/redis/bin; \
+    ln -sf /opt/software/redis-8.10.0/bin/redis-server /opt/software/redis/bin/redis-server; \
+    ln -sf /opt/software/redis-8.10.0/bin/redis-cli    /opt/software/redis/bin/redis-cli; \
+    ln -sf /opt/software/redis-8.10.0/bin/redis-sentinel /opt/software/redis/bin/redis-sentinel; \
+    test -x /opt/software/redis/bin/redis-server; \
+    test -x /opt/software/redis/bin/redis-cli
+
+# ---------------------------------------------------------------------------
+# 3) sshd：root 密码登录（cluster-config.sh 只支持密码认证）
+# ---------------------------------------------------------------------------
+RUN mkdir -p /var/run/sshd \
+ && echo 'root:ClusterPw123!' | chpasswd \
+ && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
+ && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+# 集群总线需要大量文件描述符：redis-cli --cluster create 会同时开 6+ 个连接，
+# LimitNOFILE=10032 是单元模板里设的，宿主机侧也要放开。
+RUN echo '* soft nofile 65535' >> /etc/security/limits.conf \
+ && echo '* hard nofile 65535' >> /etc/security/limits.conf
+
+# ---------------------------------------------------------------------------
+# 4) PID 1 必须是 init
+# ---------------------------------------------------------------------------
+ENTRYPOINT []
+STOPSIGNAL SIGTERM
+VOLUME ["/sys/fs/cgroup"]
+CMD ["/sbin/init"]

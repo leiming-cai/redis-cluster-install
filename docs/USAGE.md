@@ -658,7 +658,28 @@ bash scripts/smoke-test.sh
 
 # cluster-config.sh 的端到端（需要 docker；会拉取 redis:8）
 bash scripts/e2e-cluster-config.sh
+
+# CPS Web 节点镜像的端到端（需要 docker + 已构建的 cpsweb-env:1.0）
+bash scripts/e2e-cpsweb-nodes.sh
+
+# 追加消费者的写入测试（需要已有 Kafka 容器与 rtdata-consumer jar）
+APP_JAR=D:/path/to/rtdata-consumer-1.0.14.jar bash scripts/e2e-cpsweb-nodes.sh
 ```
+
+> ⚠️ `scripts/e2e-cpsweb-nodes.sh` 里的 `APP_JAR` **必须是 Docker daemon 能看见的路径**
+> （Docker Desktop/Windows 上是 `D:/...`，不是 `/d/...`）：
+> `docker run -v` 的源由 **daemon** 解析，而 `docker build` 的上下文由 **CLI** 解析，
+> 两者混用会报 `path not found`。
+
+> ⚠️ 写入测试读回**必须用 `HGET` 而不是 `GET`**。
+> 集群模式下 `RTListener.onMessage` → `batchWirtePip` →
+> `RedisRealDataServiceImpl.wirteOmsPip` 走 `batchWirteOmsByRedisCluster()`，
+> 那是 `opsForHash().putAll(key, hash)` —— 写的是 **hash**，
+> field 名就是 atype（`Value`）。`-c` 只解决「去哪个节点」，不解决「用什么命令」。
+
+> ⚠️ 写入测试还要挑一个**活着的**节点当读入口。故障转移演练期间刚被杀的那个主
+> 端口是拒连的，拿它当入口会得到 `Connection refused`，
+> 看起来像「没写进去」，其实数据早就落好了。
 
 > ⚠️ `scripts/smoke-test.sh` **不调用 `install.sh`**。
 > 它在两个 Docker 容器里用 apt 装的 redis-server 手工复刻了一遍集群搭建流程，

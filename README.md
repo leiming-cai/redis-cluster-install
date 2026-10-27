@@ -63,6 +63,9 @@ bash uninstall.sh --force     # 实际执行删除
 | `tests/` | bats 单元测试 |
 | `scripts/smoke-test.sh` | Docker 端到端集成测试 |
 | `scripts/e2e-cluster-config.sh` | `cluster-config.sh` 的 Docker 双节点端到端测试 |
+| `scripts/e2e-cpsweb-nodes.sh` | 在 **CPS Web 环境镜像**派生的节点上部署集群并跑消费者写入测试 |
+| `tests/fixtures/Dockerfile.node.cpsweb` | 节点镜像:从 `cpsweb-env:1.0` 派生,补 systemd/sshd/`redis` 用户 |
+| `tests/fixtures/Dockerfile.control.cpsweb` | 控制端镜像:在节点镜像上加 `sshpass` |
 | `docs/superpowers/specs/2026-07-07-redis-cluster-install-design.md` | 设计文档 |
 
 ## 集群配置（Redis 已安装）
@@ -113,7 +116,30 @@ bash scripts/smoke-test.sh
 
 # cluster-config.sh 端到端(需要 Docker)
 bash scripts/e2e-cluster-config.sh
+
+# CPS Web 节点镜像端到端(需要 Docker + cpsweb-env:1.0)
+bash scripts/e2e-cpsweb-nodes.sh
+
+# 再带上消费者的写入测试(需要已有 Kafka 容器 + rtdata-consumer jar)
+APP_JAR=D:/path/to/rtdata-consumer-1.0.14.jar bash scripts/e2e-cpsweb-nodes.sh
 ```
+
+### CPS Web 节点镜像端到端
+
+`scripts/e2e-cluster-config.sh` 的节点来自官方 `redis:8` 镜像——那个镜像
+**自带 `redis` 用户、没有 systemd**。集群真正要落地的 CPS Web 节点镜像
+(`cpsweb-env:1.0`,由 cpsweb-install 安装包构建)正好相反：**有 Redis 8.10.0、
+没有 systemd / sshd / `redis` 用户**,而这后三样正是 `cluster-config.sh`
+preflight 硬性要求的东西。
+
+`scripts/e2e-cpsweb-nodes.sh` 补上这段：先从 `cpsweb-env:1.0` 派生出带
+systemd / sshd / `redis` 用户的节点镜像,再跑完整的 9 步组网,最后校验
+6 实例 PING、16384 槽位、跨节点读写。
+
+给了 `APP_JAR` 时还会多跑一段:**真实 Kafka `INCDATA` → `RTListener.onMessage`
+→ Redis Cluster**。这一段在集群模式下走 `opsForHash().putAll()`,
+读完要用 **`HGET`** 而不是 `GET`(写的是 hash,不是 string)。
+还会额外验证:槽位归属正确、杀主后副本被提升、切换后仍能写入、旧主回来是副本。
 
 ## 架构
 

@@ -26,6 +26,6 @@ jobs:
 
       - name: Bash syntax check
         run: |
-          for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh lib/*.sh; do
+          for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh scripts/e2e-cpsweb-nodes.sh lib/*.sh; do
             bash -n "$f"
           done

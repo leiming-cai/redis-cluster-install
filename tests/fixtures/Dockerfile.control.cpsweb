@@ -1,0 +1,45 @@
+# Control-plane fixture for scripts/e2e-cpsweb-nodes.sh.
+#
+# It is deliberately derived from the NODE image rather than built from a
+# separate base: the control plane must speak to the nodes over sshpass, and
+# everything else it needs (bash, ssh, scp) the node image already has because
+# cluster-config.sh deploys over SSH. Deriving it means one base to keep in
+# sync instead of two.
+#
+# WHY THE NODE IMAGE IS THE RIGHT PARENT AND NOT cpsweb-env:1.0 DIRECTLY:
+#   the node image is the one that carries systemd + sshd + the `redis` user,
+#   and it is itself derived from cpsweb-env:1.0 (see Dockerfile.node.cpsweb).
+#   Building from it keeps this file to a single apt package.
+#
+# ⚠️ redis-cli is deliberately NOT installed here.
+#   cluster-config.sh step 9 prefers a LOCAL redis-cli when one is on PATH and
+#   only falls back to running `--cluster create` from the first node when it
+#   is absent. The control image's Ubuntu would give us redis-cli 6.x while the
+#   nodes run Redis 8.10.0 — exactly the version skew the project moved its E2E
+#   onto redis:8 to avoid. Leaving redis-cli off PATH makes the script take the
+#   remote path and use the nodes' own Redis 8 binary.
+#   (Measured on this repo: /opt/software/redis/bin/redis-cli is NOT on the
+#   image's default PATH, because that PATH is only exported by the cpsweb
+#   entrypoint, which the node image clears.)
+#
+# ⚠️ ENTRYPOINT/CMD are inherited from the node image ([], ["/sbin/init"]).
+#   That is fine here: the driver always passes an explicit command
+#   (`docker run ... bash -c '...'`), which replaces CMD, and ENTRYPOINT is
+#   empty so nothing wraps it. Do not "fix" this by adding an entrypoint.
+
+FROM rc-cpsweb-node:local
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends sshpass \
+ && rm -rf /var/lib/apt/lists/*
+
+# Fail the build, not the test, if the one thing this layer exists for is
+# missing. A control image without sshpass fails every ssh_run in
+# cluster-config.sh with "sshpass: command not found", three steps later and
+# looking like a networking problem.
+RUN command -v sshpass >/dev/null \
+ && command -v ssh >/dev/null \
+ && command -v scp >/dev/null \
+ && command -v bash >/dev/null
