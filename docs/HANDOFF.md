@@ -1,9 +1,12 @@
 # cluster-config.sh 实施进度交接
 
-**更新时间**：2026-10-22
-**工作分支**：无 —— 第六轮已合并进 main 并推送到 `origin/main`
+**更新时间**：2026-10-27
+**工作分支**：无 —— 第七轮已直接提交在 `main` 上（**尚未推送**）
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = 本仓库 HEAD（已推送，`origin/main` 与之同步）
+**基线**：`main` 领先 `origin/main` 2 个提交（`e2d01b4` + 本次文档提交），工作区干净
+**第七轮（2026-10-27）**：在 CPS 节点镜像上部署集群 + 跑 `RTListener.onMessage`
+写入测试，并固化成 `scripts/e2e-cpsweb-nodes.sh`。
+**已提交**（`e2d01b4`），详见下文「第七轮」。
 
 ---
 
@@ -40,7 +43,123 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 会报 `tr: write error: Broken pipe` 混进输出，本地那份静默地死。
 **`9b0a6f6` 上 Actions 第一次变成 success。**
 
-**下一步**：只剩两件收尾的事，见文末。
+**第七轮把 `cluster-config.sh` 第一次放到真正的目标镜像（`cpsweb-env:1.0`）上跑，
+并用真实消费者写入取证；已提交（`e2d01b4`）。**
+
+**下一步**：只剩推送 main（必须走 SSH），见文末。
+
+---
+
+## 第七轮（2026-10-27）：在 CPS 节点镜像上部署集群 + RTListener 写入测试
+
+**这一轮不改 `cluster-config.sh`。它补的是「`cluster-config.sh` 到底能不能在真正的
+目标镜像上跑」，然后把整条链路固化成一条命令。**
+
+### 背景：之前的 E2E 用的不是目标镜像
+
+`scripts/e2e-cluster-config.sh` 的节点来自官方 `redis:8` —— 那个镜像**自带 `redis` 用户、
+没有 systemd**。而集群真正要落地的 CPS 节点镜像（`cpsweb-env:1.0`，由
+`D:\work\cpsweb-install` 安装包构建）正好相反：**有 Redis 8.10.0，没有 systemd / sshd /
+`redis` 用户**。这三样恰好是 `cluster-config.sh` preflight 硬性要求的东西 ——
+也就是说，**目标镜像上从来没跑过**。
+
+### 交付
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/e2e-cpsweb-nodes.sh` | 一条命令：派生镜像 → 起两节点 → 9 步组网 → 校验 → 消费者写入测试 |
+| `tests/fixtures/Dockerfile.node.cpsweb` | 节点镜像：`cpsweb-env:1.0` + systemd + sshd + `redis` 用户 + `$REDIS_PREFIX/bin` |
+| `tests/fixtures/Dockerfile.control.cpsweb` | 控制端镜像：节点镜像 + `sshpass` |
+| `tests/check_syntax.sh` | 纳入语法检查（TOTAL 32 → 34：本脚本 + 一直缺席的 `e2e-cluster-config.sh`） |
+| `.github/workflows/ci.yml` | CI 的 `bash -n` 列表纳入本脚本（此前只有 bats 与 `lib/*.sh`） |
+| `README.md` / `docs/USAGE.md` | 用法 + 3 条踩坑说明 |
+
+**两个刻意的设计选择，别「修」掉：**
+
+1. **控制端不装 `redis-cli`。** `cluster-config.sh` 第 9 步优先用本地 `redis-cli`，
+   而控制容器的 apt 版是 6.x、节点是 8.10.0 —— 正是本项目迁到 `redis:8` 要避开的错配。
+   本地没有它，脚本才走「从节点上跑」的 fallback，用节点自己的 Redis 8。
+2. **`cluster.conf` 走环境变量而不是 `-v` 挂载。** 脚本自己跑在容器里时，
+   `docker run -v` 的源由 daemon 解析，看不到容器内路径。
+
+### 这一轮抓到的 3 个缺陷（都在新脚本里，不是 `cluster-config.sh`）
+
+1. `$KEEP` 在 `set -u` 下 unbound —— 第一次跑就挂。
+2. **`docker network rm` 永远失败**：`cpsweb` 被接进 `rc-cpsweb-net` 却没断开，
+   网络带着 active endpoint 留下来，后续每次运行都继承它。已加 `ATTACHED_KAFKA` 标记。
+3. **D7 假阴性（最值得记）**：轮询 `cluster nodes` 的入口写死成 `node-a:6379`。
+   第一次演练恰好杀 6380，通过；第二次杀 6379 —— **入口正是死的那个端口**，
+   `Connection refused` 被吞进 stderr，拿到空输出，报「副本未提升」，
+   而提升其实早就完成了。已改成 `live_spec()` 动态挑一个活着的实例。
+
+   **这个 bug 是真实测出来的，不是推理**：run2 受害者 6379 → FAIL，
+   run3 同样受害者 6379 → PASS。**RED→GREEN 用的是同一个故障点。**
+
+   同一个形状在本仓库已经出现过多次（前面 DoD5 的提升判定、E2E 的裸 `grep`）：
+   **一个从不失败的断言等于没有断言；而一个「读错了对象」的断言，
+   会在你以为它绿的某一天才露出来。**
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `bash tests/check_syntax.sh` | `TOTAL=34 FAIL=0` |
+| `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
+| `bats`（CI 调用方式） | `163 通过 / 0 失败` |
+| `bash scripts/e2e-cpsweb-nodes.sh` | 4 次运行，最后一次 `KEEP=1`；全部 `E2E PASSED` |
+
+> 期间为跑 `status.sh` 建过 `secrets/cluster_password.txt`，它让 bats 160 号用例
+> （要求该文件**缺失**）变红。**已删除** —— 新脚本不需要它，密码走 `cluster.conf`。
+
+### 会话结束时机器上的状态
+
+**已提交，工作区干净**：`e2d01b4`（7 个文件，+722/-2）+ 紧随其后的本次文档提交。
+提交时 4 改 3 新 —— 原文档写「3 改」漏算了 `docs/HANDOFF.md` 自己。
+
+**部署仍在跑**（最后一次用 `KEEP=1`，刻意保留）：
+
+```
+rc-cpsweb-node-a   172.21.0.2   6379 / 6380 / 6381
+rc-cpsweb-node-b   172.21.0.3   6382 / 6383 / 6384
+rc-cpsweb-app      （消费者，oms.redisMode=cluster）
+集群密码           CpsE2eClusterPw
+```
+
+`cluster_state:ok` / `slots_assigned:16384` / `known_nodes:6` / `cluster_size:3`。
+（拓扑因演练发生过一次切换：3 主为 6379、6380、6381，6382 变成副本 —— 这是正确的。）
+
+写入取证仍在集群里：
+
+```
+real_data:11:47245270977  Value = "123.45,1712345678000,1"
+real_data:11:47245270978  Value = "888.88,1712345678999,1"
+```
+
+拆掉：
+
+```bash
+docker rm -f rc-cpsweb-app rc-cpsweb-node-a rc-cpsweb-node-b
+docker network disconnect -f rc-cpsweb-net cpsweb
+docker network rm rc-cpsweb-net
+```
+
+### 下一轮要做的
+
+1. ~~提交这一轮的改动~~ —— **已完成**（`e2d01b4`，用 `feat(e2e): ...`）。
+2. ~~把 `scripts/e2e-cpsweb-nodes.sh` 加进 CI 的 `bash -n` 列表~~ —— **已完成**。
+   ⚠️ 这条提交碰了 `.github/workflows/ci.yml`，**HTTPS 推送会被 PAT 拒掉**
+   （缺 `workflow` scope），必须走 SSH，见文末推送一节。
+3. ~~`scripts/e2e-cluster-config.sh` 不在 `check_syntax.sh` 列表~~ —— **已完成**，
+   与 `e2e-cpsweb-nodes.sh` 一并纳入（TOTAL 32 → 34）。
+4. **推送 main**（尚未推送，领先 `origin/main` 2 个提交）。**必须走 SSH**，原因同上。
+
+### 环境约束（这一轮新增的）
+
+- `rc-cpsweb-node:local` 是 **6.91 GB**（父镜像 `cpsweb-env:1.0` 6.88 GB）。
+- Docker 引擎只有 **3.8 GB** 内存；2 个节点 + 1 个消费者容器能跑，但没有余量。
+- 节点必须 `--privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw`，
+  否则 `systemctl` 报 `226/NAMESPACE`。
+- `APP_JAR` 必须是 **daemon 看得见的路径**（Windows 上 `D:/...`，不是 `/d/...`）。
 
 ---
 
@@ -339,10 +458,11 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 |---|---|
 | `bats tests/lib/*.bats tests/*.bats` | **163 通过 / 0 失败** |
 | `find tests -name '*.bats' -print0 \| xargs -0 bats` | **163 通过 / 0 失败**（CI 调用方式） |
-| `bash tests/check_syntax.sh` | `TOTAL=32 FAIL=0` |
+| `bash tests/check_syntax.sh` | `TOTAL=34 FAIL=0` |
 | `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
 | `bash scripts/check-bash-compat.sh` | `BASH_COMPAT: PASS`（在 bash 4.3 上跑同一套 bats） |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
+| `bash scripts/e2e-cpsweb-nodes.sh` | `E2E PASSED`，退出码 0（需 Docker + `cpsweb-env:1.0`） |
 
 > 163 是第六轮补了 12 条用例之后的数字（第五轮 151）。
 
@@ -823,10 +943,13 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
     新增的两条用例**在修复前确认会失败**（见「第四轮」一节）
 - **第五轮**（更正 apt 归因）**已合并进 main**：`git merge --ff-only docs/correct-apt-attribution`（`7d1a364` → `8a8e4a3`）
   - 生产文件**只改注释**（已用 `git diff` 逐行核过）
-- **✅ main 已推送到 `origin/main`**。2026-10-22 推送前重新核对过：
-  `git ls-remote origin` **可达**，`origin/main` = `5c191f1`，与本地是
-  **纯 fast-forward（ahead 62 / behind 0）**，远端期间**没有移动过**。
-  推送后两者一致 —— 以 `git log origin/main -1` 为准。
+- **第六轮**（解析器 4 条遗留项 + 修好 CI）直接提交在 main 上，已推送：`2160c75`
+- **第七轮**（CPS 节点镜像 E2E）**直接提交在 main 上，尚未推送**：
+  `e2d01b4`（7 个文件，+722/-2）+ 紧随其后的本次文档提交
+  - 验证：`check_syntax 34/0`、`validate_libs 50/0`、`bats 163/0`（bash 5.1，非特权 uid 1000）
+  - `scripts/e2e-cpsweb-nodes.sh` 在本轮完整跑过 4 次，最后一次 `KEEP=1`
+- **✅ `origin/main` 当前 = `2160c75`**（2026-10-22 那次推送成功之后又推送过）。
+  **本地 main 领先 2 个提交，待推送**；远端期间没有移动过。
   > 前三轮之所以推不了，是 GitHub 从这台机器不可达
   > （`Recv failure: Connection was reset` / `Failed to connect to github.com:443`），
   > **不是**配置问题。网络恢复后一次推成功。
@@ -882,16 +1005,16 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第六轮（修配置解析器的 4 条审查遗留项 + 修好 CI）已完成并推送。** 剩下的动作：
+**第七轮（CPS 节点镜像 E2E）已提交在 main 上，尚未推送。** 剩下的动作：
 
-1. ~~推送 main~~ —— **已完成**（2026-10-22）。推送前重新核对过：
-   `git ls-remote origin` 可达，`origin/main` = `5c191f1`，**ahead 62 / behind 0**，
-   远端期间没有移动过，推送是纯 fast-forward。
-   > **但 HTTPS 推不上去** —— 存的 PAT 没有 `workflow` scope，
-   > 凡是改动 `.github/workflows/**` 的推送都会被 GitHub 拒掉。
-   > 本次走 SSH 推成的，**那条路能一直用**，但每次都要带
-   > `GIT_SSH="C:\Windows\System32\OpenSSH\ssh.exe"`。
-   > 长期修法见「与主分支的关系」一节。
+1. **推送 main**（领先 `origin/main` 2 个提交）。
+   > **必须走 SSH**：本轮提交碰了 `.github/workflows/ci.yml`，
+   > 而 HTTPS 用的 PAT 没有 `workflow` scope，会被 GitHub 拒掉。
+   > 推送命令见「与主分支的关系」一节的 SSH 那条路。
+2. ~~提交这一轮的改动~~ —— **已完成**（`e2d01b4`）。
+3. ~~把 E2E 脚本纳入语法检查~~ —— **已完成**：
+   `check_syntax.sh` 纳入了 `e2e-cpsweb-nodes.sh` 与一直缺席的 `e2e-cluster-config.sh`（TOTAL 34），
+   CI 的 `bash -n` 列表纳入了 `e2e-cpsweb-nodes.sh`。
 2. ~~决定是否修 `add-node.sh:141`~~ —— **已完成**（第四轮）。
    根因不是「忘了建目录」，而是它的 chown 列表与 `cluster-config.sh` 的
    `create_dirs` 不一致：多了一个没人创建的 `/var/log/redis`，
