@@ -1,18 +1,24 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-27
-**工作分支**：无 —— 第七/八/九轮都在 `main` 上（第八轮已推送，第九轮仅文档）
+**工作分支**：无 —— 第七/八/九/十轮都在 `main` 上（第八轮已推送；第九轮之前的推送见文末）
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` 与 `origin/main` 的差距以 `git status -sb` 为准；第九轮改动**尚未提交**
+**基线**：`main` 与 `origin/main` 的差距以 `git status -sb` 为准；第十轮改动**尚未推送**
 **第七轮（2026-10-27）**：在 CPS 节点镜像上部署集群 + 跑 `RTListener.onMessage`
 写入测试，并固化成 `scripts/e2e-cpsweb-nodes.sh`。
 **已提交**（`e2d01b4`），详见下文「第七轮」。
 **第八轮（2026-10-27）**：ZooKeeper + Kafka 两节点集群，固化成
 `scripts/e2e-kafka-cluster.sh`，详见下文「第八轮」。
-**第九轮（2026-10-27）**：端到端写入性能测量（均值 ~1.33 万/秒）+ 写入路径诊断；
-**集群 pipeline 任务已挂起，未实现**，详见下文「第九轮」。
+**第九轮（2026-10-27）**：端到端写入性能测量（均值 ~1.33 万/秒）+ 写入路径诊断，
+并设计出集群 pipeline（当时未实现），详见下文「第九轮」。
+**第十轮（2026-10-27）**：**实现了集群按节点 pipeline**，并把测量固化成
+`scripts/bench-consumer-write.sh`。同机交替 A/B 共 12 轮：**配对中位数 2.8×**
+（区间 1.7–4.1×；全样本中位数 2.64×），写失败 0、数据精确守恒。
+**倍数没有稳健达到计划里的 3×**，原因与重测建议见「第十轮」。
+**Java 源码不在本仓库**，改动以 patch 形式落在
+`docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`，详见下文「第十轮」。
 
-**下一步**：第九轮的文档改动待提交；是否实现集群 pipeline 待定（设计已在「第九轮」里）。
+**下一步**：第十轮改动待推送；下一轮若还要提速，先看「第十轮」里的瓶颈结论。
 
 ---
 
@@ -55,7 +61,163 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 **第八轮把 ZooKeeper/Kafka 做成两节点集群（`3a2856d`，已推送）；
 第九轮测出端到端写入上限约 1.33 万/秒，并把写入路径诊断到「每点一次同步往返」。**
 
-**下一步**：第九轮的文档改动待提交；集群 pipeline 实现待定。
+**第十轮把这根因修掉了**：新增 `RedisClusterHashPipeline`，集群写入从「每 key 一次
+`HMSET` 往返」变成「每主节点一次 pipeline 往返」。同机交替 A/B（12 轮）配对中位数
+**2.8×**（1.7–4.1×），守恒精确、失败 0；但**倍数未稳健达到 3×**，
+需要在干净集群上重测（见「第十轮」末）。
+
+**下一步**：第十轮改动待推送。**在一台干净的集群上重测倍率**（当前环境键数涨到 480 万、
+AOF/RDB 反复触发，噪声盖过了差值）；再要提速就做消费/解析侧。
+
+---
+
+## 第十轮（2026-10-27）：集群写入改成按节点 pipeline
+
+**改的是应用侧，不是集群脚本。** 第九轮测出端到端写入 1.33 万/秒，根因是集群模式下
+每个数据点一次同步 `HMSET` 往返。本轮把「每 key 一次往返」换成「每主节点一次往返」。
+
+### 改动（Java 侧）
+
+| 文件 | 改动 |
+|---|---|
+| `common/oms/.../utils/RedisClusterHashPipeline.java` | **新增**（约 430 行）：`CLUSTER SLOTS` 槽位快照 → 按节点分组 → 每节点一条 pipeline → 检查返回值 → 逐 key 兜底 |
+| `common/oms/.../config/RedisUtilConfig.java` | 新增 `redisClusterHashPipeline` Bean（+7 行） |
+| `plugins/rtdata-module/.../RedisRealDataServiceImpl.java` | 集群分支从 for 循环 `putAll` 改为一次 `putAllHashes`；单机/哨兵分支**未动**（+15/-7） |
+| 测试 | `RedisClusterHashPipelineTest` 27 条、`RedisRealDataServiceImplTest` 4 条 |
+
+**Java 源码不在本仓库**（`D:\javawork\1.2\...` 不是 git 仓库），所以改动以统一 diff 留痕：
+`docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`（5 个文件，约 65 KB，
+UTF-8/LF，`git apply --check` 通过；应用到基线上后 5 个文件与新源码 **SHA-256 完全一致**）。
+
+### 设计要点（都是实测过的，不是推理）
+
+1. **Spring Data Redis 2.7.18 的集群 pipeline 不可用** —— `JedisClusterConnection.openPipeline()`
+   字节码直接抛 `UnsupportedOperationException`。因此直接用原生 Jedis。
+2. **`CLUSTER SLOTS` 的 host 是 `byte[]`**（Jedis 3.10），不是 String；解析时必须 UTF-8 解码。
+3. **pipeline 里的 MOVED/ASK 是「返回值」不是异常**：`syncAndReturnAll()` 把
+   `JedisDataException` 装进返回列表。所以必须按下标逐条检查，`sync()` 不会抛。
+4. **ASK 不需要刷新拓扑**（迁移中的临时状态）；只有**非 ASK** 的 `JedisDataException`
+   （MOVED/READONLY/WRONGTYPE/NOPERM…）或条数不匹配才刷新，且强制刷新最多每秒一次。
+5. 槽位快照 30s TTL；刷新失败 **5s 退避**；重定向触发的强制刷新 **最多每秒一次**；
+   刷新失败永远不抛给写入方（逐节点尝试，全失败则保留旧快照 → 逐 key 兜底）。
+6. 被拒的 key **逐个** 走 `opsForHash().putAll`（JedisCluster 自己处理 MOVED/ASKING），
+   成功的 key 不重写；传输层失败整批抛出，由上游 `writeWithRetry` 整批重试（HSET 幂等）。
+7. 日志按「每节点每批一行」聚合，避免故障时每 key 一行把日志打爆（500×16 行/轮）。
+8. 计数器仍在整批成功后**一次性**累加，与旧实现一致：旧的 `for (…) putAll` 也是循环结束后
+   才 `add`，失败时同样不计数。本轮没有改变计数语义，只是把「逐 key 累加字段数」改成
+   「先求字段总数再写」。
+9. **节点直接不可达（连接被拒）也要能自愈**：本类不共享 `JedisCluster` 的槽位缓存，
+   所以 `runPipeline` 捕获 `JedisConnectionException` → 刷新拓扑 → 该节点整组改走逐 key 写入
+   （`JedisCluster` 自己会 `renewSlotCache` 并重试），不把整批抛给调用方。
+   这是最终审查抓出来的回归：不做这一步，一个主节点硬死会让**每一批**失败，最长等到
+   30s 快照 TTL 才恢复。
+10. `Pipeline.hset(byte[], Map)` 发出的是多 field `HSET`（旧路径是 `HMSET`），
+    要求 Redis ≥ 4.0；目标镜像是 Redis 8.10。
+
+### 测试
+
+`mvn -o -pl realserver/plugins/rtdata-module -am clean test ...` → **64 条全绿**
+（oms 50：管线 28 + 配置 8 + 扫描 13 + 旧工具 1；rtdata 14：服务 4 + 既有 10）。
+关键用例：MOVED 只重写被拒的 key、条数不匹配整节点兜底、ASK 不刷新、强制刷新每秒最多一次、
+pipeline 构建期异常要先把缓冲刷掉再归还连接（否则脏连接会污染下一条命令）、
+非集群连接一次性判定并永久降级、8 线程首次并发只借一次连接、瞬时失败不置「永久不可用」。
+每条新用例都验证过「去掉对应实现就会红」。
+
+### 实测（同一台机器，交替 A/B，CONC=1，每轮 20 万条）
+
+**全部 12 轮**（点/秒，括号是活跃秒）：
+
+| # | 侧 | 速率 | # | 侧 | 速率 |
+|---|---|---|---|---|---|
+| 1 | 旧 | 6,879 (29s) | 2 | 新 | 28,214 (7s) |
+| 3 | 旧 | 10,500 (19s) | 4 | 新 | 40,000 (5s) |
+| 5 | 旧 | 6,666 (30s) | 6 | 新 | 14,285 (14s) |
+| 7 | 旧 | 6,451 (31s) | 8 | 新 | 18,181 (11s) |
+| 11 | 旧 | 8,291 (24s) | 9 | 新 | 40,000 (5s，profile 那次) |
+| — | — | — | 10 | 新 | 7,407 (27s) |
+| — | — | — | 12 | 新 | 14,285 (14s) |
+
+**同窗口相邻配对**（旧 → 新）：
+
+| 对 | 旧 | 新 | 倍数 |
+|---|---|---|---|
+| 1 | 6,879 | 28,214 | **4.10×** |
+| 2 | 10,500 | 40,000 | **3.81×** |
+| 3 | 6,666 | 14,285 | 2.14× |
+| 4 | 6,451 | 18,181 | 2.82× |
+| 5 | 8,291 | 14,285 | 1.72× |
+
+**配对中位数 2.82×，均值 2.92×**；全样本中位数：旧 6,879 → 新 18,181 = **2.64×**。
+
+> **口径必须写清楚，否则就是自欺**：最早只跑了 4 对，主推 3.42×；补跑后掉到 2.6–2.9×。
+> **所以本轮能负责的说法是「约 1.7–4.1×，配对中位数 2.8×」，不是 3.4×，也不是 3–10×。**
+> 每一轮都没有失败、没有丢点（见下），提升是真实的；但**倍数没有达到计划里 3× 的稳健门槛**。
+> 原因见下面两条。
+
+每一轮（12/12）都满足：`written = 200000`、`write_failures = 0`、`lag = 0`、
+`delta_per_record = 1.00`、三个主节点各写 ~66.6k、8 个抽样值逐字匹配。
+另外手工复核了两个 obid（含一个脚本不抽样的下标），值与
+`"<v>.20,<timestamp>,1"` 完全一致。
+
+> **为什么倍数越跑越低**：本机 Redis 开着 AOF+RDB，每轮 20 万写入都会触发后台保存
+> （实测一次 25 秒）；同时集群键数从 74 万涨到**每主 ~160 万**（合计 ~480 万，
+> 每轮都写全新 obid）。两侧都在变慢（旧 6.4–10.5k，新 7.4–40k），
+> 差值被环境噪声主导。**要给出可信倍率，需要一台干净的集群重测**（见「下一步」）。
+
+> 相对第九轮的 13,233，新高值 18,181 只有 1.37×（中位数口径 1.37×）——
+> 绝对值跨天比较同样不可靠，原因同上。
+
+### 瓶颈现在在哪（第十轮 profile）
+
+排空窗口采了 20 次 `jstack`（28–53s）：
+
+| 指标 | 第九轮 | 第十轮 |
+|---|---|---|
+| 卡在 `socketRead0` | **59 / 192** 个写线程样本 | **0 / 20 次采样** |
+| `BLOCKED` | 0 | 4（都是 Spring Boot 启动期加载 jar/类，不是写入） |
+| `Unsafe.park`（空闲） | 128 | 279 |
+
+> 采样窗口大部分落在启动/空闲（排空本身只剩 5 秒），所以这只能算**指向性**证据；
+> 直接证据是**活跃秒从 19–31 秒降到 5–14 秒**，同样的 20 万条。
+
+**结论：写入端不再是瓶颈。** 下一步若还要提速，目标应该是消费/解析侧
+（`RTListener` 对同一批数据 split 三次），而不是继续加写入线程或消费者。
+
+### 复现
+
+```powershell
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
+  -v "D:/work/rediscluterproject:/repo" `
+  -e NEW_JAR=D:/path/to/rtdata-consumer-1.0.14.jar -e CONC=1 `
+  rc-e2e-runner:local bash /repo/scripts/bench-consumer-write.sh
+```
+
+脚本自带 5 类断言（守恒、失败 0、lag 0、每个主节点都收到写、8 个抽样值逐字匹配），
+失败时 `FAIL:` 退出；`MIN_MEAN=<n>` 可把「均值不低于 n」也变成硬门槛。
+第九轮时还只在 `%TEMP%` 里的探针，这一轮进了仓库。
+
+### 留痕与回滚
+
+- Java 改动：`docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`
+  （在 `realserver/` 目录下 `git apply` 即可；已用 `--check` + 实际应用 + SHA-256 三重验证）。
+  > 复现 SHA-256 对比时要先设 `core.autocrlf=false`，否则 Windows 上会检出成 CRLF、
+  > 哈希对不上（文本内容其实相同）。
+- 构建产物**没有覆盖** `D:\java\apache-maven\mvnRepo` 里的 `1.0.14`
+  （仍是 140,507,290 字节、2026-10-23 14:00）；测试用的是 `target/` 下的新包
+  （140,518,671 字节）。
+- 回滚：把 `rc-cpsweb-app` 的 `/app/app.jar` 指回 mvnRepo 里那份原包即可，**不需要改配置或数据**。
+
+### 环境现状（本轮结束时）
+
+```
+rc-cpsweb-app    运行的是新 jar，group lag=0，concurrency=1
+Redis            3 主 × 2 从，cluster_state:ok，每主 ~1,6xx,xxx keys（合计 ~480 万）
+Kafka/ZooKeeper  两节点集群，未改动
+Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
+```
+
+> 键数比第九轮涨了 6 倍，是这轮每轮 20 万新 obid 累积出来的。
+> 要恢复干净基线，要么删掉 benchmark 数据，要么让脚本复用固定 obid 段（会牺牲抽样检测能力）。
 
 ---
 
@@ -63,7 +225,7 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 
 **这一轮不改任何生产代码。** 它测出「Kafka → `RTListener.onMessage` → Redis Cluster」
 这条链路到底能写多快，并回答「加消费者并发有没有用」。**结论：没用；瓶颈是集群模式下
-每个数据点一次同步 `HMSET` 往返。** 对应的修复（集群 pipeline）**已挂起，尚未实现**。
+每个数据点一次同步 `HMSET` 往返。**（第十轮已实现修复。）
 
 ### 测法：积压式排空，不是边产边耗
 

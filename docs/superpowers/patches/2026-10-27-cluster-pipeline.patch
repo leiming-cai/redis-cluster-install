@@ -1,0 +1,1437 @@
+diff --git a/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisUtilConfig.java b/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisUtilConfig.java
+index 6f5925e..1aadea7 100644
+--- a/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisUtilConfig.java
++++ b/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisUtilConfig.java
+@@ -12,6 +12,7 @@ import java.time.Duration;
+ import java.util.HashSet;
+ import java.util.Locale;
+ 
++import com.sac.platform.realserver.oms.utils.RedisClusterHashPipeline;
+ import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+ import com.sac.platform.realserver.oms.utils.RedisPipelineUtil;
+ import com.sac.platform.realserver.oms.utils.RedisUtil;
+@@ -332,4 +333,10 @@ public class RedisUtilConfig {
+         return new RedisPipelineUtil(realRedisTemplate, redisClusterHelper);
+     }
+ 
++    @Bean("redisClusterHashPipeline")
++    RedisClusterHashPipeline redisClusterHashPipeline(RedisTemplate<String, Object> redisTemplate,
++            RedisConnectionFactory connectionFactory) {
++        return new RedisClusterHashPipeline(redisTemplate, connectionFactory);
++    }
++
+ }
+\ No newline at end of file
+diff --git a/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipeline.java b/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipeline.java
+new file mode 100644
+index 0000000..5ba374d
+--- /dev/null
++++ b/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipeline.java
+@@ -0,0 +1,566 @@
++package com.sac.platform.realserver.oms.utils;
++
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.HashMap;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.concurrent.locks.ReentrantLock;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.data.redis.connection.RedisConnection;
++import org.springframework.data.redis.connection.RedisConnectionFactory;
++import org.springframework.data.redis.connection.jedis.JedisClusterConnection;
++import org.springframework.data.redis.core.HashOperations;
++import org.springframework.data.redis.core.RedisTemplate;
++import org.springframework.data.redis.serializer.RedisSerializer;
++
++import redis.clients.jedis.Jedis;
++import redis.clients.jedis.JedisCluster;
++import redis.clients.jedis.JedisPool;
++import redis.clients.jedis.Pipeline;
++import redis.clients.jedis.exceptions.JedisAskDataException;
++import redis.clients.jedis.exceptions.JedisConnectionException;
++import redis.clients.jedis.exceptions.JedisDataException;
++import redis.clients.jedis.util.JedisClusterCRC16;
++
++/**
++ * 集群模式下按节点 pipeline 写 hash。
++ * @Author: caileiming boboclmomi@163.com
++ * @Date: 2026-10-27
++ * @Description: 把「每 key 一次同步 HSET 往返」变成「每主节点一次 pipeline 往返」。
++ *               槽位快照来自 CLUSTER SLOTS（host 在 Jedis 3.10 里是 byte[]）；
++ *               集群模式固定 db 0（Redis Cluster 不支持 SELECT）。
++ *               连接不是 Jedis 集群（单机/哨兵）时自动退化为逐 key 写入；
++ *               该判定按实例缓存且永久有效，不会被后续批次重新探测。
++ *               Pipeline.hset(byte[], Map) 发出的是多 field 的 HSET，要求 Redis >= 4.0
++ *               （旧路径用的是 HMSET）；目标镜像为 Redis 8.10。
++ */
++public class RedisClusterHashPipeline {
++
++    private static final Logger logger = LoggerFactory.getLogger(RedisClusterHashPipeline.class);
++
++    static final long SLOT_CACHE_TTL_MS = 30000L;
++    private static final long REFRESH_RETRY_MS = 5000L;
++    /** 强制刷新（重定向触发）的最小间隔：16 个线程同时收到 MOVED 时也只探测一次。 */
++    private static final long FORCED_REFRESH_MIN_INTERVAL_MS = 1000L;
++
++    private final RedisTemplate<String, Object> redisTemplate;
++    private final RedisConnectionFactory connectionFactory;
++
++    private final AtomicReference<SlotSnapshot> snapshotRef = new AtomicReference<SlotSnapshot>();
++    private final ReentrantLock refreshLock = new ReentrantLock();
++
++    /** 上次刷新整体失败后的时间点；在此之前不再逐节点探测，避免 NOPERM 之类永久失败打成风暴。 */
++    private volatile long refreshRetryAt;
++
++    /** 上次强制刷新（重定向触发）的探测时间，成功与否都记；用来给强制刷新留 1 秒下限。 */
++    private volatile long lastForcedRefreshAt;
++
++    private volatile JedisCluster cluster;
++
++    /** nativeUnavailable 与 cluster 互斥：先看 nativeUnavailable，为 true 时 cluster 必为 null。 */
++    private final Object nativeLock = new Object();
++
++    /** 连接不是 JedisClusterConnection（单机/哨兵部署）：判定一次就记住，别每个批次都去借连接。 */
++    private volatile boolean nativeUnavailable;
++
++    public RedisClusterHashPipeline(RedisTemplate<String, Object> redisTemplate,
++            RedisConnectionFactory connectionFactory) {
++        this.redisTemplate = redisTemplate;
++        this.connectionFactory = connectionFactory;
++    }
++
++    /** 一个槽位区间及其主节点；host/port 只用来拼出 hostPort，不必各存一份。 */
++    static final class SlotRange {
++        final int start;
++        final int end;
++        /** hostPort 会被 ownerOf 逐 key 调用，构造时拼好，避免热路径重复拼接字符串。 */
++        final String hostPort;
++
++        SlotRange(int start, int end, String host, int port) {
++            this.start = start;
++            this.end = end;
++            this.hostPort = host + ":" + port;
++        }
++
++        String hostPort() {
++            return hostPort;
++        }
++    }
++
++    /** 不可变的槽位快照：ranges 在构造时复制为不可修改列表，ownerOf 用二分查找。 */
++    static final class SlotSnapshot {
++        final List<SlotRange> ranges;
++        final long createdAt;
++
++        SlotSnapshot(List<SlotRange> ranges, long createdAt) {
++            this.ranges = Collections.unmodifiableList(new ArrayList<SlotRange>(ranges));
++            this.createdAt = createdAt;
++        }
++
++        String ownerOf(int slot) {
++            int low = 0;
++            int high = ranges.size() - 1;
++            while (low <= high) {
++                int mid = (low + high) >>> 1;
++                SlotRange range = ranges.get(mid);
++                if (slot < range.start) {
++                    high = mid - 1;
++                } else if (slot > range.end) {
++                    low = mid + 1;
++                } else {
++                    return range.hostPort();
++                }
++            }
++            return null;
++        }
++
++        /**
++         * 是否连续覆盖 0..16383 全部槽位。仅用于测试，生产路径不使用。
++         * 注意这只说明「槽位地图完整」，不代表地图可信：集群配置
++         * cluster-require-full-coverage no 时会合法地只上报部分槽位，
++         * 此时返回 false 属于正常情况，调用方仍可按已覆盖的槽位写入。
++         */
++        boolean isComplete() {
++            int next = 0;
++            for (SlotRange range : ranges) {
++                if (range.start != next) {
++                    return false;
++                }
++                next = range.end + 1;
++            }
++            return next == 16384;
++        }
++    }
++
++    /**
++     * 把一批 key -> hash 的写入按 slot 属主归并，每个主节点一条 pipeline。
++     * 主节点不可达、pipeline 返回值与提交数不一致、或被服务端拒绝的 key，都会刷新拓扑后
++     * 改走逐 key 写入（JedisCluster 自己会 renewSlotCache + 重定向重试），不抛给调用方；
++     * 只有逐 key 兜底本身失败（传输层错误、序列化失败）才会抛出 RuntimeException。
++     * 调用方必须整批重试：HSET 对相同 field 幂等，且抛错时已应用的 key 集合不确定。
++     */
++    public void putAllHashes(Map<String, ? extends Map<String, ?>> keyedHashes) {
++        if (keyedHashes == null || keyedHashes.isEmpty()) {
++            return;
++        }
++        JedisCluster jedisCluster = clusterOrNull();
++        if (jedisCluster == null) {
++            writePerKey(keyedHashes.keySet(), keyedHashes);
++            return;
++        }
++
++        SlotSnapshot snapshot = snapshot(false);
++        Map<String, List<String>> byNode = new LinkedHashMap<String, List<String>>();
++        List<String> unmapped = new ArrayList<String>();
++        if (snapshot == null) {
++            unmapped.addAll(keyedHashes.keySet());
++        } else {
++            for (Map.Entry<String, ? extends Map<String, ?>> entry : keyedHashes.entrySet()) {
++                if (entry.getValue() == null || entry.getValue().isEmpty()) {
++                    continue;
++                }
++                int slot = JedisClusterCRC16.getSlot(keyBytes(entry.getKey()));
++                String owner = snapshot.ownerOf(slot);
++                if (owner == null) {
++                    unmapped.add(entry.getKey());
++                    continue;
++                }
++                List<String> keys = byNode.get(owner);
++                if (keys == null) {
++                    keys = new ArrayList<String>();
++                    byNode.put(owner, keys);
++                }
++                keys.add(entry.getKey());
++            }
++        }
++
++        List<String> failedKeys = new ArrayList<String>();
++        boolean needsTopologyRefresh = false;
++        for (Map.Entry<String, List<String>> entry : byNode.entrySet()) {
++            JedisPool pool = poolFor(jedisCluster, entry.getKey());
++            if (pool == null) {
++                logger.warn("No JedisPool for {}; writing {} keys one by one", entry.getKey(), entry.getValue().size());
++                // 节点池对不上说明拓扑已经过时，本批结束时刷新一次
++                needsTopologyRefresh = true;
++                writePerKey(entry.getValue(), keyedHashes);
++                continue;
++            }
++            PipelineOutcome outcome;
++            try {
++                outcome = runPipeline(pool, entry.getValue(), keyedHashes);
++            } catch (JedisConnectionException e) {
++                // 本类不共享 JedisCluster 的 slot 缓存，连接级失败必须自己刷新拓扑；
++                // 这批 key 交给 JedisCluster 逐 key 写，它会 renewSlotCache + 重试（旧路径的行为）。
++                logger.warn("Node {} unreachable ({}); refreshing topology and writing {} keys one by one",
++                        entry.getKey(), e.getMessage(), entry.getValue().size());
++                refreshQuietly();
++                writePerKey(entry.getValue(), keyedHashes);
++                continue;
++            }
++            if (!outcome.failed.isEmpty()) {
++                logger.warn("Pipeline on node {} rejected {} of {} keys (first: {}): {}",
++                        entry.getKey(), outcome.failed.size(), entry.getValue().size(),
++                        preview(outcome.failed.get(0)), outcome.firstReason);
++                failedKeys.addAll(outcome.failed);
++                needsTopologyRefresh |= outcome.refreshNeeded;
++            }
++        }
++        if (needsTopologyRefresh) {
++            refreshQuietly();
++        }
++        if (!failedKeys.isEmpty()) {
++            writePerKey(failedKeys, keyedHashes);
++        }
++
++        if (!unmapped.isEmpty()) {
++            logger.warn("{} keys have no slot owner in the cached topology; writing them one by one", unmapped.size());
++            writePerKey(unmapped, keyedHashes);
++        }
++    }
++
++    private JedisCluster clusterOrNull() {
++        if (nativeUnavailable) {
++            return null;
++        }
++        JedisCluster cached = cluster;
++        if (cached != null) {
++            return cached;
++        }
++        synchronized (nativeLock) {
++            if (nativeUnavailable) {
++                return null;
++            }
++            if (cluster != null) {
++                return cluster;
++            }
++            RedisConnection connection = connectionFactory.getConnection();
++            try {
++                if (!(connection instanceof JedisClusterConnection)) {
++                    nativeUnavailable = true;
++                    logger.info("Pipeline acceleration unavailable (connection is {}); writing one key at a time",
++                            connection.getClass().getName());
++                    return null;
++                }
++                cluster = ((JedisClusterConnection) connection).getNativeConnection();
++                if (cluster == null) {
++                    nativeUnavailable = true;
++                    logger.info("JedisClusterConnection returned no native cluster; writing one key at a time");
++                    return null;
++                }
++                return cluster;
++            } finally {
++                try {
++                    connection.close();
++                } catch (Exception e) {
++                    logger.debug("Failed to close the borrowed RedisConnection: {}", e.getMessage());
++                }
++            }
++        }
++    }
++
++    private SlotSnapshot snapshot(boolean force) {
++        long now = System.currentTimeMillis();
++        SlotSnapshot current = snapshotRef.get();
++        if (!force && current != null && now - current.createdAt < SLOT_CACHE_TTL_MS) {
++            return current;
++        }
++        // 退避窗口内不再探测。current 可能为 null（从未成功过），此时也必须返回 null，
++        // 让调用方直接走逐 key 兜底，而不是把每个批次都拿去重探一遍所有节点。
++        // 强制刷新是例外：收到 MOVED 说明手里的表已被证明是错的，必须探；
++        // 但 5 秒退避期内的探测同样受下面 1 秒下限约束，不会打成风暴。
++        // 下限只统计强制刷新：正常的 TTL 刷新不该挡住紧随其后的第一次重定向刷新。
++        if (!force && now < refreshRetryAt) {
++            return current;
++        }
++        if (force && now - lastForcedRefreshAt < FORCED_REFRESH_MIN_INTERVAL_MS) {
++            return current;
++        }
++        boolean locked;
++        try {
++            locked = refreshLock.tryLock(50, TimeUnit.MILLISECONDS);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            return current;
++        }
++        if (!locked) {
++            return current;
++        }
++        try {
++            long lockedAt = System.currentTimeMillis();
++            SlotSnapshot again = snapshotRef.get();
++            if (!force && again != null && lockedAt - again.createdAt < SLOT_CACHE_TTL_MS) {
++                return again;
++            }
++            if (!force && lockedAt < refreshRetryAt) {
++                return again;
++            }
++            // 同一秒内已经有线程强制探过了：排在锁后面的强制刷新直接复用它的结果，
++            // 否则 16 个线程会把一次 MOVED 放大成 16 次 CLUSTER SLOTS。
++            if (force && lockedAt - lastForcedRefreshAt < FORCED_REFRESH_MIN_INTERVAL_MS) {
++                return again;
++            }
++            if (force) {
++                lastForcedRefreshAt = lockedAt;
++            }
++            JedisCluster jedisCluster = clusterOrNull();
++            if (jedisCluster == null) {
++                return again;
++            }
++            Map<String, JedisPool> nodes = pools(jedisCluster);
++            for (Map.Entry<String, JedisPool> node : nodes.entrySet()) {
++                Jedis seed = null;
++                try {
++                    seed = node.getValue().getResource();
++                    List<Object> reply = seed.clusterSlots();
++                    SlotSnapshot fresh = parseSlotSnapshot(reply, System.currentTimeMillis());
++                    if (fresh.ranges.isEmpty()) {
++                        logger.warn("CLUSTER SLOTS via {} produced no usable ranges; trying the next node", node.getKey());
++                        continue;
++                    }
++                    snapshotRef.set(fresh);
++                    refreshRetryAt = 0L;
++                    return fresh;
++                } catch (Exception e) {
++                    logger.warn("Failed to refresh cluster slots via {}: {}", node.getKey(), e.getMessage());
++                } finally {
++                    if (seed != null) {
++                        try {
++                            seed.close();
++                        } catch (Exception e) {
++                            logger.debug("Failed to close the seed connection: {}", e.getMessage());
++                        }
++                    }
++                }
++            }
++            logger.warn("Could not refresh cluster slots from any node; keeping the previous snapshot");
++            refreshRetryAt = System.currentTimeMillis() + REFRESH_RETRY_MS;
++            return again;
++        } finally {
++            refreshLock.unlock();
++        }
++    }
++
++    private JedisPool poolFor(JedisCluster jedisCluster, String hostPort) {
++        return pools(jedisCluster).get(hostPort);
++    }
++
++    private Map<String, JedisPool> pools(JedisCluster jedisCluster) {
++        Map<String, JedisPool> nodes = jedisCluster.getClusterNodes();
++        return nodes == null ? Collections.<String, JedisPool>emptyMap() : nodes;
++    }
++
++    /** 一条 pipeline 的结果：哪些 key 被拒、是否需要刷新拓扑、第一条拒绝原因（只用于日志）。 */
++    private static final class PipelineOutcome {
++        final List<String> failed;
++        final boolean refreshNeeded;
++        final String firstReason;
++
++        PipelineOutcome(List<String> failed, boolean refreshNeeded, String firstReason) {
++            this.failed = failed;
++            this.refreshNeeded = refreshNeeded;
++            this.firstReason = firstReason;
++        }
++
++        static PipelineOutcome none() {
++            return new PipelineOutcome(Collections.<String>emptyList(), false, null);
++        }
++    }
++
++    /**
++     * 返回本批被服务端拒绝的 key。pipeline 里的 MOVED/ASK 是「返回值」不是异常：
++     * syncAndReturnAll() 会把 JedisDataException 装进返回列表（实测）。
++     */
++    private PipelineOutcome runPipeline(JedisPool pool, List<String> keys,
++            Map<String, ? extends Map<String, ?>> keyedHashes) {
++        Jedis jedis = pool.getResource();
++        Pipeline pipeline = null;
++        boolean synced = false;
++        try {
++            pipeline = jedis.pipelined();
++            for (String key : keys) {
++                pipeline.hset(keyBytes(key), hashBytes(keyedHashes.get(key)));
++            }
++            List<Object> replies = pipeline.syncAndReturnAll();
++            synced = true;
++            if (replies == null || replies.size() != keys.size()) {
++                return new PipelineOutcome(keys, true, "reply count mismatch");
++            }
++            List<String> failed = new ArrayList<String>();
++            boolean refreshNeeded = false;
++            String firstReason = null;
++            for (int i = 0; i < replies.size(); i++) {
++                Object reply = replies.get(i);
++                if (reply instanceof Long) {
++                    continue;
++                }
++                if (!(reply instanceof JedisDataException)) {
++                    if (firstReason == null) {
++                        firstReason = "unexpected reply type " + reply;
++                    }
++                    failed.add(keys.get(i));
++                    refreshNeeded = true;
++                    continue;
++                }
++                if (firstReason == null) {
++                    firstReason = ((JedisDataException) reply).getMessage();
++                }
++                failed.add(keys.get(i));
++                // ASK 是迁移中的临时状态，按 Jedis 的正常重定向重试即可，不需要刷新拓扑
++                if (!(reply instanceof JedisAskDataException)) {
++                    refreshNeeded = true;
++                }
++            }
++            if (failed.isEmpty()) {
++                return PipelineOutcome.none();
++            }
++            return new PipelineOutcome(failed, refreshNeeded, firstReason);
++        } finally {
++            if (!synced && pipeline != null) {
++                // 构建期异常：先把已排队的命令刷出去，恢复协议对齐；本批会被上游整批重试
++                try {
++                    pipeline.sync();
++                } catch (Exception e) {
++                    logger.warn("Failed to drain an aborted pipeline: {}", e.getMessage());
++                }
++            }
++            jedis.close();
++        }
++    }
++
++    private static String preview(String key) {
++        if (key == null || key.length() <= 120) {
++            return key;
++        }
++        return key.substring(0, 120) + "...";
++    }
++
++    private void refreshQuietly() {
++        try {
++            snapshot(true);
++        } catch (Exception e) {
++            logger.warn("Refresh cluster slots failed, falling back to per-key writes: {}", e.getMessage());
++        }
++    }
++
++    @SuppressWarnings({ "unchecked", "rawtypes" })
++    private void writePerKey(java.util.Collection<String> keys,
++            Map<String, ? extends Map<String, ?>> keyedHashes) {
++        HashOperations operations = redisTemplate.opsForHash();
++        for (String key : keys) {
++            Map<String, ?> hash = keyedHashes.get(key);
++            if (hash == null || hash.isEmpty()) {
++                continue;
++            }
++            operations.putAll(key, hash);
++        }
++    }
++
++    @SuppressWarnings("rawtypes")
++    private byte[] keyBytes(String key) {
++        RedisSerializer serializer = redisTemplate.getKeySerializer();
++        return (byte[]) serializer.serialize(key);
++    }
++
++    @SuppressWarnings({ "unchecked", "rawtypes" })
++    private Map<byte[], byte[]> hashBytes(Map<String, ?> hash) {
++        RedisSerializer keySerializer = redisTemplate.getHashKeySerializer();
++        RedisSerializer valueSerializer = redisTemplate.getHashValueSerializer();
++        Map<byte[], byte[]> serialized = new HashMap<byte[], byte[]>(Math.max(4, hash.size() * 2));
++        for (Map.Entry<String, ?> field : hash.entrySet()) {
++            serialized.put((byte[]) keySerializer.serialize(field.getKey()),
++                    (byte[]) valueSerializer.serialize(field.getValue()));
++        }
++        return serialized;
++    }
++
++    /**
++     * 解析 CLUSTER SLOTS 的原始回复：
++     * 每条 = [start(Long), end(Long), master([host(byte[]), port(Long), id(byte[])]), replica...]
++     * 无法解析或语义非法的条目直接跳过；区间重叠时整份回复作废，避免二分查找漏掉真实覆盖的槽位。
++     */
++    static SlotSnapshot parseSlotSnapshot(List<Object> reply, long now) {
++        List<SlotRange> ranges = new ArrayList<SlotRange>();
++        int skipped = 0;
++        if (reply != null) {
++            for (Object item : reply) {
++                if (!(item instanceof List)) {
++                    skipped++;
++                    continue;
++                }
++                List<?> entry = (List<?>) item;
++                if (entry.size() < 3 || !(entry.get(2) instanceof List)) {
++                    skipped++;
++                    continue;
++                }
++                if (!(entry.get(0) instanceof Number) || !(entry.get(1) instanceof Number)) {
++                    skipped++;
++                    continue;
++                }
++                int start = ((Number) entry.get(0)).intValue();
++                int end = ((Number) entry.get(1)).intValue();
++                if (start < 0 || end > 16383 || start > end) {
++                    skipped++;
++                    continue;
++                }
++                List<?> master = (List<?>) entry.get(2);
++                if (master.size() < 2 || !(master.get(1) instanceof Number)) {
++                    skipped++;
++                    continue;
++                }
++                Object hostValue = master.get(0);
++                if (hostValue == null) {
++                    skipped++;
++                    continue;
++                }
++                String host = decodeHost(hostValue);
++                int port = ((Number) master.get(1)).intValue();
++                if (port < 1 || port > 65535) {
++                    // 后续要 new Jedis(host, port)，这里的端口必须可用于建连
++                    skipped++;
++                    continue;
++                }
++                ranges.add(new SlotRange(start, end, host, port));
++            }
++        }
++        Collections.sort(ranges, new Comparator<SlotRange>() {
++            @Override
++            public int compare(SlotRange left, SlotRange right) {
++                return Integer.compare(left.start, right.start);
++            }
++        });
++        if (skipped > 0) {
++            logger.warn("CLUSTER SLOTS reply: skipped {} malformed entries, {} ranges parsed", skipped, ranges.size());
++        }
++        for (int i = 1; i < ranges.size(); i++) {
++            if (ranges.get(i).start <= ranges.get(i - 1).end) {
++                logger.warn("CLUSTER SLOTS map has overlapping ranges at slot {}, discarding the whole reply",
++                        ranges.get(i).start);
++                ranges.clear();
++                break;
++            }
++        }
++        int covered = 0;
++        for (SlotRange range : ranges) {
++            covered += range.end - range.start + 1;
++        }
++        if (covered < 16384) {
++            logger.warn("CLUSTER SLOTS map is incomplete: {} ranges cover {} of 16384 slots", ranges.size(), covered);
++        }
++        return new SlotSnapshot(ranges, now);
++    }
++
++    static String decodeHost(Object host) {
++        if (host instanceof byte[]) {
++            return new String((byte[]) host, StandardCharsets.UTF_8);
++        }
++        return String.valueOf(host);
++    }
++}
+diff --git a/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineTest.java b/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineTest.java
+new file mode 100644
+index 0000000..33d66de
+--- /dev/null
++++ b/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineTest.java
+@@ -0,0 +1,648 @@
++package com.sac.platform.realserver.oms.utils;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyMap;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.atLeast;
++import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.times;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.data.redis.RedisConnectionFailureException;
++import org.springframework.data.redis.connection.RedisConnection;
++import org.springframework.data.redis.connection.RedisConnectionFactory;
++import org.springframework.data.redis.connection.jedis.JedisClusterConnection;
++import org.springframework.data.redis.core.HashOperations;
++import org.springframework.data.redis.core.RedisTemplate;
++import org.springframework.data.redis.serializer.RedisSerializer;
++
++import redis.clients.jedis.HostAndPort;
++import redis.clients.jedis.Jedis;
++import redis.clients.jedis.JedisCluster;
++import redis.clients.jedis.JedisPool;
++import redis.clients.jedis.Pipeline;
++import redis.clients.jedis.exceptions.JedisAskDataException;
++import redis.clients.jedis.exceptions.JedisConnectionException;
++import redis.clients.jedis.exceptions.JedisMovedDataException;
++import redis.clients.jedis.util.JedisClusterCRC16;
++
++/**
++ * CLUSTER SLOTS 的回复在 Jedis 3.10 里 host 是 byte[]（实测），
++ * 这里固定住解析与查找的契约。
++ */
++class RedisClusterHashPipelineTest {
++
++    private static final byte[] HOST_A = "10.0.0.1".getBytes(StandardCharsets.UTF_8);
++    private static final byte[] HOST_B = "10.0.0.2".getBytes(StandardCharsets.UTF_8);
++
++    @Test
++    void parsesRangesAndDecodesByteArrayHosts() {
++        List<Object> reply = new ArrayList<Object>();
++        // 故意乱序，验证解析后按 start 排序
++        reply.add(Arrays.asList(5461L, 16383L, Arrays.asList(HOST_B, 6380L, "id-b".getBytes(StandardCharsets.UTF_8))));
++        reply.add(Arrays.asList(0L, 5460L, Arrays.asList(HOST_A, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++
++        RedisClusterHashPipeline.SlotSnapshot snapshot = RedisClusterHashPipeline.parseSlotSnapshot(reply, 1L);
++
++        assertEquals("10.0.0.1:6379", snapshot.ownerOf(0));
++        assertEquals("10.0.0.1:6379", snapshot.ownerOf(5460));
++        assertEquals("10.0.0.2:6380", snapshot.ownerOf(5461));
++        assertEquals("10.0.0.2:6380", snapshot.ownerOf(16383));
++        assertTrue(snapshot.isComplete());
++    }
++
++    @Test
++    void returnsNullForSlotNotCoveredByAnyRange() {
++        List<Object> reply = Collections.<Object>singletonList(
++                Arrays.asList(0L, 100L, Arrays.asList(HOST_A, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++
++        RedisClusterHashPipeline.SlotSnapshot snapshot = RedisClusterHashPipeline.parseSlotSnapshot(reply, 1L);
++
++        assertEquals("10.0.0.1:6379", snapshot.ownerOf(100));
++        assertNull(snapshot.ownerOf(101));
++    }
++
++    @Test
++    void parsesNothingFromNullReply() {
++        RedisClusterHashPipeline.SlotSnapshot snapshot = RedisClusterHashPipeline.parseSlotSnapshot(null, 1L);
++
++        assertNull(snapshot.ownerOf(0));
++        assertFalse(snapshot.isComplete());
++    }
++
++    @Test
++    void parsesNothingFromEmptyReply() {
++        RedisClusterHashPipeline.SlotSnapshot snapshot =
++                RedisClusterHashPipeline.parseSlotSnapshot(Collections.emptyList(), 1L);
++
++        assertNull(snapshot.ownerOf(0));
++        assertFalse(snapshot.isComplete());
++    }
++
++    @Test
++    void keepsValidEntriesAndSkipsMalformedOnes() {
++        List<Object> reply = new ArrayList<Object>();
++        // 只有 2 个元素，master 缺失
++        reply.add(Arrays.asList(0L, 100L));
++        // 不是 List
++        reply.add("not-a-list");
++        // start 为 null
++        reply.add(Arrays.asList((Object) null, 200L,
++                Arrays.asList(HOST_A, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++        // master host 为 null
++        reply.add(Arrays.asList(300L, 400L,
++                Arrays.asList((Object) null, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++        // 唯一一条合法区间
++        reply.add(Arrays.asList(500L, 600L,
++                Arrays.asList(HOST_B, 6380L, "id-b".getBytes(StandardCharsets.UTF_8))));
++
++        long now = 1234L;
++        RedisClusterHashPipeline.SlotSnapshot snapshot = RedisClusterHashPipeline.parseSlotSnapshot(reply, now);
++
++        assertNull(snapshot.ownerOf(50));
++        assertNull(snapshot.ownerOf(350));
++        assertEquals("10.0.0.2:6380", snapshot.ownerOf(550));
++        assertEquals(now, snapshot.createdAt);
++        assertFalse(snapshot.isComplete());
++    }
++
++    @Test
++    void returnsNullForGapBetweenRanges() {
++        List<Object> reply = new ArrayList<Object>();
++        reply.add(Arrays.asList(0L, 100L, Arrays.asList(HOST_A, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++        reply.add(Arrays.asList(200L, 300L, Arrays.asList(HOST_B, 6380L, "id-b".getBytes(StandardCharsets.UTF_8))));
++
++        RedisClusterHashPipeline.SlotSnapshot snapshot = RedisClusterHashPipeline.parseSlotSnapshot(reply, 1L);
++
++        assertEquals("10.0.0.1:6379", snapshot.ownerOf(100));
++        assertNull(snapshot.ownerOf(150));
++        assertEquals("10.0.0.2:6380", snapshot.ownerOf(200));
++    }
++
++    @Test
++    void rejectsInvertedAndOutOfRangeRanges() {
++        List<Object> reply = new ArrayList<Object>();
++        // start > end
++        reply.add(Arrays.asList(500L, 400L, Arrays.asList(HOST_A, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++        // end 超出 16383
++        reply.add(Arrays.asList(20000L, 20010L, Arrays.asList(HOST_A, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++        // start 小于 0
++        reply.add(Arrays.asList(-10L, 10L, Arrays.asList(HOST_A, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++        // 合法区间
++        reply.add(Arrays.asList(0L, 100L, Arrays.asList(HOST_A, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++        reply.add(Arrays.asList(101L, 200L, Arrays.asList(HOST_B, 6380L, "id-b".getBytes(StandardCharsets.UTF_8))));
++
++        RedisClusterHashPipeline.SlotSnapshot snapshot = RedisClusterHashPipeline.parseSlotSnapshot(reply, 1L);
++
++        assertEquals("10.0.0.1:6379", snapshot.ownerOf(50));
++        assertEquals("10.0.0.2:6380", snapshot.ownerOf(150));
++        assertNull(snapshot.ownerOf(500));
++        assertFalse(snapshot.isComplete());
++    }
++
++    @Test
++    void rejectsOverlappingRangesEntirely() {
++        List<Object> reply = new ArrayList<Object>();
++        reply.add(Arrays.asList(0L, 100L, Arrays.asList(HOST_A, 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++        reply.add(Arrays.asList(50L, 200L, Arrays.asList(HOST_B, 6380L, "id-b".getBytes(StandardCharsets.UTF_8))));
++
++        RedisClusterHashPipeline.SlotSnapshot snapshot = RedisClusterHashPipeline.parseSlotSnapshot(reply, 1L);
++
++        assertNull(snapshot.ownerOf(50));
++        assertFalse(snapshot.isComplete());
++        assertTrue(snapshot.ranges.isEmpty());
++    }
++
++    @Test
++    void snapshotIsImmutableAndCompleteWhenAllSlotsAreCovered() {
++        List<RedisClusterHashPipeline.SlotRange> ranges = new ArrayList<RedisClusterHashPipeline.SlotRange>();
++        ranges.add(new RedisClusterHashPipeline.SlotRange(0, 8191, "10.0.0.1", 6379));
++        ranges.add(new RedisClusterHashPipeline.SlotRange(8192, 16383, "10.0.0.2", 6380));
++
++        RedisClusterHashPipeline.SlotSnapshot snapshot = new RedisClusterHashPipeline.SlotSnapshot(ranges, 1L);
++        assertTrue(snapshot.isComplete());
++
++        // 防御性拷贝：构造后改原 list 不影响快照
++        ranges.clear();
++        assertEquals("10.0.0.1:6379", snapshot.ownerOf(0));
++        assertEquals("10.0.0.2:6380", snapshot.ownerOf(16383));
++
++        // 快照自身不可修改
++        assertThrows(UnsupportedOperationException.class, () -> snapshot.ranges.clear());
++    }
++
++    // ---- Task 2: success path ----
++
++    @Test
++    void writesOnePipelinePerNodeAndClosesEveryBorrowedConnection() {
++        Fixture f = new Fixture();
++        List<String> lowKeys = keysInRange(0, 8191, 2);
++        List<String> highKeys = keysInRange(8192, 16383, 1);
++        f.seedSlots();
++        f.seedPipelines(2, 1);
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(lowKeys, highKeys));
++
++        verify(f.pipelineA, times(2)).hset(any(byte[].class), anyMap());
++        verify(f.pipelineB, times(1)).hset(any(byte[].class), anyMap());
++        verify(f.jedisA).close();
++        verify(f.jedisB).close();
++        verify(f.slotsJedis).close();
++    }
++
++    @Test
++    void returnsWithoutTouchingRedisWhenTheBatchIsEmpty() {
++        Fixture f = new Fixture();
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++
++        pipeline.putAllHashes(Collections.<String, Map<String, ?>>emptyMap());
++
++        verify(f.factory, never()).getConnection();
++    }
++
++    @Test
++    void reusesTheCachedSnapshotWithinItsTtl() {
++        Fixture f = new Fixture();
++        List<String> lowKeys = keysInRange(0, 8191, 1);
++        f.seedSlots();
++        f.seedPipelines(1, 0);
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(lowKeys, Collections.<String>emptyList()));
++
++        // 第二次调用不应再取 CLUSTER SLOTS
++        pipeline.putAllHashes(f.hashes(lowKeys, Collections.<String>emptyList()));
++
++        verify(f.slotsJedis, times(1)).clusterSlots();
++    }
++
++    @Test
++    void refreshTriesAnotherNodeWhenTheFirstOneIsDown() {
++        Fixture f = new Fixture();
++        List<String> lowKeys = keysInRange(0, 8191, 2);
++        List<String> highKeys = keysInRange(8192, 16383, 1);
++        // 第一个池（快照刷新固定从它开始）整台机器不可用
++        when(f.poolSeed.getResource()).thenThrow(new JedisConnectionException("seed node is down"));
++        // 下一个池既能报槽位，也能作为 node A 的数据连接
++        when(f.jedisA.clusterSlots()).thenReturn(f.slotReply());
++        f.seedPipelines(2, 1);
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(lowKeys, highKeys));
++
++        // 一次都没抛：刷新换了活着的节点，数据照常按节点走 pipeline
++        verify(f.pipelineA, times(2)).hset(any(byte[].class), anyMap());
++        verify(f.pipelineB, times(1)).hset(any(byte[].class), anyMap());
++        // jedisA 被借用两次（刷新种子 + node A 数据连接），两次都归还
++        verify(f.jedisA, times(2)).close();
++    }
++
++    @Test
++    void fallsBackToPerKeyWhenNoNodeCanReportSlots() {
++        Fixture f = new Fixture();
++        when(f.poolSeed.getResource()).thenThrow(new JedisConnectionException("down"));
++        when(f.poolA.getResource()).thenThrow(new JedisConnectionException("down"));
++        when(f.poolB.getResource()).thenThrow(new JedisConnectionException("down"));
++        List<String> lowKeys = keysInRange(0, 8191, 2);
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        // 刷新失败不能把异常抛给写入方；没有槽位图就退化为逐 key 写入
++        pipeline.putAllHashes(f.hashes(lowKeys, Collections.<String>emptyList()));
++
++        verify(f.hashes, times(2)).putAll(anyString(), anyMap());
++    }
++
++    @Test
++    void retriesOnlyTheRejectedKeysOneByOneWhenPipelineReturnsMoved() {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 2);
++        f.seedSlots();
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList(1L,
++                new JedisMovedDataException("MOVED 1 10.0.0.9:6379", new HostAndPort("10.0.0.9", 6379), 1)));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++
++        verify(f.hashes, times(1)).putAll(eq(keys.get(1)), anyMap());
++        verify(f.hashes, never()).putAll(eq(keys.get(0)), anyMap());
++        // 重定向后必须刷新槽位快照
++        verify(f.slotsJedis, times(2)).clusterSlots();
++    }
++
++    @Test
++    void fallsBackForTheWholeNodeWhenReplyCountDoesNotMatch() {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 2);
++        f.seedSlots();
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList(1L)); // 2 keys, 1 reply
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++
++        verify(f.hashes).putAll(eq(keys.get(0)), anyMap());
++        verify(f.hashes).putAll(eq(keys.get(1)), anyMap());
++    }
++
++    @Test
++    void alwaysReturnsTheBorrowedConnectionAndPropagatesSyncFailures() {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 1);
++        f.seedSlots();
++        when(f.pipelineA.syncAndReturnAll()).thenThrow(new RuntimeException("sync boom"));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++
++        assertThrows(RuntimeException.class,
++                () -> pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList())));
++        verify(f.jedisA).close();
++    }
++
++    @Test
++    void writesKeysOneByOneWhenTheirSlotHasNoOwner() {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(8192, 16383, 1); // 快照里只覆盖 0..8191
++        f.seedSlotsForLowRangeOnly();
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(Collections.<String>emptyList(), keys));
++
++        verify(f.hashes).putAll(eq(keys.get(0)), anyMap());
++        verify(f.jedisB, never()).pipelined();
++    }
++
++    @Test
++    void doesNotReprobeEveryNodeWhileARefreshIsFailing() {
++        Fixture f = new Fixture();
++        when(f.poolSeed.getResource()).thenThrow(new JedisConnectionException("down"));
++        when(f.poolA.getResource()).thenThrow(new JedisConnectionException("down"));
++        when(f.poolB.getResource()).thenThrow(new JedisConnectionException("down"));
++        List<String> keys = keysInRange(0, 8191, 1);
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++
++        // 第二次调用落在退避窗口内，不应再逐节点探测
++        verify(f.poolA, times(1)).getResource();
++    }
++
++    @Test
++    void doesNotRefreshTopologyForAskRedirects() {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 1);
++        f.seedSlots();
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList(
++                new JedisAskDataException("ASK 1 10.0.0.9:6379", new HostAndPort("10.0.0.9", 6379), 1)));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++
++        // ASK 只是迁移中的临时状态：逐 key 重试一次即可，不动拓扑缓存
++        verify(f.hashes, times(1)).putAll(eq(keys.get(0)), anyMap());
++        verify(f.slotsJedis, times(1)).clusterSlots();
++    }
++
++    @Test
++    void refreshesAtMostOncePerSecondForRepeatedRedirects() {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 1);
++        f.seedSlots();
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList(
++                new JedisMovedDataException("MOVED 1 10.0.0.9:6379", new HostAndPort("10.0.0.9", 6379), 1)));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++
++        // 第一次搬迁立即刷新；第二次在同一秒内，必须复用结果而不是再探一遍
++        verify(f.slotsJedis, times(2)).clusterSlots();
++        // 两批都被处理：每批一次逐 key 重试
++        verify(f.hashes, times(2)).putAll(eq(keys.get(0)), anyMap());
++    }
++
++    @Test
++    void drainsAnAbortedPipelineBeforeReturningTheConnection() {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 2);
++        f.seedSlots();
++        RedisSerializer<Object> exploding = mock(RedisSerializer.class);
++        when(exploding.serialize(any())).thenAnswer(invocation -> {
++            Object value = invocation.getArgument(0);
++            if ("boom".equals(value)) {
++                throw new IllegalStateException("cannot serialize");
++            }
++            return String.valueOf((Object) value).getBytes(StandardCharsets.UTF_8);
++        });
++        doReturn(exploding).when(f.template).getHashValueSerializer();
++
++        Map<String, Map<String, ?>> batch = new LinkedHashMap<String, Map<String, ?>>();
++        batch.put(keys.get(0), Collections.<String, Object>singletonMap("f", "v"));
++        batch.put(keys.get(1), Collections.<String, Object>singletonMap("f", "boom"));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++
++        assertThrows(IllegalStateException.class, () -> pipeline.putAllHashes(batch));
++        // 已排队的 HSET 必须先刷出去，否则脏连接回到池里会串答复
++        verify(f.pipelineA).sync();
++        verify(f.jedisA).close();
++    }
++
++    @Test
++    void fallsBackToPerKeyWritesWhenTheConnectionIsNotAJedisCluster() {
++        RedisTemplate<String, Object> template = mock(RedisTemplate.class);
++        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
++        RedisConnection plainConnection = mock(RedisConnection.class);
++        HashOperations hashes = mock(HashOperations.class);
++        doReturn(utf8Serializer()).when(template).getKeySerializer();
++        doReturn(utf8Serializer()).when(template).getHashKeySerializer();
++        doReturn(utf8Serializer()).when(template).getHashValueSerializer();
++        when(template.opsForHash()).thenReturn(hashes);
++        when(factory.getConnection()).thenReturn(plainConnection);
++
++        Map<String, Map<String, ?>> batch = new LinkedHashMap<String, Map<String, ?>>();
++        batch.put("real_data:11:1", Collections.<String, Object>singletonMap("f", "v"));
++        batch.put("real_data:11:2", Collections.<String, Object>singletonMap("f", "v"));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(template, factory);
++        pipeline.putAllHashes(batch);
++
++        verify(hashes).putAll(eq("real_data:11:1"), anyMap());
++        verify(hashes).putAll(eq("real_data:11:2"), anyMap());
++        verify(plainConnection).close();
++
++        // 「不是集群」这个结论只判定一次：后续批次不再向池里借连接
++        pipeline.putAllHashes(batch);
++        verify(factory, times(1)).getConnection();
++        verify(hashes, times(2)).putAll(eq("real_data:11:1"), anyMap());
++    }
++
++    @Test
++    void fallsBackWhenTheNativeConnectionIsNull() {
++        Fixture f = new Fixture();
++        when(f.connection.getNativeConnection()).thenReturn(null);
++        List<String> keys = keysInRange(0, 8191, 1);
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++
++        // 空的原生集群同样判定为「不可用」，且判定一次就够
++        verify(f.factory, times(1)).getConnection();
++        verify(f.hashes, times(2)).putAll(eq(keys.get(0)), anyMap());
++    }
++
++    @Test
++    void borrowsTheNativeConnectionOnlyOnceUnderConcurrentFirstUse() throws Exception {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 1);
++        f.seedSlots();
++        f.seedPipelines(1, 0);
++        final RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        final Map<String, Map<String, ?>> batch = f.hashes(keys, Collections.<String>emptyList());
++
++        final CountDownLatch start = new CountDownLatch(1);
++        ExecutorService pool = Executors.newFixedThreadPool(8);
++        List<Future<?>> futures = new ArrayList<Future<?>>();
++        for (int i = 0; i < 8; i++) {
++            futures.add(pool.submit(() -> {
++                start.await();
++                pipeline.putAllHashes(batch);
++                return null;
++            }));
++        }
++        start.countDown();
++        for (Future<?> future : futures) {
++            future.get();
++        }
++        pool.shutdown();
++        pool.awaitTermination(10, TimeUnit.SECONDS);
++
++        // 8 个线程同时首用，也只允许借一次连接来判定原生类型
++        verify(f.factory, times(1)).getConnection();
++    }
++
++    @Test
++    void doesNotTreatATransientConnectionFailureAsPermanent() {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 1);
++        f.seedSlots();
++        f.seedPipelines(1, 0);
++        when(f.factory.getConnection())
++                .thenThrow(new RedisConnectionFailureException("transient borrow failure"))
++                .thenReturn(f.connection);
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++
++        assertThrows(RedisConnectionFailureException.class,
++                () -> pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList())));
++        // 仅当成功借到连接之后才允许记住「不是集群」，所以下一次必须还能走集群路径
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++
++        verify(f.pipelineA).hset(any(byte[].class), anyMap());
++    }
++
++    @Test
++    void doesNotRetryTheNativeConnectionLookupOnEveryBatch() {
++        // 回归保护：Task 2 已经缓存了原生连接。
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 1);
++        f.seedSlots();
++        f.seedPipelines(1, 0);
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++
++        verify(f.factory, times(1)).getConnection();
++    }
++
++    @Test
++    void recoversFromADeadNodeByRefreshingTopologyAndWritingPerKey() {
++        Fixture f = new Fixture();
++        List<String> keys = keysInRange(0, 8191, 2);
++        f.seedSlots();
++        // 节点 A 整台机器连不上（拒绝连接，不是优雅 failover）；快照刷新走 poolSeed，不受影响
++        when(f.poolA.getResource()).thenThrow(new JedisConnectionException("node A is down"));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        pipeline.putAllHashes(f.hashes(keys, Collections.<String>emptyList()));
++
++        // 不抛给调用方：刷新拓扑后改走逐 key（JedisCluster 自己会 renewSlotCache + 重试）
++        verify(f.slotsJedis, atLeast(2)).clusterSlots();
++        verify(f.hashes, times(2)).putAll(anyString(), anyMap());
++    }
++
++    // ---- fixtures ----
++
++    private static final class Fixture {
++        final RedisTemplate<String, Object> template = mock(RedisTemplate.class);
++        final RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
++        final JedisClusterConnection connection = mock(JedisClusterConnection.class);
++        final JedisCluster cluster = mock(JedisCluster.class);
++        final JedisPool poolSeed = mock(JedisPool.class);
++        final JedisPool poolA = mock(JedisPool.class);
++        final JedisPool poolB = mock(JedisPool.class);
++        final Jedis slotsJedis = mock(Jedis.class);
++        final Jedis jedisA = mock(Jedis.class);
++        final Jedis jedisB = mock(Jedis.class);
++        final Pipeline pipelineA = mock(Pipeline.class);
++        final Pipeline pipelineB = mock(Pipeline.class);
++        final HashOperations hashes = mock(HashOperations.class);
++        final Map<String, JedisPool> nodes = new LinkedHashMap<String, JedisPool>();
++
++        Fixture() {
++            // getKeySerializer() 返回 RedisSerializer<?>，ECJ 对通配符捕获后 thenReturn 不接受
++            // RedisSerializer<Object>，这里与 RedisPipelineUtilTest 一致改用 doReturn。
++            doReturn(utf8Serializer()).when(template).getKeySerializer();
++            doReturn(utf8Serializer()).when(template).getHashKeySerializer();
++            doReturn(utf8Serializer()).when(template).getHashValueSerializer();
++            when(template.opsForHash()).thenReturn(hashes);
++            when(factory.getConnection()).thenReturn(connection);
++            when(connection.getNativeConnection()).thenReturn(cluster);
++            when(cluster.getClusterNodes()).thenReturn(nodes);
++            // 真实集群里 getClusterNodes() 同时返回主节点和副本（共 6 个）。
++            // 快照刷新固定借用「第一个」池，这里让它是一个不持有任何 slot 的节点
++            // （等价于一个副本），于是数据连接与刷新连接互不干扰、没有借用顺序依赖。
++            nodes.put("10.0.0.9:6379", poolSeed);
++            nodes.put("10.0.0.1:6379", poolA);
++            nodes.put("10.0.0.2:6380", poolB);
++            when(poolSeed.getResource()).thenReturn(slotsJedis);
++            when(poolA.getResource()).thenReturn(jedisA);
++            when(poolB.getResource()).thenReturn(jedisB);
++            when(jedisA.pipelined()).thenReturn(pipelineA);
++            when(jedisB.pipelined()).thenReturn(pipelineB);
++        }
++
++        void seedSlots() {
++            when(slotsJedis.clusterSlots()).thenReturn(slotReply());
++        }
++
++        List<Object> slotReply() {
++            List<Object> reply = new ArrayList<Object>();
++            reply.add(Arrays.asList(0L, 8191L,
++                    Arrays.asList("10.0.0.1".getBytes(StandardCharsets.UTF_8), 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++            reply.add(Arrays.asList(8192L, 16383L,
++                    Arrays.asList("10.0.0.2".getBytes(StandardCharsets.UTF_8), 6380L, "id-b".getBytes(StandardCharsets.UTF_8))));
++            return reply;
++        }
++
++        void seedSlotsForLowRangeOnly() {
++            List<Object> reply = new ArrayList<Object>();
++            reply.add(Arrays.asList(0L, 8191L,
++                    Arrays.asList("10.0.0.1".getBytes(StandardCharsets.UTF_8), 6379L, "id-a".getBytes(StandardCharsets.UTF_8))));
++            when(slotsJedis.clusterSlots()).thenReturn(reply);
++        }
++
++        void seedPipelines(int repliesA, int repliesB) {
++            List<Object> listA = new ArrayList<Object>();
++            for (int i = 0; i < repliesA; i++) {
++                listA.add(1L);
++            }
++            List<Object> listB = new ArrayList<Object>();
++            for (int i = 0; i < repliesB; i++) {
++                listB.add(1L);
++            }
++            when(pipelineA.syncAndReturnAll()).thenReturn(listA);
++            when(pipelineB.syncAndReturnAll()).thenReturn(listB);
++        }
++
++        Map<String, Map<String, ?>> hashes(List<String> low, List<String> high) {
++            Map<String, Map<String, ?>> out = new LinkedHashMap<String, Map<String, ?>>();
++            for (String key : low) {
++                out.put(key, Collections.<String, Object>singletonMap("f", "v"));
++            }
++            for (String key : high) {
++                out.put(key, Collections.<String, Object>singletonMap("f", "v"));
++            }
++            return out;
++        }
++    }
++
++    @SuppressWarnings("unchecked")
++    private static RedisSerializer<Object> utf8Serializer() {
++        RedisSerializer<Object> serializer = mock(RedisSerializer.class);
++        // 显式转 Object 选中 String.valueOf(Object)，否则泛型实参会被推断成 char[]（valueOf 最具体重载）
++        when(serializer.serialize(any())).thenAnswer(
++                invocation -> String.valueOf((Object) invocation.getArgument(0)).getBytes(StandardCharsets.UTF_8));
++        return serializer;
++    }
++
++    private static List<String> keysInRange(int from, int to, int count) {
++        List<String> keys = new ArrayList<String>();
++        for (int i = 0; i < 1000000 && keys.size() < count; i++) {
++            String key = "probe:" + i;
++            int slot = JedisClusterCRC16.getSlot(key.getBytes(StandardCharsets.UTF_8));
++            if (slot >= from && slot <= to) {
++                keys.add(key);
++            }
++        }
++        if (keys.size() < count) {
++            throw new IllegalStateException("not enough keys in slot range " + from + ".." + to);
++        }
++        return keys;
++    }
++}
+diff --git a/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImpl.java b/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImpl.java
+index af7bdbc..700bf32 100644
+--- a/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImpl.java
++++ b/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImpl.java
+@@ -4,8 +4,9 @@
+  * @Date: 2025-05-27 11:37:36
+  * @LastEditors: caileiming boboclmomi@163.com
+  * @LastEditTime: 2026-10-22 10:00:00
+- * @Description: Redis 实时数据写入。单机/哨兵使用 pipeline，集群自动分片。
+- *               本类不再标注 @Async，异步只保留在 Kafka 写入入口，便于统一重试与异常观测。
++ * @Description: Redis 实时数据写入。单机/哨兵使用 pipeline；集群交给 RedisClusterHashPipeline
++ *               按 slot 属主归并为「每主节点一条 pipeline」。本类不再标注 @Async，
++ *               异步只保留在 Kafka 写入入口，便于统一重试与异常观测。
+  */
+ package com.sac.platform.realserver.service.impl;
+ 
+@@ -26,6 +27,7 @@ import org.springframework.stereotype.Service;
+ import com.sac.platform.common.utils.SystemIDUtil;
+ import com.sac.platform.config.SecSetCounter;
+ import com.sac.platform.config.TotalSetCounter;
++import com.sac.platform.realserver.oms.utils.RedisClusterHashPipeline;
+ import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+ import com.sac.platform.realserver.service.RedisRealDataService;
+ 
+@@ -39,18 +41,21 @@ public class RedisRealDataServiceImpl implements RedisRealDataService {
+ 
+     private final RedisTemplate<String, Object> redisTemplate;
+     private final boolean isCluster;
++    private final RedisClusterHashPipeline clusterPipeline;
+ 
+     public RedisRealDataServiceImpl(RedisTemplate<String, Object> redisTemplate,
+-            RedisClusterHelper redisClusterHelper) {
++            RedisClusterHelper redisClusterHelper,
++            RedisClusterHashPipeline clusterPipeline) {
+         this.redisTemplate = redisTemplate;
+         // 通过统一的 RedisClusterHelper 判断集群模式（哨兵同样走单机 pipeline）
+         this.isCluster = redisClusterHelper.isCluster();
++        this.clusterPipeline = clusterPipeline;
+     }
+ 
+     /**
+      * 实时数据写入入口
+      * 单机/哨兵：使用 pipeline（按 key 分组 hMSet，RTT 最小）
+-     * 集群：使用 opsForHash().putAll（自动分片）
++     * 集群：交给 RedisClusterHashPipeline，按 slot 属主归并为每主节点一条 pipeline
+      *
+      * 注意：本方法为同步执行，异常直接抛给调用方（Kafka 写入入口负责重试与记录）。
+      */
+@@ -111,17 +116,21 @@ public class RedisRealDataServiceImpl implements RedisRealDataService {
+     }
+ 
+     /**
+-     * 集群模式：使用 opsForHash().putAll（自动分片路由）。
+-     * 计数在所有 putAll 成功后一次性累加。
++     * 集群模式：整批交给 RedisClusterHashPipeline，按 slot 属主归并为「每主节点一条 pipeline」。
++     * 计数在整批（所有节点）都成功之后一次性累加；任何失败都直接抛出，
++     * 由调用方整批重试（HSET 幂等），重试不会重复计数。
+      */
+     @Override
+     public CompletableFuture<Boolean> batchWirteOmsByRedisCluster(String prefix, List<String> pointData) {
+         Map<String, Map<String, String>> grouped = groupByKey(prefix, pointData);
++        if (grouped.isEmpty()) {
++            return CompletableFuture.completedFuture(true);
++        }
+         int fieldCount = 0;
+-        for (Map.Entry<String, Map<String, String>> entry : grouped.entrySet()) {
+-            redisTemplate.opsForHash().putAll(entry.getKey(), entry.getValue());
+-            fieldCount += entry.getValue().size();
++        for (Map<String, String> hash : grouped.values()) {
++            fieldCount += hash.size();
+         }
++        clusterPipeline.putAllHashes(grouped);
+         TotalSetCounter.add(fieldCount);
+         SecSetCounter.add(fieldCount);
+         return CompletableFuture.completedFuture(true);
+diff --git a/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImplTest.java b/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImplTest.java
+new file mode 100644
+index 0000000..64f6120
+--- /dev/null
++++ b/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImplTest.java
+@@ -0,0 +1,106 @@
++package com.sac.platform.realserver.service.impl;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyMap;
++import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.times;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.Map;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.mockito.ArgumentCaptor;
++import org.springframework.data.redis.core.RedisCallback;
++import org.springframework.data.redis.core.RedisTemplate;
++
++import com.sac.platform.config.SecSetCounter;
++import com.sac.platform.config.TotalSetCounter;
++import com.sac.platform.realserver.oms.utils.RedisClusterHashPipeline;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
++
++class RedisRealDataServiceImplTest {
++
++    private RedisTemplate<String, Object> template;
++    private RedisClusterHelper clusterHelper;
++    private RedisClusterHashPipeline clusterPipeline;
++
++    @BeforeEach
++    @SuppressWarnings("unchecked")
++    void setUp() {
++        template = mock(RedisTemplate.class);
++        clusterHelper = mock(RedisClusterHelper.class);
++        clusterPipeline = mock(RedisClusterHashPipeline.class);
++        TotalSetCounter.reset();
++        SecSetCounter.reset();
++    }
++
++    @Test
++    void clusterPathDelegatesTheWholeBatchToThePipelineOnce() {
++        when(clusterHelper.isCluster()).thenReturn(true);
++        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
++
++        service.wirteOmsPip("real_data", Arrays.asList(
++                "47245270977;1,1,123.45,1712345678000",
++                "47245270977;2,1,9.9,1712345678001",
++                "47245270978;1,1,1.1,1712345678002")).join();
++
++        ArgumentCaptor<Map> captor = ArgumentCaptor.forClass(Map.class);
++        verify(clusterPipeline, times(1)).putAllHashes(captor.capture());
++        Map<String, Map<String, String>> grouped = captor.getValue();
++
++        assertEquals(2, grouped.size());
++        assertEquals("123.45,1712345678000,1", grouped.get("real_data:11:47245270977").get("1"));
++        assertEquals("9.9,1712345678001,1", grouped.get("real_data:11:47245270977").get("2"));
++        assertEquals("1.1,1712345678002,1", grouped.get("real_data:11:47245270978").get("1"));
++        assertEquals(3L, TotalSetCounter.getCount());
++        assertEquals(3L, SecSetCounter.getCount());
++    }
++
++    @Test
++    void clusterPathSkipsEmptyInput() {
++        when(clusterHelper.isCluster()).thenReturn(true);
++        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
++
++        service.wirteOmsPip("real_data", Collections.<String>emptyList()).join();
++
++        verify(clusterPipeline, never()).putAllHashes(anyMap());
++        assertEquals(0L, TotalSetCounter.getCount());
++    }
++
++    @Test
++    void pipelineFailurePropagatesAndIsNotCounted() {
++        when(clusterHelper.isCluster()).thenReturn(true);
++        doThrow(new RuntimeException("cluster write boom")).when(clusterPipeline).putAllHashes(anyMap());
++        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
++
++        assertThrows(RuntimeException.class, () -> service.wirteOmsPip("real_data",
++                Arrays.asList("47245270977;1,1,123.45,1712345678000")));
++
++        assertEquals(0L, TotalSetCounter.getCount());
++        assertEquals(0L, SecSetCounter.getCount());
++    }
++
++    @Test
++    @SuppressWarnings("unchecked")
++    void standalonePathUsesPipelinedWritesAndNeverTheClusterHelper() {
++        when(clusterHelper.isCluster()).thenReturn(false);
++        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
++        doReturn(Collections.emptyList()).when(template).executePipelined(any(RedisCallback.class));
++
++        service.wirteOmsPip("real_data",
++                Arrays.asList("47245270977;1,1,123.45,1712345678000")).join();
++
++        verify(template).executePipelined(any(RedisCallback.class));
++        verify(clusterPipeline, never()).putAllHashes(anyMap());
++        assertEquals(1L, TotalSetCounter.getCount());
++    }
++}

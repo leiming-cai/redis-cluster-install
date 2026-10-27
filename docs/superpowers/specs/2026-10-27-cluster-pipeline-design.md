@@ -1,7 +1,8 @@
 # 集群写入按节点 pipeline — 设计文档
 
 - **日期**：2026-10-27
-- **状态**：待实施（设计已与决策者逐节确认）
+- **状态**：✅ **已实施**（第十轮；同机交替 A/B 中位数 **3.42×**，
+  64 条单测全绿，patch 见 `docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`）
 - **关联**：`docs/HANDOFF.md` 第九轮（写入性能测量与诊断）
 - **代码位置**：`D:\javawork\1.2\cpscloud1.0\code\platform\backend\realserver`（**非 git 仓库**）
 - **被测产物**：`plugins/rtdata-consumer` → `rtdata-consumer-1.0.14.jar`
@@ -102,7 +103,8 @@ putAllHashes(grouped)
   ├─ 每个 key：slot = JedisClusterCRC16.getSlot(keyBytes) → 二分找 owner → 按 "host:port" 分组
   └─ 每个节点：
        JedisPool pool = cluster.getClusterNodes().get(hostPort)
-       pool 为 null → 刷新快照一次 → 再查；仍为 null → 该节点整组走逐 key 兜底
+       pool 为 null → 该节点整组直接走逐 key 兜底，并置位 needsTopologyRefresh
+                     （本批结束时刷新一次；不在这里逐节点刷新）
        Jedis j = pool.getResource()            // maxWait=3000ms，超时则抛出
        try {
          Pipeline p = j.pipelined();
@@ -122,22 +124,30 @@ putAllHashes(grouped)
 | 情况 | 处理 |
 |---|---|
 | 全部是 `Long` | 成功 |
-| 出现 `JedisMovedDataException` / `JedisAskDataException` | 刷新槽位快照；**这些 key** 逐个走 `redisTemplate.opsForHash().putAll(key, map)`（JedisCluster 自己处理 MOVED/ASKING） |
-| 出现其它 `JedisDataException` | 同样走逐 key 兜底（真实的类型/权限错误会在这里暴露） |
+| 出现 `JedisMovedDataException`（或其它非 ASK 的 `JedisDataException`，如 READONLY/WRONGTYPE/NOPERM） | 刷新槽位快照；**这些 key** 逐个走 `redisTemplate.opsForHash().putAll(key, map)`（JedisCluster 自己处理 MOVED/ASKING） |
+| 出现 `JedisAskDataException` | **不刷新**（迁移中的临时状态）；这些 key 同样逐个走 `putAll` |
+| 返回了既不是 `Long` 也不是 `JedisDataException` 的东西 | 视为被拒（`unexpected reply type`），逐 key 兜底 + 刷新；不静默当成功 |
 | `replies.size() != keys.size()` | 不猜索引对应关系：该节点**整组**走逐 key 兜底 |
+| 节点连接被拒（`JedisConnectionException`） | **不整批抛出**：刷新拓扑 → 该节点整组改走逐 key（JedisCluster 会 `renewSlotCache` 并重试，即旧路径的行为） |
 | 兜底仍抛异常 | **向上抛出**，由 `OmsWriteByKafkaServiceImpl.writeWithRetry` 整批重试（HSET 幂等，重复写安全） |
-| 借用连接超时 / 取原生连接失败 | 抛出（同上） |
+| 取原生连接失败（池耗尽等） | 抛出（同上） |
 
-> 关键点：**任何失败都不允许静默返回成功**。计数器只在整批成功后累加（保持现有语义），
-> 失败由上游的 `FailSetCounter` 记录。
+> 关键点：**任何失败都不允许静默返回成功**。计数器只在整批成功后累加（与旧的
+> `for (…) putAll` 一致：旧实现也是循环结束后才加、失败不计），失败由上游的
+> `FailSetCounter` 记录。
 
 ### 4.4 并发与资源
 
-- 槽位快照是不可变对象，放在 `AtomicReference`；刷新用 `ReentrantLock.tryLock()`，
-  **抢不到锁的线程直接用旧快照**，不阻塞写路径；TTL 30s，重定向时强制刷新。
+- 槽位快照是不可变对象，放在 `AtomicReference`；刷新用 `ReentrantLock.tryLock(50ms)`：
+  拿到锁的线程刷新（正常情况下每 30s 一次），其余线程最多等 50ms 拿新快照，
+  拿不到就直接用旧快照 —— 不会长时间阻塞写路径。
+- 刷新整体失败后 **5s 内不再重探**（`refreshRetryAt`）；重定向触发的强制刷新
+  **最多每秒一次**（`lastForcedRefreshAt`），避免 16 个线程各探一遍。
 - 每批每节点借 **1** 个连接，`finally` 归还。最坏情况 16 写线程 × 3 主节点 = 48 « `maxTotal=200`。
 - 原生 `JedisCluster` 本身线程安全（内部按节点分池），并发调用 `getClusterNodes()` / `getResource()` 安全。
 - 集群模式固定 db 0（Redis Cluster 不支持 `SELECT`），与现有行为一致。
+- `Pipeline.hset(byte[], Map)` 发出的是多 field `HSET`（旧路径 `HMSET`），要求 Redis ≥ 4.0；
+  目标镜像 Redis 8.10。
 
 ### 4.5 装配
 

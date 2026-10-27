@@ -1,5 +1,11 @@
 # 集群写入按节点 pipeline 实施计划
 
+> **实施结果（2026-10-27）**：计划已执行完毕。实施过程中因两轮代码审查增加了用例
+> （最终 **27 条** helper 用例 + **4 条** service 用例，两个模块合计 **63 条**），
+> 并修正了本计划 Task 0 脚本里的两处缺陷（`HSET` 应为 `HSET+HMSET`；容器内不能
+> `[ -f ]` 校验 daemon 路径）。下面各 Task 里写的「Tests run: 5/9/11」是当时的预估，
+> **以仓库实际结果为准**。实测结论见 `docs/HANDOFF.md` 第十轮。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把 Kafka 实时写入路径的「每个 key 一次同步 `HSET` 往返」改成「每个主节点一次 pipeline 往返」，端到端写入均值从约 1.33 万/秒提升到 ≥ 4 万/秒，且数据不丢不重。
