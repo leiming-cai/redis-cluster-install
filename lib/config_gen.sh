@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # lib/config_gen.sh — render redis.conf from a template.
 
-# render_redis_conf TEMPLATE PORT PASSWORD NODE_NAME BIND_ADDR [REDIS_PREFIX]
+# render_redis_conf TEMPLATE PORT PASSWORD NODE_NAME BIND_ADDR [REDIS_PREFIX] [REQUIRE_FULL_COVERAGE]
 # Echoes the rendered config to stdout.
 # REDIS_PREFIX (default /opt/software/redis) is expanded into %REDIS_PREFIX%
 # and must match the prefix used for the systemd unit and the install step,
 # so that cluster-config-file / logfile / ExecStart all agree.
+# REQUIRE_FULL_COVERAGE (default yes) is expanded into
+# %REQUIRE_FULL_COVERAGE%: `yes` makes the cluster refuse every write while
+# any slot is uncovered, `no` keeps the surviving slots writable.
 # Aborts (exit 1) if the template file is missing.
 render_redis_conf() {
     local template="$1"
@@ -14,6 +17,7 @@ render_redis_conf() {
     local node_name="$4"
     local bind_addr="$5"
     local redis_prefix="${6:-/opt/software/redis}"
+    local require_full_coverage="${7:-yes}"
 
     [ -f "$template" ] || { echo "config_gen: template not found: $template" >&2; return 1; }
 
@@ -28,11 +32,13 @@ render_redis_conf() {
     node_name="$(printf '%s' "$node_name"  | sed -e 's/[&|\\]/\\&/g')"
     bind_addr="$(printf '%s' "$bind_addr"  | sed -e 's/[&|\\]/\\&/g')"
     redis_prefix="$(printf '%s' "$redis_prefix" | sed -e 's/[&|\\]/\\&/g')"
+    require_full_coverage="$(printf '%s' "$require_full_coverage" | sed -e 's/[&|\\]/\\&/g')"
 
     sed -e "s|%PORT%|$port|g" \
         -e "s|%PASSWORD%|$password|g" \
         -e "s|%NODE_NAME%|$node_name|g" \
         -e "s|%BIND_ADDR%|$bind_addr|g" \
         -e "s|%REDIS_PREFIX%|$redis_prefix|g" \
+        -e "s|%REQUIRE_FULL_COVERAGE%|$require_full_coverage|g" \
         "$template"
 }

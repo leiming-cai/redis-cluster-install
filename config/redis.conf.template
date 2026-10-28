@@ -16,7 +16,12 @@ cluster-enabled yes
 cluster-config-file %REDIS_PREFIX%/cluster/%PORT%/nodes.conf
 cluster-node-timeout 15000
 cluster-migration-barrier 1
-cluster-require-full-coverage yes
+# From cluster.conf's cluster_require_full_coverage (default yes). With `yes`
+# the cluster refuses EVERY write while any slot is uncovered, so one dead
+# master takes the whole cluster down; `no` keeps the surviving slots
+# writable. Measured on 8.10.2: with `no`, SET/GET on a surviving master's
+# slots still work after another master dies.
+cluster-require-full-coverage %REQUIRE_FULL_COVERAGE%
 
 # Replication
 masterauth %PASSWORD%

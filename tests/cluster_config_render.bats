@@ -178,3 +178,28 @@ covered() {
     [ "$total" -gt 0 ]
     [ "$total" -eq "$optional" ]
 }
+
+# --- cluster-require-full-coverage ---------------------------------------
+#
+# `cluster-require-full-coverage yes` makes the cluster refuse EVERY write
+# while any slot is uncovered, so a single dead master takes the whole cluster
+# down. `no` keeps the surviving slots writable. On a two-machine deployment
+# that is the difference between "degraded" and "down", so the value comes
+# from cluster.conf and must actually reach redis.conf.
+
+@test "rendered redis.conf carries the configured cluster-require-full-coverage" {
+    out="$(render_redis_conf "$FIXTURE_CONF" 6379 "$PASS" "node-6379" "0.0.0.0" "$PREFIX" "no")"
+    [[ "$out" == *"cluster-require-full-coverage no"* ]]
+    [[ "$out" != *"cluster-require-full-coverage yes"* ]]
+}
+
+@test "rendered redis.conf defaults cluster-require-full-coverage to yes" {
+    out="$(render_redis_conf "$FIXTURE_CONF" 6379 "$PASS" "node-6379" "0.0.0.0" "$PREFIX")"
+    [[ "$out" == *"cluster-require-full-coverage yes"* ]]
+}
+
+@test "the real redis.conf renders cluster-require-full-coverage without leaving a placeholder" {
+    out="$(render_redis_conf "$REAL_CONF" 6380 "$PASS" "node-6380" "0.0.0.0" "$PREFIX" "no")"
+    [[ "$out" == *"cluster-require-full-coverage no"* ]]
+    [[ "$out" != *"%REQUIRE_FULL_COVERAGE%"* ]]
+}

@@ -8,6 +8,7 @@ bind %BIND_ADDR%
 requirepass %PASSWORD%
 masterauth %PASSWORD%
 cluster-enabled yes
+cluster-require-full-coverage %REQUIRE_FULL_COVERAGE%
 cluster-config-file %REDIS_PREFIX%/cluster/%PORT%/nodes.conf
 logfile %REDIS_PREFIX%/log/redis-%PORT%.log
 dir /var/lib/redis/cluster/%PORT%
