@@ -209,3 +209,35 @@ EOF
     [[ "$out" == *"NODE_A_SSH_PASS"* ]]
     [[ "$out" == *"no terminal"* ]]
 }
+
+# --- the two-phase assembly ----------------------------------------------
+#
+# `redis-cli --cluster create --cluster-replicas 1` picks the master/replica
+# roles itself, and its pick is not spread across hosts (measured: 6 instances
+# on 2 hosts ended up with all 3 masters on one host, and killing that host
+# left the cluster with no quorum). The script therefore creates the masters
+# with 0 replicas and attaches every replica explicitly.
+
+@test "cluster-config.sh assembles the cluster in two phases" {
+    run cat "$REPO_ROOT/cluster-config.sh"
+    [ "$status" -eq 0 ]
+    # The masters are created on their own ...
+    [[ "$output" == *"--cluster-replicas 0"* ]]
+    # ... and the replicas are attached one by one.
+    [[ "$output" == *"--cluster-slave"* ]]
+    # The old single-command form must be gone. Assert the INVOCATION, not the
+    # text: the file deliberately quotes "--cluster-replicas 1" in a comment
+    # explaining why it is not used.
+    [[ "$output" != *'--cluster-replicas "$CONF_REPLICAS"'* ]]
+}
+
+@test "cluster-config.sh sources the topology planner" {
+    run grep -c 'lib/topology.sh' "$REPO_ROOT/cluster-config.sh"
+    [ "$output" -ge 1 ]
+}
+
+@test "cluster-config.sh prints which host the cluster cannot survive losing" {
+    run cat "$REPO_ROOT/cluster-config.sh"
+    [[ "$output" == *"STOPS serving"* ]]
+    [[ "$output" == *"keeps serving"* ]]
+}

@@ -56,6 +56,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$REPO_ROOT/lib/prompt.sh"
 # shellcheck source=lib/cluster.sh
 . "$REPO_ROOT/lib/cluster.sh"
+# shellcheck source=lib/topology.sh
+. "$REPO_ROOT/lib/topology.sh"
 
 CONF_TEMPLATE="$REPO_ROOT/config/redis.conf.template"
 UNIT_TEMPLATE="$REPO_ROOT/config/redis-cluster.service.template"
@@ -114,6 +116,51 @@ log_info "[2/9] Resolved plan"
 for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
     log_info "  ${CONF_NODE_GROUP[i]} (${CONF_NODE_ENVKEY[i]}) ${CONF_NODE_HOST[i]}:${CONF_NODE_SSH_PORT[i]} ports=[${CONF_NODE_PORTS[i]}]"
 done
+
+# === Topology ===
+# lib/topology.sh is pure, so the layout can be shown before anything is
+# touched. That is the whole point of --dry-run: printing the plan but not the
+# thing the operator most needs to see (which host ends up holding the
+# majority of the masters, i.e. which host the cluster cannot survive losing)
+# would be a dry-run that answers the easy question only.
+#
+# This first computation uses the CONFIG hosts, because credentials are not
+# resolved yet and a dry-run must never prompt. The real run recomputes from
+# the RESOLVED hosts (step 9), which is the authoritative answer.
+print_topology() {
+    local j
+    for (( j = 1; j <= TOPO_MASTER_COUNT; j++ )); do
+        log_info "  master  ${TOPO_MASTER[$j]}"
+    done
+    for (( j = 1; j <= TOPO_REPLICA_COUNT; j++ )); do
+        log_info "  replica ${TOPO_REPLICA[$j]} -> master ${TOPO_REPLICA_MASTER[$j]}"
+    done
+    for (( j = 1; j <= TOPO_GROUP_COUNT; j++ )); do
+        if [ "${TOPO_SURVIVES[$j]}" = "yes" ]; then
+            log_info "  host ${TOPO_GROUP_HOST[$j]}: if it fails the cluster keeps serving (degraded)"
+        else
+            log_warn "  host ${TOPO_GROUP_HOST[$j]}: if it fails the cluster STOPS serving (it holds too many masters for a quorum to survive)"
+        fi
+    done
+    for j in "${TOPO_WARNINGS[@]+"${TOPO_WARNINGS[@]}"}"; do
+        log_warn "  $j"
+    done
+}
+
+_dry_groups=""
+for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
+    [ -n "$_dry_groups" ] && _dry_groups="$_dry_groups "
+    _dry_groups="${_dry_groups}${CONF_NODE_HOST[$i]}:${CONF_NODE_PORTS[$i]}"
+done
+if topology_plan "$_dry_groups"; then
+    log_info "  Planned topology (from the config hosts; the real run uses the resolved SSH hosts):"
+    print_topology
+else
+    # Not fatal here: with NODE_X_HOST overrides the resolved hosts can still
+    # work out, and the real run reports that properly. A dry-run should not
+    # reject a config it is only being asked to describe.
+    log_warn "  topology cannot be planned from the config hosts: $TOPO_ERROR"
+fi
 
 if [ "$DRY_RUN" = "1" ]; then
     echo
@@ -401,7 +448,7 @@ deploy_configs() {
     for p in "${port_list[@]}"; do
         # redis.conf
         tmpf="$(mktemp)"
-        render_redis_conf "$CONF_TEMPLATE" "$p" "$CONF_PASSWORD" "node-$p" "$CONF_BIND_ADDR" "$REDIS_PREFIX" > "$tmpf" \
+        render_redis_conf "$CONF_TEMPLATE" "$p" "$CONF_PASSWORD" "node-$p" "$CONF_BIND_ADDR" "$REDIS_PREFIX" "$CONF_REQUIRE_FULL_COVERAGE" > "$tmpf" \
             || { rm -f "$tmpf"; die "rendering redis-$p.conf failed"; }
         ssh_copy "$user" "$pass" "$host" "$port" "$tmpf" "/tmp/redis-$p.conf" \
             || { rm -f "$tmpf"; die "scp redis-$p.conf to $host failed"; }
@@ -571,20 +618,45 @@ done
 log_ok "All instances responding to PING"
 
 # === Create cluster ===
-# Node list is built from the resolved credentials + config ports.
+#
+# The master set and the replica attachment come from lib/topology.sh, a pure
+# function. `redis-cli --cluster create --cluster-replicas 1` picks the roles
+# itself and its pick is NOT spread across hosts: with 6 instances on 2 hosts
+# it put all 3 masters on one of them, and a failure of that host then left
+# the cluster with no quorum at all (measured — see docs/superpowers/specs/
+# 2026-10-28-two-node-cluster-assembly-design.md, section 3.3).
+#
+# So the cluster is assembled in two phases:
+#   9a  create the MASTERS only            (--cluster-replicas 0)
+#   9b  attach each replica to its master  (--cluster add-node --cluster-slave)
+#
+# Every address travels as a positional argument — never interpolated into a
+# command string.
+#
 # NOTE: no `local` here — this code runs at script top level, not in a
 # function, and bash rejects `local` outside functions (fatal under set -e).
-BUILD_CREATE_ARGS=()
-_port_list=()
+
+# The topology is planned on the RESOLVED addresses (CRED_HOST), not on the
+# config's host values: NODE_X_HOST may have overridden them, and the cluster
+# has to be built from the addresses that are actually reachable.
+TOPO_GROUPS=""
 for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
-    # Split on commas and NOTHING else — see the note in lib/conf.sh about the
-    # unquoted `IFS=',' local -a x=($raw)` form going through pathname
-    # expansion and making the result depend on $PWD.
-    _port_list=()
-    IFS=',' read -r -a _port_list <<< "${CONF_NODE_PORTS[$i]}"
-    for p in "${_port_list[@]}"; do
-        BUILD_CREATE_ARGS+=("${CRED_HOST[$i]}:$p")
-    done
+    [ -n "$TOPO_GROUPS" ] && TOPO_GROUPS="$TOPO_GROUPS "
+    TOPO_GROUPS="${TOPO_GROUPS}${CRED_HOST[$i]}:${CONF_NODE_PORTS[$i]}"
+done
+
+if ! topology_plan "$TOPO_GROUPS"; then
+    die "cannot plan the cluster topology: $TOPO_ERROR"
+fi
+
+log_info "[9/9] Cluster topology (from the resolved SSH hosts):"
+print_topology
+
+# The TOPO_* arrays are 1-based, so "${TOPO_MASTER[@]}" would hand the create
+# command an empty first argument. Copy the masters into a plain 0-based list.
+CREATE_MASTERS=()
+for (( i = 1; i <= TOPO_MASTER_COUNT; i++ )); do
+    CREATE_MASTERS+=("${TOPO_MASTER[$i]}")
 done
 
 # Query the first node's first port to decide whether to create.
@@ -615,6 +687,21 @@ REDIS_BIN="$3"
 CLINFO
 }
 
+# cluster_nodes_from USER PASS HOST SSH_PORT REDIS_PORT
+# Echoes `redis-cli cluster nodes` for one instance. Same rule as above: the
+# password travels as a positional argument, never inside the command string.
+cluster_nodes_from() {
+    local user="$1" pass="$2" host="$3" ssh_port="$4" redis_port="$5"
+    ssh_run "$user" "$pass" "$host" "$ssh_port" \
+        bash -s "$CONF_PASSWORD" "$redis_port" "$REDIS_BIN" 2>/dev/null <<'CLNODES'
+set -u
+CLUSTER_PASS="$1"
+PORT="$2"
+REDIS_BIN="$3"
+"$REDIS_BIN/redis-cli" -a "$CLUSTER_PASS" -p "$PORT" cluster nodes
+CLNODES
+}
+
 cluster_info="$(cluster_info_from "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" "$FIRST_REDIS_PORT" || true)"
 
 # Compare against the instance count this config actually declares, not a
@@ -623,29 +710,97 @@ cluster_info="$(cluster_info_from "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FI
 if printf '%s\n' "$cluster_info" | is_cluster_healthy "$CONF_TOTAL_INSTANCES"; then
     log_ok "Cluster already healthy — skipping create"
 else
-    log_info "[9/9] Creating cluster with ${#BUILD_CREATE_ARGS[@]} instances..."
-    if command -v redis-cli >/dev/null 2>&1; then
-        redis-cli --cluster create "${BUILD_CREATE_ARGS[@]}" \
-            --cluster-replicas "$CONF_REPLICAS" --cluster-yes \
-            -a "$CONF_PASSWORD" \
-            || die "redis-cli --cluster create failed"
+    # --- 9a: the masters ---
+    if printf '%s\n' "$cluster_info" | cluster_exists; then
+        # A cluster already exists but is not healthy: either a previous run
+        # was interrupted, or the roles on the nodes are not the ones this
+        # plan asks for. Check rather than assume.
+        cluster_nodes="$(cluster_nodes_from "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" "$FIRST_REDIS_PORT" || true)"
+        for (( i = 1; i <= TOPO_MASTER_COUNT; i++ )); do
+            m_node="${TOPO_MASTER[$i]}"
+            m_host="${m_node%%:*}"
+            m_port="${m_node##*:}"
+            m_role="$(cluster_role_of "$cluster_nodes" "$m_host" "$m_port")"
+            if [ "$m_role" != "master" ]; then
+                die "$m_node is part of the cluster but its role is '$m_role', not 'master'.
+   The plan says it should be a master. Fix the cluster by hand (or remove the
+   instance from the cluster) before running this again."
+            fi
+        done
+        log_info "  the $TOPO_MASTER_COUNT master(s) are already in place — skipping create"
     else
-        log_warn "redis-cli not on control machine; running create from $FIRST_HOST"
-        # Node addresses arrive as positional args too, so the remote script
-        # never re-parses a string this process built by concatenation.
-        rc=0
-        ssh_run "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" \
-            bash -s "$CONF_PASSWORD" "$CONF_REPLICAS" "$REDIS_BIN" "${BUILD_CREATE_ARGS[@]}" <<'CREATE' || rc=$?
+        log_info "  creating $TOPO_MASTER_COUNT master(s)..."
+        if command -v redis-cli >/dev/null 2>&1; then
+            # The command is built by lib/cluster.sh, so the unit tests cover
+            # it, and build_eval_argv single-quotes every argument before the
+            # eval: the cluster password is arbitrary user input.
+            eval "$(build_create_command "$CONF_PASSWORD" 0 "${CREATE_MASTERS[@]}" | build_eval_argv)" \
+                || die "redis-cli --cluster create failed"
+        else
+            log_warn "redis-cli not on control machine; running create from $FIRST_HOST"
+            # Node addresses arrive as positional args too, so the remote
+            # script never re-parses a string this process built by
+            # concatenation.
+            rc=0
+            ssh_run "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" \
+                bash -s "$CONF_PASSWORD" "$REDIS_BIN" "${CREATE_MASTERS[@]}" <<'CREATE' || rc=$?
 set -u
 CLUSTER_PASS="$1"
-REPLICAS="$2"
-REDIS_BIN="$3"
-shift 3
+REDIS_BIN="$2"
+shift 2
 exec "$REDIS_BIN/redis-cli" --cluster create "$@" \
-    --cluster-replicas "$REPLICAS" --cluster-yes -a "$CLUSTER_PASS"
+    --cluster-replicas 0 --cluster-yes -a "$CLUSTER_PASS"
 CREATE
-        [ "$rc" -eq 0 ] || die "redis-cli --cluster create from $FIRST_HOST failed"
+            [ "$rc" -eq 0 ] || die "redis-cli --cluster create from $FIRST_HOST failed"
+        fi
     fi
+
+    # --- 9b: the replicas ---
+    # Re-read the node list: phase 9a changed it, and an interrupted previous
+    # run may have attached some of the replicas already.
+    cluster_nodes="$(cluster_nodes_from "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" "$FIRST_REDIS_PORT" || true)"
+
+    for (( i = 1; i <= TOPO_REPLICA_COUNT; i++ )); do
+        new_node="${TOPO_REPLICA[$i]}"
+        master_node="${TOPO_REPLICA_MASTER[$i]}"
+        new_host="${new_node%%:*}"
+        new_port="${new_node##*:}"
+
+        current_role="$(cluster_role_of "$cluster_nodes" "$new_host" "$new_port")"
+        if [ "$current_role" = "replica" ]; then
+            current_master="$(cluster_replica_master_of "$cluster_nodes" "$new_host" "$new_port")"
+            if [ "$current_master" = "$master_node" ]; then
+                log_info "  replica $new_node already follows $master_node — skipping"
+                continue
+            fi
+            die "replica $new_node already follows $current_master, but the plan says $master_node.
+   Refusing to re-point a replica: detach it from the cluster by hand first."
+        fi
+        if [ "$current_role" = "master" ]; then
+            die "$new_node is already a master in the cluster, but the plan says it should be a
+   replica of $master_node. Refusing to demote a master that holds slots."
+        fi
+
+        log_info "  attaching replica $new_node to $master_node..."
+        if command -v redis-cli >/dev/null 2>&1; then
+            eval "$(build_add_replica_command "$CONF_PASSWORD" "$new_node" "$master_node" | build_eval_argv)" \
+                || die "redis-cli --cluster add-node failed for $new_node"
+        else
+            log_warn "redis-cli not on control machine; running add-node from $FIRST_HOST"
+            rc=0
+            ssh_run "$FIRST_USER" "$FIRST_PASS" "$FIRST_HOST" "$FIRST_SSH_PORT" \
+                bash -s "$CONF_PASSWORD" "$REDIS_BIN" "$new_node" "$master_node" <<'ADDREPLICA' || rc=$?
+set -u
+CLUSTER_PASS="$1"
+REDIS_BIN="$2"
+NEW_NODE="$3"
+MASTER_NODE="$4"
+exec "$REDIS_BIN/redis-cli" --cluster add-node "$NEW_NODE" "$MASTER_NODE" \
+    --cluster-slave -a "$CLUSTER_PASS"
+ADDREPLICA
+            [ "$rc" -eq 0 ] || die "redis-cli --cluster add-node from $FIRST_HOST failed for $new_node"
+        fi
+    done
 fi
 
 # === Health check ===
