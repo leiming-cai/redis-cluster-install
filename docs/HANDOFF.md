@@ -1,9 +1,9 @@
 # cluster-config.sh 实施进度交接
 
-**更新时间**：2026-10-27
-**工作分支**：无 —— 第七/八/九/十轮都在 `main` 上，**全部已推送**
+**更新时间**：2026-10-28
+**工作分支**：无 —— 第七~十一轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十轮改动**已推送**（`0de6426..02db42a`）
+**基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十一轮已推送（`43d781d..90c801e`，CI success）
 **第七轮（2026-10-27）**：在 CPS 节点镜像上部署集群 + 跑 `RTListener.onMessage`
 写入测试，并固化成 `scripts/e2e-cpsweb-nodes.sh`。
 **已提交**（`e2d01b4`），详见下文「第七轮」。
@@ -17,8 +17,14 @@
 **倍数没有稳健达到计划里的 3×**，原因与重测建议见「第十轮」。
 **Java 源码不在本仓库**，改动以 patch 形式落在
 `docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`，详见下文「第十轮」。
+**第十一轮（2026-10-28）**：**两个消费者的对照测试**（功能全对，吞吐反而降到
+0.32×，原因是这台机器 CPU/内存饱和）+ **配置搬进 `application.yaml` 验证生效**
+（命令行可以完全不传配置），并修掉脚本里三个会「让正确的运行变红」的缺陷。
+详见下文「第十一轮」。
 
-**下一步**：第十轮已推送；下一轮若还要提速，先看「第十轮」里的瓶颈结论。
+**下一步**：① **别再在这台机器上加并发**（已换出 1.77 GB）；② 换干净集群重测倍率；
+③ 验证生产值 `max-poll-records=100000`（测试里生效的是 Boot 默认 **500**）——
+**这很可能是当前吞吐的真实上限**。
 
 ---
 
@@ -1510,38 +1516,60 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第七/八/九/十轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
+**第七~十一轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
+第十一轮已推送：`43d781d..90c801e`（CI success）。
 
-### 下一次会话从这里开始（第十轮结束时）
+### 下一次会话从这里开始（第十一轮结束时）
 
 ```powershell
 cd D:\work\rediscluterproject
 git status -sb            # main...origin/main，工作区干净
-git log --oneline -3      # 02db42a / c8560a8 / ea648cd
+git log --oneline -3      # 90c801e / 43d781d / 02db42a
 ```
 
 环境（本轮结束时仍在跑，没有拆）：
 
 ```
-rc-cpsweb-app      跑的是**新 jar**（target/rtdata-consumer-1.0.14.jar，140,518,878 B）
-rc-cpsweb-node-a/b Redis 6 节点集群，cluster_state:ok；每主 ~160 万 keys（合计 ~480 万）
+rc-cpsweb-app      跑的是**新 jar**（target/rtdata-consumer-1.0.14.jar，140,519,854 B）
+                   配置来自 jar 内 application.yml（CONFIG_FROM_YAML=1 那轮留下的状态）
+rc-cpsweb-node-a/b Redis 6 节点集群，cluster_state:ok
+                   ⚠️ **3 个主全在 node-a**，每主 ~190 万 keys（合计 ~570 万）
 Kafka/ZooKeeper    两节点集群，未改动
-Docker VM          2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
+Docker VM          2 vCPU / 3.8 GB；⚠️ **已换出 1.77 GB**，MemAvailable ~470 MB
 ```
 
-三个待定/待办，按优先级：
+### 三个待定/待办，按优先级
 
-1. **在干净集群上重测倍率**（唯一能把结论从「1.7–4.1×，中位数 2.8×」收紧的事）。
-   当前环境的键数增长 + 每轮触发的 25 秒 RDB 保存让差值不可信。
-   做法：新建集群（或清掉 benchmark 键）→ 用
-   `scripts/bench-consumer-write.sh` 交替跑旧/新各 3 轮 → 比中位数。
-2. ~~**决定是否推送** `main`~~ —— **已完成**（`0de6426..02db42a`，9 个提交，走 SSH）。
-   下次再要推送仍然只能走 SSH（HTTPS 的 PAT 缺 `workflow` scope，见「与主分支的关系」）：
-   ```powershell
-   $env:GIT_SSH='C:\Windows\System32\OpenSSH\ssh.exe'
-   git -c remote.origin.pushurl=git@github.com:leiming-cai/redis-cluster-install.git push origin main
-   ```
+1. **验证 `max-poll-records`**（最值得先做的一个）：
+   生产 Nacos `share_base` 里是 **100000**，而测试没配 → 生效值是 Spring Boot 默认 **500**
+   （每批 500 条，pipeline 摊薄得差）。做法：在 app 的 `application.yml` 里加
+   `spring.kafka.consumer.max-poll-records: 100000` → 重新打包 → 用
+   `CONFIG_FROM_YAML=1` 跑 3 轮，与本轮记录的 13,333/s 对比。
+   **这很可能比「加消费者」更能解释当前吞吐上限。**
+2. **在干净集群上重测倍率**（收紧「1.7–4.1×，中位数 2.8×」）：
+   当前环境键数已到 ~570 万 + 每轮触发 BGSAVE + VM 换出 1.77 GB，差值不可信。
+   **先换机器/换集群，再谈倍率** —— 在这台机器上测出来的一切并发结论都不可信。
 3. **可选**：把 `scripts/check-bash-compat.sh` 接进 CI（旧待办，仍未做）。
+
+> **给下一个执行者的一条硬约束**：这台机器现在 **CPU/内存饱和**。
+> 「加消费者」「加线程」类的实验在这里**得不出可信结论** ——
+> 第十一轮的实测是：2 个消费者比 1 个**慢 3 倍**（中位数 16,006 vs 49,750），
+> 而同一配置单消费者的波动范围本身就是 14,250–50,000（**3.5 倍**）。
+> **先看 `docker stats` 和 `/proc/meminfo` 的 SwapFree，再决定要不要跑性能实验。**
+
+### 第十一轮的产物（下次接手直接看这里）
+
+| 东西 | 位置 |
+|---|---|
+| yaml 改动的权威 diff | `docs/superpowers/patches/2026-10-28-yaml-config.patch` |
+| 测量脚本（`CONSUMERS` / `CONFIG_FROM_YAML` / `log_has` / publish 计数断言） | `scripts/bench-consumer-write.sh` |
+| 交接正文 | 本文件「第十一轮」 |
+| 改后的 application.yml（可直接抄） | `realserver/plugins/rtdata-consumer/src/main/resources/application.yml`（**不在本仓库**，以 patch 为准） |
+| 新 jar | `realserver/plugins/rtdata-consumer/target/rtdata-consumer-1.0.14.jar`（140,519,854 B，2026-10-28 08:21） |
+
+> ⚠️ **新 jar 里的 `application.yml` 写的是 E2E 集群的临时地址（172.21.0.x）**，
+> **不能带进生产**。生产配置来自 Nacos（`share_base` + `ext_base`），
+> 详见「第十一轮」第二节。
 
 **第九轮的旧动作（保留备查）：**
 
@@ -1569,12 +1597,28 @@ Docker VM          2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 **跑一次测量的最短路径**（环境还在时）：
 
 ```powershell
+# A. 配置走命令行（默认）
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
   -v "D:/work/rediscluterproject:/repo" `
   -e NEW_JAR=D:/javawork/1.2/cpscloud1.0/code/platform/backend/realserver/plugins/rtdata-consumer/target/rtdata-consumer-1.0.14.jar `
   -e CONC=1 -e MIN_MEAN=0 `
   rc-e2e-runner:local bash /repo/scripts/bench-consumer-write.sh
+
+# B. 配置走 jar 内的 application.yaml（第十一轮新增，已验证等价）
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
+  -v "D:/work/rediscluterproject:/repo" `
+  -e NEW_JAR=D:/javawork/1.2/cpscloud1.0/code/platform/backend/realserver/plugins/rtdata-consumer/target/rtdata-consumer-1.0.14.jar `
+  -e CONFIG_FROM_YAML=1 -e CONC=1 -e MIN_MEAN=0 `
+  rc-e2e-runner:local bash /repo/scripts/bench-consumer-write.sh
+
+# C. 两个消费者实例（第十一轮新增）
+... -e CONSUMERS=2 -e CONC=1 -e MIN_MEAN=0 ...
 ```
+
+> `CONFIG_FROM_YAML=1` 时命令行**只**保留两个 Nacos 开关
+> （`spring.cloud.nacos.config/discovery.enabled=false`）——
+> 它们**必须**留在命令行，因为 Nacos 客户端在 bootstrap 阶段创建，
+> `application.yml` 里写不生效（见「第十一轮」第二节）。
 
 **已完成的旧动作（保留备查）：**
 
