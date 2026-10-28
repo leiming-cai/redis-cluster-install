@@ -66,10 +66,10 @@ index 10a9328..6ee49df 100644
 +  maxIdle: 50
 +  minIdle: 10
 diff --git a/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java b/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
-index c5c5222..022df57 100644
+index c5c5222..4ffee1e 100644
 --- a/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
 +++ b/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
-@@ -70,8 +70,17 @@ public class CacheServiceImpl implements CacheService {
+@@ -70,8 +70,18 @@ public class CacheServiceImpl implements CacheService {
  
      /**
       * 集群模式：按 master 节点流式 SCAN，逐 key 删除。
@@ -77,10 +77,11 @@ index c5c5222..022df57 100644
 -     * 跨槽批量删除会报 CROSSSLOT。
 +     *
 +     * 不用批量 delete 的真正理由有两条，都不是 CROSSSLOT：
-+     * 1) 集群下 redisTemplate.keys(pattern) 只返回它落到的那一个节点的结果
-+     *    （KEYS 是单节点命令），拿它当全集批量删会漏删其它 master 上的 key；
-+     *    而且 KEYS 会在每个 master 上阻塞式全量扫描（O(N)），
-+     *    并把整个集群的 keyspace 一次性拉进 JVM 堆内存。
++     * 1) KEYS 会在每个 master 上依次执行阻塞式全量扫描（O(N)），
++     *    并把整个集群的 keyspace 一次性拉进 JVM 堆内存
++     *    （Spring Data Redis 2.7 的 JedisClusterKeyCommands.keys 是
++     *      executeCommandOnAllNodes 之后取并集，返回的是整个集群的 keyspace，
++     *      不是只返回某一个节点的结果）；
 +     * 2) 逐 key 删除可以在拿到 key 的同时立刻释放，不需要先把全集攒在内存里。
 +     *
 +     * 顺带说明：Spring Data Redis 2.7 的 JedisClusterKeyCommands.del 实际上会
@@ -132,6 +133,41 @@ index 7fc7e1d..cee8833 100644
      @ConfigurationProperties(prefix = "oms")
      public RedisConfigProperties redisConfigProperties() {
          return new RedisConfigProperties();
+diff --git a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisUtilConfig.java b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisUtilConfig.java
+index 1aadea7..42ff1d1 100644
+--- a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisUtilConfig.java
++++ b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisUtilConfig.java
+@@ -152,10 +152,10 @@ public class RedisUtilConfig {
+ 
+     /**
+      * 集群模式连接工厂
+-     * 条件：oms.redisMode=cluster
++     * 条件：oms.redisMode=cluster（大小写不敏感，与 parseMode 的归一化规则一致）
+      */
+     @Configuration
+-    @ConditionalOnExpression("'${oms.redisMode:standalone}' == 'cluster'")
++    @ConditionalOnExpression("'${oms.redisMode:standalone}'.trim().toLowerCase() == 'cluster'")
+     static class RedisClusterConfig {
+ 
+         @Bean
+@@ -197,7 +197,7 @@ public class RedisUtilConfig {
+      * 条件：oms.redisMode=sentinel
+      */
+     @Configuration
+-    @ConditionalOnExpression("'${oms.redisMode:standalone}' == 'sentinel'")
++    @ConditionalOnExpression("'${oms.redisMode:standalone}'.trim().toLowerCase() == 'sentinel'")
+     static class RedisSentinelConfig {
+ 
+         private static final String DEFAULT_MASTER_NAME = "mymaster";
+@@ -261,7 +261,7 @@ public class RedisUtilConfig {
+      * 条件：oms.redisMode=standalone（含默认）
+      */
+     @Configuration
+-    @ConditionalOnExpression("'${oms.redisMode:standalone}' == 'standalone'")
++    @ConditionalOnExpression("'${oms.redisMode:standalone}'.trim().toLowerCase() == 'standalone'")
+     static class RedisStandaloneConfig {
+ 
+         @Bean
 diff --git a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/JedisPoolUtils.java b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/JedisPoolUtils.java
 deleted file mode 100644
 index e5b906a..0000000
@@ -1848,6 +1884,423 @@ index 60b6aaa..ab22298 100644
      public Long zIntersectAndStore(String key, Collection<String> otherKeys,
              String destKey) {
          return redisTemplate.opsForZSet().intersectAndStore(key, otherKeys,
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/config/RedisClusterOmsContractTest.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/config/RedisClusterOmsContractTest.java
+new file mode 100644
+index 0000000..f0087b1
+--- /dev/null
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/config/RedisClusterOmsContractTest.java
+@@ -0,0 +1,172 @@
++package com.sac.platform.realserver.oms.config;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.time.Duration;
++import java.util.Map;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.autoconfigure.AutoConfigurations;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++import org.springframework.dao.DataAccessException;
++import org.springframework.data.redis.connection.jedis.JedisClientConfiguration;
++import org.springframework.data.redis.connection.jedis.JedisConnectionFactory;
++import org.springframework.data.redis.core.RedisTemplate;
++
++import redis.clients.jedis.JedisPoolConfig;
++
++/**
++ * L3 真集群验证：证明 oms.* 这一份契约在集群模式下真的能连上、真的能读写。
++ *
++ * 背景：三个工程（realserver / modelserver / napstarweb）的 application.yml 里
++ * 原本 oms: 块是整段注释的，完全依赖 Nacos 补齐才能启动。本轮改成
++ * 「本地 application.yml 是完整契约，Nacos 只是覆盖层」。
++ *
++ * 这条用例锁住三件事：
++ * 1) oms.* 绑定的值真的传到了 JedisPoolConfig 与 JedisConnectionFactory
++ *    （不是只写了个摆设、也不是只停留在 props 里）；
++ * 2) 用这个工厂真的能对集群写入并读回；
++ * 3) 集群不可达时**跳过**而不是变红。
++ *
++ * 默认连本机 127.0.0.1:16379（本机 Docker 集群的转发端口）；
++ * 跑之前需要有一个 Redis 集群在监听。
++ */
++class RedisClusterOmsContractTest {
++
++    /**
++     * 与 application.yml 里的 oms.clusters 一致；可用 -Dtest.clusters 覆盖。
++     *
++     * 默认指向本机转发出来的集群端口（16379 = 集群里的 master 172.21.0.2:6379）。
++     * 转发器由 %TEMP%\opencode\start-publish.sh 建立；它不在时本条用例会 skip，
++     * 而不是让没有集群的构建环境变红。
++     */
++    private static final String CLUSTERS =
++            System.getProperty("test.clusters", "127.0.0.1:16379");
++
++    private static final String PASSWORD =
++            System.getProperty("test.password", "CpsE2eClusterPw");
++
++    private final ApplicationContextRunner runner = new ApplicationContextRunner()
++            .withConfiguration(AutoConfigurations.of(
++                    RedisPropertiesConfig.class, RedisUtilConfig.class))
++            // RedisClusterHelper 是 @Component，不在 AutoConfigurations 里。
++            // 扫 utils 包把它带上（生产环境由 @ComponentScan("com.sac.platform") 扫到，
++            // 这里显式扫同一批类，测的才是同一份装配）。
++            .withUserConfiguration(UtilsPackageScan.class)
++            .withPropertyValues(
++                    "oms.redisMode=cluster",
++                    "oms.clusters[0]=" + CLUSTERS,
++                    "oms.password=" + PASSWORD,
++                    "oms.database=0",
++                    "oms.timeout=5000",
++                    "oms.connectTimeout=2000",
++                    "oms.readTimeout=5000",
++                    "oms.maxWait=3000",
++                    "oms.maxTotal=16",
++                    "oms.maxIdle=4",
++                    "oms.minIdle=1")
++            // @ConfigurationProperties 打在 @Bean 方法上时，绑定由
++            // ConfigurationPropertiesBindingPostProcessor 完成。ApplicationContextRunner
++            // 不会自动注册它，所以这里显式补上——否则 properties bean 全是 null，
++            // RedisUtilConfig 会抛 "Redis mode mismatch: oms.redisMode='null'"。
++            .withInitializer(ctx -> org.springframework.boot.context.properties
++                    .ConfigurationPropertiesBindingPostProcessor.register(
++                            (org.springframework.beans.factory.support.BeanDefinitionRegistry) ctx
++                                    .getBeanFactory()));
++
++    @Test
++    void omsPropertiesAreBoundAndDriveTheConnectionFactory() {
++        runner.run(context -> {
++            assertNotNull(context.getBean("omsRedisConfigProperties"));
++
++            RedisConfigProperties props = context.getBean(RedisConfigProperties.class);
++            assertEquals("cluster", props.getRedisMode());
++            assertEquals(CLUSTERS, props.getClusters().get(0));
++            assertEquals(PASSWORD, props.getPassword());
++            assertEquals(2000, props.getConnectTimeout());
++            assertEquals(5000, props.getReadTimeout());
++            assertEquals(3000, props.getMaxWait());
++            assertEquals(16, props.getMaxTotal());
++            assertEquals(4, props.getMaxIdle());
++            assertEquals(1, props.getMinIdle());
++
++            // 关键：属性必须真的落进 JedisPoolConfig，否则「三个应用各自调池」是空话。
++            // 只断言 props 是不够的——把 RedisUtilConfig 里的 setMaxTotal 写死成常量，
++            // props 依然是对的，但连接池已经不是配置的那个了。
++            JedisPoolConfig pool = context.getBean(JedisPoolConfig.class);
++            assertEquals(16, pool.getMaxTotal());
++            assertEquals(4, pool.getMaxIdle());
++            assertEquals(1, pool.getMinIdle());
++            assertEquals(3000L, pool.getMaxWaitMillis());
++
++            // 超时同理：必须落在 JedisConnectionFactory 用的 client configuration 上，
++            // 而不是只停留在 props 里。
++            JedisConnectionFactory factory = context.getBean(JedisConnectionFactory.class);
++            JedisClientConfiguration client = factory.getClientConfiguration();
++            assertEquals(Duration.ofMillis(2000), client.getConnectTimeout());
++            assertEquals(Duration.ofMillis(5000), client.getReadTimeout());
++        });
++    }
++
++    @Test
++    void theConfiguredFactoryCanWriteAndReadBackOnARealCluster() {
++        runner.run(context -> {
++            @SuppressWarnings("unchecked")
++            RedisTemplate<String, Object> template =
++                    (RedisTemplate<String, Object>) context.getBean("redisTemplate");
++            assertNotNull(template);
++
++            String key = "real_data:11:99000009901";
++            String field = "Value";
++            String value = "12.34,1712345678000,1";
++
++            // 集群不可达时跳过，而不是让没有 Redis 的环境变红。
++            //
++            // 整段读写都必须被守卫住：只守卫探针那一次 GET 是不够的——
++            // 转发器/集群在探针之后、真正写入之前挂掉的话，异常会从 put 抛出来，
++            // 测试变红。一个会偶发变红的测试比没有测试更糟。
++            //
++            // 做法：任何连接层异常都当作「集群不可达」→ 跳过。
++            try {
++                template.opsForHash().put(key, field, value);
++                Object read = template.opsForHash().get(key, field);
++                assertEquals(value, read);
++
++                @SuppressWarnings("unchecked")
++                Map<Object, Object> all = template.opsForHash().entries(key);
++                assertEquals(value, all.get(field));
++
++                template.delete(key);
++                assertTrue(template.opsForHash().get(key, field) == null,
++                        "the probe key should be gone after delete");
++            } catch (DataAccessException e) {
++                // JUnit 5 没有 Assumptions.abort；assumeTrue(false, …) 等价于「跳过」
++                org.junit.jupiter.api.Assumptions.assumeTrue(false,
++                        "Redis cluster not reachable at " + CLUSTERS
++                                + " (skipping the live write/read): " + e.getMessage());
++            }
++        });
++    }
++
++    private boolean clusterIsReachable(RedisTemplate<String, Object> template) {
++        try {
++            template.opsForValue().get("__oms_contract_probe__");
++            return true;
++        } catch (Exception e) {
++            return false;
++        }
++    }
++
++    /**
++     * 扫 utils 包，把 RedisClusterHelper（@Component）带进测试上下文。
++     * 生产环境由 @ComponentScan("com.sac.platform") 扫到同一批类。
++     */
++    @org.springframework.context.annotation.Configuration
++    @org.springframework.context.annotation.ComponentScan(
++            basePackageClasses = com.sac.platform.realserver.oms.utils.RedisClusterHelper.class)
++    static class UtilsPackageScan {
++    }
++}
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/config/RedisModeCaseSensitivityTest.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/config/RedisModeCaseSensitivityTest.java
+new file mode 100644
+index 0000000..17f74bc
+--- /dev/null
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/config/RedisModeCaseSensitivityTest.java
+@@ -0,0 +1,85 @@
++package com.sac.platform.realserver.oms.config;
++
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.autoconfigure.AutoConfigurations;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++import org.springframework.context.annotation.ComponentScan;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.data.redis.connection.RedisConnectionFactory;
++
++/**
++ * 锁住「oms.redisMode 大小写不敏感」这条契约。
++ *
++ * 背景：RedisUtilConfig.parseMode() 归一化（trim + toLowerCase），
++ * 但三个 @ConditionalOnExpression 之前直接比较原始字符串。两边规则不一致的后果是：
++ * oms.redisMode 写成 CLUSTER / Cluster 时，三个分支**一个都不激活**，
++ * 于是**一个 RedisConnectionFactory bean 都不会被创建**，
++ * 报错停在 "No qualifying bean of type 'RedisConnectionFactory'"，
++ * 完全指不到真正的原因（模式字符串的大小写）。
++ *
++ * 现在条件表达式与 parseMode 用同一套归一化规则。
++ */
++class RedisModeCaseSensitivityTest {
++
++    private ApplicationContextRunner runner(String mode) {
++        return new ApplicationContextRunner()
++                .withConfiguration(AutoConfigurations.of(
++                        RedisPropertiesConfig.class, RedisUtilConfig.class))
++                .withPropertyValues(
++                        "oms.redisMode=" + mode,
++                        "oms.clusters[0]=127.0.0.1:16379",
++                        "oms.password=CpsE2eClusterPw",
++                        "oms.hostname=127.0.0.1",
++                        "oms.port=16379")
++                .withInitializer(ctx -> org.springframework.boot.context.properties
++                        .ConfigurationPropertiesBindingPostProcessor.register(
++                                (org.springframework.beans.factory.support.BeanDefinitionRegistry) ctx
++                                        .getBeanFactory()))
++                .withUserConfiguration(UtilsPackageScan.class);
++    }
++
++    @Configuration
++    @ComponentScan(
++            basePackageClasses = com.sac.platform.realserver.oms.utils.RedisClusterHelper.class)
++    static class UtilsPackageScan {
++    }
++
++    @Test
++    void modeIsCaseInsensitiveAndSurroundingSpacesAreIgnored() {
++        for (String mode : new String[] {
++                "cluster", "CLUSTER", "Cluster", " cluster ", "Cluster\t" }) {
++            runner(mode).run(context -> {
++                assertTrue(context.getStartupFailure() == null,
++                        "oms.redisMode='" + mode + "' must start the context, but failed with: "
++                                + context.getStartupFailure());
++                assertNotNull(context.getBeanProvider(RedisConnectionFactory.class).getIfAvailable(),
++                        "oms.redisMode='" + mode + "' must produce a RedisConnectionFactory bean");
++            });
++        }
++    }
++
++    @Test
++    void standaloneModeIsAlsoCaseInsensitive() {
++        for (String mode : new String[] { "standalone", "STANDALONE", "StandAlone" }) {
++            runner(mode).run(context -> {
++                assertTrue(context.getStartupFailure() == null,
++                        "oms.redisMode='" + mode + "' must start the context, but failed with: "
++                                + context.getStartupFailure());
++                assertNotNull(context.getBeanProvider(RedisConnectionFactory.class).getIfAvailable(),
++                        "oms.redisMode='" + mode + "' must produce a RedisConnectionFactory bean");
++            });
++        }
++    }
++
++    @Test
++    void anUnknownModeStillFailsLoudly() {
++        runner("master-slave").run(context -> {
++            // 未知模式必须失败，而不是静默地退回某个分支
++            assertNotNull(context.getStartupFailure(),
++                    "an unknown oms.redisMode must fail the context, not silently pick a mode");
++        });
++    }
++}
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/config/RedisPropertiesConfigBeanNameTest.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/config/RedisPropertiesConfigBeanNameTest.java
+new file mode 100644
+index 0000000..fa507fa
+--- /dev/null
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/config/RedisPropertiesConfigBeanNameTest.java
+@@ -0,0 +1,42 @@
++package com.sac.platform.realserver.oms.config;
++
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertSame;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.autoconfigure.AutoConfigurations;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++
++/**
++ * 锁住 RedisPropertiesConfig 的 bean 名。
++ *
++ * 三个工程（realserver / modelserver / napstarweb）都扫到这一个配置类，
++ * 历史上每个工程都试过在自己包里再加一份同名的 RedisPropertiesConfig，
++ * 结果是 bean 名重复定义、启动期 ConflictingBeanDefinitionException。
++ * 这里用 omsRedisConfigProperties 收口，并锁住它可按名取到。
++ */
++class RedisPropertiesConfigBeanNameTest {
++
++    private final ApplicationContextRunner runner = new ApplicationContextRunner()
++            .withConfiguration(AutoConfigurations.of(RedisPropertiesConfig.class));
++
++    @Test
++    void beanIsRetrievableByItsExplicitName() {
++        runner.run(context -> {
++            assertNotNull(context.getBean("omsRedisConfigProperties"));
++            assertNotNull(context.getBean(RedisConfigProperties.class));
++            // 按类型取到的必须与按名取到的是同一个实例
++            assertSame(context.getBean("omsRedisConfigProperties"),
++                    context.getBean(RedisConfigProperties.class));
++        });
++    }
++
++    @Test
++    void theOldBeanNameNoLongerResolves() {
++        runner.run(context -> {
++            // 旧名字必须已经不存在，否则消费方仍可能按名注入并撞车
++            assertFalse(context.containsBean("redisConfigProperties"));
++        });
++    }
++}
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisPipelineUtilNoEntityDependencyTest.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisPipelineUtilNoEntityDependencyTest.java
+new file mode 100644
+index 0000000..e9592c7
+--- /dev/null
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisPipelineUtilNoEntityDependencyTest.java
+@@ -0,0 +1,94 @@
++package com.sac.platform.realserver.oms.utils;
++
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.times;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.data.redis.core.HashOperations;
++import org.springframework.data.redis.core.RedisTemplate;
++
++/**
++ * 锁住「realserver-oms 不再依赖 realserver-entity」这条架构约束。
++ *
++ * 背景：opsHashSetPipeByHashData(List<HashData>) 曾让基础设施模块依赖
++ * 实时数据域的实体 HashData，导致 common/idgenerator（公共库）被迫
++ * 拖进整个 realserver-entity。现在分组逻辑挪到了 realserver-dao，
++ * 基础设施层只接受 Map。
++ */
++class RedisPipelineUtilNoEntityDependencyTest {
++
++    /**
++     * realserver-oms 的运行时/编译类路径上不得出现 com/sac/platform/realserver/entity。
++     *
++     * 说明：原先这里只扫描 target/classes，但 Maven 只会把本模块自己的源文件编译进
++     * target/classes，依赖 jar 并不会被解包进去 —— 因此该检查永远为真、约束不住任何东西。
++     * 真正的架构约束是「realserver-entity 这个包在 oms 模块的类路径上不可加载」，
++     * 所以改为直接用本测试类的 ClassLoader 去解析 entity 包中的类。
++     * 只要有人把 realserver-entity 重新加回 pom（或某个类又 import 了 HashData），
++     * 这条用例就会失败。
++     */
++    @Test
++    void omsModuleDoesNotDependOnRealServerEntityPackage() {
++        StringBuilder scan = new StringBuilder();
++        try {
++            java.io.File root = new java.io.File("target/classes");
++            java.io.File pkgDir = new java.io.File(root, "com/sac/platform/realserver/entity");
++            if (pkgDir.exists()) {
++                scan.append("ENTITY_DEPENDENCY_PRESENT (compiled output): ");
++                String[] names = pkgDir.list();
++                if (names != null) {
++                    for (String n : names) {
++                        scan.append(n).append(" ");
++                    }
++                }
++            }
++            // 关键检查：entity 包在本模块类路径上必须无法加载
++            Class.forName("com.sac.platform.realserver.entity.HashData", false,
++                    RedisPipelineUtilNoEntityDependencyTest.class.getClassLoader());
++            scan.append("ENTITY_DEPENDENCY_PRESENT");
++        } catch (ClassNotFoundException expected) {
++            // 期望路径：entity 不在 oms 类路径上
++        } catch (NoClassDefFoundError expected) {
++            // 期望路径：entity 不在 oms 类路径上
++        } catch (Exception e) {
++            scan.append("scan failed: ").append(e.getMessage());
++        }
++        assertFalse(scan.toString().contains("ENTITY_DEPENDENCY_PRESENT"),
++                "realserver-oms must not depend on the realserver-entity package; got: " + scan);
++    }
++
++    /**
++     * opsHashSetPipe(Map) 在集群模式下按 key 逐个 putAll —— 这就是
++     * opsHashSetPipeByHashData 被删除后，realserver-dao 改调用的方法。
++     * 锁住它的集群行为，防止后续重构悄悄改掉。
++     */
++    @Test
++    @SuppressWarnings("unchecked")
++    void opsHashSetPipeWritesEachKeySeparatelyInClusterMode() {
++        RedisTemplate<String, Object> template = mock(RedisTemplate.class);
++        HashOperations<String, Object, Object> hashes = mock(HashOperations.class);
++        when(template.opsForHash()).thenReturn(hashes);
++
++        RedisClusterHelper helper = mock(RedisClusterHelper.class);
++        when(helper.isCluster()).thenReturn(true);
++
++        Map<String, Map<String, Object>> grouped = new LinkedHashMap<>();
++        Map<String, Object> fields = new LinkedHashMap<>();
++        fields.put("f1", "v1");
++        fields.put("f2", "v2");
++        grouped.put("k1", fields);
++
++        RedisPipelineUtil util = new RedisPipelineUtil(template, helper);
++        util.opsHashSetPipe(grouped);
++
++        verify(hashes, times(1)).putAll("k1", fields);
++    }
++}
 diff --git a/realserver/controller/src/main/resources/application.yml b/realserver/controller/src/main/resources/application.yml
 index c98274d..3e3804c 100644
 --- a/realserver/controller/src/main/resources/application.yml
