@@ -1,0 +1,2040 @@
+diff --git a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisUtil.java b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisUtil.java
+index 60b6aaa..ab22298 100644
+--- a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisUtil.java
++++ b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisUtil.java
+@@ -54,9 +54,20 @@ public class RedisUtil {
+ 
+     /**
+      * 批量删除key
+-     * 
++     *
+      * @param keys
+-     */
++     * @deprecated 集群模式下本方法不会抛出 CROSSSLOT 错误：Spring Data Redis 2.7.18
++     *             对跨槽的批量 delete 会按 slot 拆分成逐 key 删除，删除本身是成功的。
++     *             真正的风险在"集合从哪来"：不要用 {@code redisTemplate.keys()} 的结果
++     *             当作待删全集——集群下 KEYS 会在每个 master 上阻塞式扫描（O(N)），
++     *             并把整个集群的 keyspace 一次性拉进 JVM 堆内存（不是只返回某个节点的结果，
++     *             但代价是全量 key 全量驻留内存），大 keyspace 下足以拖垮应用；
++     *             应改用 {@link #scan(String)} 分批获取 key 再逐批删除。
++     *             集群下的批量删除请改用 {@code RedisPipelineUtil.delete(List)}：
++     *             该方法逐 key 删除，自动按 slot 路由。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public void delete(Collection<String> keys) {
+         redisTemplate.delete(keys);
+     }
+@@ -109,7 +120,17 @@ public class RedisUtil {
+      * 
+      * @param pattern
+      * @return
+-     */
++     * @deprecated 集群模式下请改用 {@link #scan(String)}（或
++     *             {@code RedisScanUtils.scan(template, pattern)}）。
++     *             风险有二：其一，{@code KEYS} 是阻塞式 O(N) 命令，集群下会在
++     *             每个 master 上依次执行，任一节点的大 keyspace 都会拖住该节点；
++     *             其二，Spring Data Redis 2.7.18 的集群实现会把所有节点的结果合并，
++     *             即返回整个集群的 keyspace（不是只返回某一个节点的结果），
++     *             全量 key 会一次性驻留 JVM 堆内存，生产环境不可接受。
++     *             请使用 SCAN 游标分批获取（{@link #scan(String)} 内部即基于 SCAN）。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Set<String> keys(String pattern) {
+         return redisTemplate.keys(pattern);
+     }
+@@ -120,7 +141,18 @@ public class RedisUtil {
+      * @param key
+      * @param dbIndex
+      * @return
+-     */
++     * @deprecated {@code MOVE} 命令在 Redis Cluster 中不被支持（集群只有 db0），
++     *             调用会抛 {@code UnsupportedOperationException}
++     *             （"Cluster mode does not allow moving keys."）。
++     *             替代方案：读取原 key 的值（{@code get(String)}）、写入新 key
++     *             （{@code set(String, String)}）、再删除原 key（{@code delete(String)}）。
++     *             该三步不会携带原 key 的过期时间；需要保持 TTL 时请自行用
++     *             {@code getExpire(String, TimeUnit)} 取出剩余 TTL（需自行处理
++     *             -1 表示无过期时间、-2 表示 key 不存在这两种返回值），
++     *             并用 {@code setEx(String, String, long, TimeUnit)} 写回。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Boolean move(String key, int dbIndex) {
+         return redisTemplate.move(key, dbIndex);
+     }
+@@ -170,7 +202,19 @@ public class RedisUtil {
+      * 
+      * @param oldKey
+      * @param newKey
+-     */
++     * @deprecated 目标 key 与源 key 不在同一 slot 时并不会抛出 CROSSSLOT 错误，
++     *             Spring Data Redis 2.7.18 会静默降级为非原子的"拷贝"实现：
++     *             {@code DUMP(oldKey)} → {@code RESTORE(newKey, 0, REPLACE)} → {@code DEL(oldKey)}。
++     *             该降级路径的风险有两点：其一，三个命令分三次往返，不是原子操作，
++     *             若在 RESTORE 与 DEL 之间进程崩溃或连接中断，同一个值会同时残留在
++     *             两个 key 下；其二，RESTORE 使用的 ttl 为 0（永不过期），
++     *             原 key 的过期时间被静默丢弃，值可能变成永久数据。
++     *             请改为在应用侧显式完成"读值 → 写入新 key → 删除旧 key"，
++     *             并自行把旧 key 的剩余 TTL（{@code getExpire(String, TimeUnit)}）
++     *             通过 {@code setEx(String, String, long, TimeUnit)} 带到新 key 上。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public void rename(String oldKey, String newKey) {
+         redisTemplate.rename(oldKey, newKey);
+     }
+@@ -181,7 +225,19 @@ public class RedisUtil {
+      * @param oldKey
+      * @param newKey
+      * @return
+-     */
++     * @deprecated 与 {@link #rename(String, String)} 类似：目标 key 与源 key 不在同一 slot 时
++     *             并不会抛出 CROSSSLOT 错误，Spring Data Redis 2.7.18 会静默降级为
++     *             非原子的 {@code DUMP → RESTORE(newKey, 0) → DEL(oldKey)} 拷贝
++     *             （注意此处 RESTORE 不带 REPLACE，与 {@link #rename(String, String)}
++     *             的 {@code RESTORE(newKey, 0, REPLACE)} 不同；且降级路径会先
++     *             {@code EXISTS(newKey)} 判断目标是否已存在，目标已存在时直接返回 false）。
++     *             风险：过程中崩溃会让同一个值残留在两个 key 下；且 RESTORE 的 ttl 为 0，
++     *             原 key 的过期时间被静默丢弃。返回值也不再代表"整体操作是否成功"。
++     *             请改为在应用侧显式完成"读取源 key → 写入目标 key → 删除源 key"，
++     *             并自行处理过期时间。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Boolean renameIfAbsent(String oldKey, String newKey) {
+         return redisTemplate.renameIfAbsent(oldKey, newKey);
+     }
+@@ -257,7 +313,18 @@ public class RedisUtil {
+      * 
+      * @param keys
+      * @return
+-     */
++     * @deprecated 集群模式下本方法不会抛出 CROSSSLOT 错误：Spring Data Redis 2.7.18
++     *             会按 slot 拆分请求，并按传入顺序重排各节点的结果后返回。
++     *             真正的风险是它并非原子操作，而是逐 key 执行一次 GET，
++     *             各 key 的取值来自不同的时刻，彼此之间可能不一致；
++     *             key 数量多时往返次数也随之增加。
++     *             建议改为逐 key 调用 {@code get(String)}（或本类的 {@link #get(String)}），
++     *             按需控制一致性要求。注意 {@code RedisPipelineUtil.opsValueGetPipe(String...)}
++     *             在集群模式下内部就是 multiGet，与本方法行为完全一致，
++     *             只有单机模式下才是真正的 pipeline，不构成集群下的改进。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public List<Object> multiGet(Collection<String> keys) {
+         return redisTemplate.opsForValue().multiGet(keys);
+     }
+@@ -328,7 +395,17 @@ public class RedisUtil {
+      * 批量添加
+      * 
+      * @param maps
+-     */
++     * @deprecated 集群模式下本方法不会抛出 CROSSSLOT 错误：Spring Data Redis 2.7.18
++     *             会按 slot 把批量 MSET 拆分成逐 key 的 SET。
++     *             真正的风险是它并非原子操作——各 key 的写入分散在不同节点的多次往返中，
++     *             过程中崩溃或连接中断会导致只写入了部分 key。
++     *             建议改为逐 key 调用 {@link #set(String, String)}。
++     *             若确需批量写入，可参考 {@code RedisPipelineUtil.opsValueSetPipe(Map)}，
++     *             但请注意其入参类型为 {@code Map<String, Object>}，
++     *             本方法的 {@code Map<String, String>} 不能直接传入，需要先转换。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public void multiSet(Map<String, String> maps) {
+         redisTemplate.opsForValue().multiSet(maps);
+     }
+@@ -338,7 +415,17 @@ public class RedisUtil {
+      * 
+      * @param maps
+      * @return 之前已经存在返回false,不存在返回true
+-     */
++     * @deprecated 集群模式下本方法不会抛出 CROSSSLOT 错误：Spring Data Redis 2.7.18
++     *             会按 slot 把批量 MSETNX 拆分成逐 key 的 SETNX。
++     *             真正的风险是语义退化——"所有 key 都不存在才写入"这一全有或全无
++     *             （all-or-nothing）语义在拆分后变成了逐 key 判断，
++     *             可能只写入了一部分 key 就返回，从而出现部分应用（partial apply）。
++     *             整体也不再是原子操作，过程中崩溃同样可能留下部分写入的结果。
++     *             建议改为逐 key 调用 {@link #setIfAbsent(String, String)}，
++     *             并在应用侧自行判断是否所有 key 都写入成功。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public boolean multiSetIfAbsent(Map<String, String> maps) {
+         return redisTemplate.opsForValue().multiSetIfAbsent(maps);
+     }
+@@ -716,7 +803,19 @@ public class RedisUtil {
+      * @param sourceKey
+      * @param destinationKey
+      * @return
+-     */
++     * @deprecated 这是双 key 命令，源 key 与目标 key 不在同一 slot 时并不会抛出
++     *             CROSSSLOT 错误：Spring Data Redis 2.7.18 会静默降级为
++     *             {@code RPOP(sourceKey)} + {@code LPUSH(destinationKey, value)} 两步操作，
++     *             该降级路径不是原子的，两条命令分两次往返；
++     *             若在 RPOP 与 LPUSH 之间进程崩溃或连接中断，被弹出的元素会直接丢失
++     *             （既不在源列表里，也未进入目标列表）。
++     *             请改用本类中的逐 key 方法：先用 {@link #lRightPop(String)} 弹出，
++     *             再用 {@link #lLeftPush(String, String)} 压入目标列表（两步都是单 key 操作，
++     *             各自自动按 slot 路由）。请注意这两步本身同样不是原子的，
++     *             中途崩溃依然会丢失该元素，若不能容忍丢失需另设补偿机制。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Object lRightPopAndLeftPush(String sourceKey, String destinationKey) {
+         return redisTemplate.opsForList().rightPopAndLeftPush(sourceKey,
+                 destinationKey);
+@@ -730,7 +829,19 @@ public class RedisUtil {
+      * @param timeout
+      * @param unit
+      * @return
+-     */
++     * @deprecated 这是 {@link #lRightPopAndLeftPush(String, String)} 的阻塞版本，
++     *             同样存在双 key 命令的跨槽风险：源 key 与目标 key 不在同一 slot 时
++     *             并不会抛出 CROSSSLOT 错误，Spring Data Redis 2.7.18 会静默降级为
++     *             {@code RPOP(sourceKey, timeout)} + {@code LPUSH(destinationKey, value)} 两步操作。
++     *             该降级路径不是原子的；若在 RPOP 与 LPUSH 之间进程崩溃或连接中断，
++     *             被弹出的元素会直接丢失（既不在源列表里，也未进入目标列表）。
++     *             请改用本类中的逐 key 方法：先用 {@link #lBRightPop(String, long, TimeUnit)}
++     *             阻塞弹出，再用 {@link #lLeftPush(String, String)} 压入目标列表
++     *             （两步都是单 key 操作，各自自动按 slot 路由）。
++     *             请注意这两步本身同样不是原子的，中途崩溃依然会丢失该元素。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Object lBRightPopAndLeftPush(String sourceKey, String destinationKey,
+             long timeout, TimeUnit unit) {
+         return redisTemplate.opsForList().rightPopAndLeftPush(sourceKey,
+@@ -813,7 +924,22 @@ public class RedisUtil {
+      * @param value
+      * @param destKey
+      * @return
+-     */
++     * @deprecated 这是双 key 命令，源 key 与目标 key 不在同一 slot 时并不会抛出
++     *             CROSSSLOT 错误：Spring Data Redis 2.7.18 会静默降级为
++     *             {@code EXISTS(srcKey)} → {@code SREM(srcKey, value)} →
++     *             {@code SISMEMBER(destKey, value)} → {@code SADD(destKey, value)}
++     *             四步操作（{@code SISMEMBER} 为真时跳过 {@code SADD}），
++     *             该降级路径不是原子的，各命令分多次往返。
++     *             真正的风险是元素丢失：目标集合中若已存在同名元素，
++     *             {@code SREM} 仍会把该元素从源集合移除，但 {@code SADD} 被跳过，
++     *             于是该元素既不在源集合也不在目标集合，且方法只返回
++     *             {@code Boolean.FALSE}，调用方无法区分"源集合本就没有该元素"
++     *             与"元素被丢弃"。
++     *             请改为在应用侧显式完成"判断元素是否存在 → 写入目标 key
++     *             → 从源 key 移除"，或使用 Lua 脚本把多步合并为一次原子执行。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Boolean sMove(String key, String value, String destKey) {
+         return redisTemplate.opsForSet().move(key, value, destKey);
+     }
+@@ -845,7 +971,18 @@ public class RedisUtil {
+      * @param key
+      * @param otherKey
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             并把各集合的元素取回 JVM 后在客户端计算交集。
++     *             真正的风险有两点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM。
++     *             请改为逐 key 取集合后在应用侧计算交集
++     *             （本类的 {@code setMembers(String)} 为单 key 读取）。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Set<Object> sIntersect(String key, String otherKey) {
+         return redisTemplate.opsForSet().intersect(key, otherKey);
+     }
+@@ -856,7 +993,18 @@ public class RedisUtil {
+      * @param key
+      * @param otherKeys
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             并把各集合的元素取回 JVM 后在客户端计算交集。
++     *             真正的风险有两点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM。
++     *             请改为逐 key 取集合后在应用侧计算交集
++     *             （本类的 {@code setMembers(String)} 为单 key 读取）。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Set<Object> sIntersect(String key, Collection<String> otherKeys) {
+         return redisTemplate.opsForSet().intersect(key, otherKeys);
+     }
+@@ -868,7 +1016,23 @@ public class RedisUtil {
+      * @param otherKey
+      * @param destKey
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             在 JVM 客户端计算交集后再把结果 {@code SADD} 进 destKey。
++     *             真正的风险有三点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM；
++     *             其三，最终的 {@code SADD} 写入与前面的读取分离，
++     *             过程中崩溃会留下不完整的 destKey。
++     *             请改为逐 key 取集合后在应用侧计算交集，再自行写入 destKey。
++     *             注意该降级路径用的是 {@code SADD}（追加）而非服务端
++     *             {@code SINTERSTORE}（覆盖 destKey），
++     *             因此 destKey 中原有的旧成员不会被清除；且计算结果为空时直接返回 0L，
++     *             destKey 保持原样不会被清空，返回值的含义也与同 slot 情况不同。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Long sIntersectAndStore(String key, String otherKey, String destKey) {
+         return redisTemplate.opsForSet().intersectAndStore(key, otherKey,
+                 destKey);
+@@ -881,7 +1045,23 @@ public class RedisUtil {
+      * @param otherKeys
+      * @param destKey
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             在 JVM 客户端计算交集后再把结果 {@code SADD} 进 destKey。
++     *             真正的风险有三点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM；
++     *             其三，最终的 {@code SADD} 写入与前面的读取分离，
++     *             过程中崩溃会留下不完整的 destKey。
++     *             请改为逐 key 取集合后在应用侧计算交集，再自行写入 destKey。
++     *             注意该降级路径用的是 {@code SADD}（追加）而非服务端
++     *             {@code SINTERSTORE}（覆盖 destKey），
++     *             因此 destKey 中原有的旧成员不会被清除；且计算结果为空时直接返回 0L，
++     *             destKey 保持原样不会被清空，返回值的含义也与同 slot 情况不同。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Long sIntersectAndStore(String key, Collection<String> otherKeys,
+             String destKey) {
+         return redisTemplate.opsForSet().intersectAndStore(key, otherKeys,
+@@ -894,7 +1074,18 @@ public class RedisUtil {
+      * @param key
+      * @param otherKeys
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             并把各集合的元素取回 JVM 后在客户端计算并集。
++     *             真正的风险有两点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM。
++     *             请改为逐 key 取集合后在应用侧计算并集
++     *             （本类的 {@code setMembers(String)} 为单 key 读取）。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Set<Object> sUnion(String key, String otherKeys) {
+         return redisTemplate.opsForSet().union(key, otherKeys);
+     }
+@@ -905,7 +1096,18 @@ public class RedisUtil {
+      * @param key
+      * @param otherKeys
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             并把各集合的元素取回 JVM 后在客户端计算并集。
++     *             真正的风险有两点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM。
++     *             请改为逐 key 取集合后在应用侧计算并集
++     *             （本类的 {@code setMembers(String)} 为单 key 读取）。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Set<Object> sUnion(String key, Collection<String> otherKeys) {
+         return redisTemplate.opsForSet().union(key, otherKeys);
+     }
+@@ -917,7 +1119,23 @@ public class RedisUtil {
+      * @param otherKey
+      * @param destKey
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             在 JVM 客户端计算并集后再把结果 {@code SADD} 进 destKey。
++     *             真正的风险有三点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM；
++     *             其三，最终的 {@code SADD} 写入与前面的读取分离，
++     *             过程中崩溃会留下不完整的 destKey。
++     *             请改为逐 key 取集合后在应用侧计算并集，再自行写入 destKey。
++     *             注意该降级路径用的是 {@code SADD}（追加）而非服务端
++     *             {@code SUNIONSTORE}（覆盖 destKey），
++     *             因此 destKey 中原有的旧成员不会被清除；且计算结果为空时直接返回 0L，
++     *             destKey 保持原样不会被清空，返回值的含义也与同 slot 情况不同。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Long sUnionAndStore(String key, String otherKey, String destKey) {
+         return redisTemplate.opsForSet().unionAndStore(key, otherKey, destKey);
+     }
+@@ -929,7 +1147,23 @@ public class RedisUtil {
+      * @param otherKeys
+      * @param destKey
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             在 JVM 客户端计算并集后再把结果 {@code SADD} 进 destKey。
++     *             真正的风险有三点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM；
++     *             其三，最终的 {@code SADD} 写入与前面的读取分离，
++     *             过程中崩溃会留下不完整的 destKey。
++     *             请改为逐 key 取集合后在应用侧计算并集，再自行写入 destKey。
++     *             注意该降级路径用的是 {@code SADD}（追加）而非服务端
++     *             {@code SUNIONSTORE}（覆盖 destKey），
++     *             因此 destKey 中原有的旧成员不会被清除；且计算结果为空时直接返回 0L，
++     *             destKey 保持原样不会被清空，返回值的含义也与同 slot 情况不同。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Long sUnionAndStore(String key, Collection<String> otherKeys,
+             String destKey) {
+         return redisTemplate.opsForSet().unionAndStore(key, otherKeys, destKey);
+@@ -941,7 +1175,18 @@ public class RedisUtil {
+      * @param key
+      * @param otherKey
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             并把各集合的元素取回 JVM 后在客户端计算差集。
++     *             真正的风险有两点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM。
++     *             请改为逐 key 取集合后在应用侧计算差集
++     *             （本类的 {@code setMembers(String)} 为单 key 读取）。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Set<Object> sDifference(String key, String otherKey) {
+         return redisTemplate.opsForSet().difference(key, otherKey);
+     }
+@@ -952,7 +1197,18 @@ public class RedisUtil {
+      * @param key
+      * @param otherKeys
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             并把各集合的元素取回 JVM 后在客户端计算差集。
++     *             真正的风险有两点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM。
++     *             请改为逐 key 取集合后在应用侧计算差集
++     *             （本类的 {@code setMembers(String)} 为单 key 读取）。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Set<Object> sDifference(String key, Collection<String> otherKeys) {
+         return redisTemplate.opsForSet().difference(key, otherKeys);
+     }
+@@ -964,7 +1220,23 @@ public class RedisUtil {
+      * @param otherKey
+      * @param destKey
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             在 JVM 客户端计算差集后再把结果 {@code SADD} 进 destKey。
++     *             真正的风险有三点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM；
++     *             其三，最终的 {@code SADD} 写入与前面的读取分离，
++     *             过程中崩溃会留下不完整的 destKey。
++     *             请改为逐 key 取集合后在应用侧计算差集，再自行写入 destKey。
++     *             注意该降级路径用的是 {@code SADD}（追加）而非服务端
++     *             {@code SDIFFSTORE}（覆盖 destKey），
++     *             因此 destKey 中原有的旧成员不会被清除；且计算结果为空时直接返回 0L，
++     *             destKey 保持原样不会被清空，返回值的含义也与同 slot 情况不同。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Long sDifference(String key, String otherKey, String destKey) {
+         return redisTemplate.opsForSet().differenceAndStore(key, otherKey,
+                 destKey);
+@@ -977,7 +1249,23 @@ public class RedisUtil {
+      * @param otherKeys
+      * @param destKey
+      * @return
+-     */
++     * @deprecated 多 key 集合运算，key 不在同一 slot 时并不会抛出 CROSSSLOT 错误：
++     *             Spring Data Redis 2.7.18 会分别对每个 key 执行 {@code SMEMBERS}，
++     *             在 JVM 客户端计算差集后再把结果 {@code SADD} 进 destKey。
++     *             真正的风险有三点：其一，整个运算不是原子的，
++     *             各集合的快照来自不同时刻，计算结果可能与并发写入不一致；
++     *             其二，被参与运算的集合会被完整物化到 JVM 堆内存中，
++     *             大集合会导致内存压力甚至 OOM；
++     *             其三，最终的 {@code SADD} 写入与前面的读取分离，
++     *             过程中崩溃会留下不完整的 destKey。
++     *             请改为逐 key 取集合后在应用侧计算差集，再自行写入 destKey。
++     *             注意该降级路径用的是 {@code SADD}（追加）而非服务端
++     *             {@code SDIFFSTORE}（覆盖 destKey），
++     *             因此 destKey 中原有的旧成员不会被清除；且计算结果为空时直接返回 0L，
++     *             destKey 保持原样不会被清空，返回值的含义也与同 slot 情况不同。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
++     */
++    @Deprecated
+     public Long sDifference(String key, Collection<String> otherKeys,
+             String destKey) {
+         return redisTemplate.opsForSet().differenceAndStore(key, otherKeys,
+@@ -1319,7 +1607,13 @@ public class RedisUtil {
+      * @param otherKey
+      * @param destKey
+      * @return
++     * @deprecated 多 key zset 运算，key 不在同一 slot 时会失败，但抛出的不是 CROSSSLOT 错误，
++     *             而是 {@code org.springframework.dao.InvalidDataAccessApiUsageException}，
++     *             消息为 {@code "ZUNIONSTORE can only be executed when all keys map to the same slot"}。
++     *             请改为逐 key 取 zset 后在应用侧计算并集，再写入 destKey。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
+      */
++    @Deprecated
+     public Long zUnionAndStore(String key, String otherKey, String destKey) {
+         return redisTemplate.opsForZSet().unionAndStore(key, otherKey, destKey);
+     }
+@@ -1330,7 +1624,13 @@ public class RedisUtil {
+      * @param otherKeys
+      * @param destKey
+      * @return
++     * @deprecated 多 key zset 运算，key 不在同一 slot 时会失败，但抛出的不是 CROSSSLOT 错误，
++     *             而是 {@code org.springframework.dao.InvalidDataAccessApiUsageException}，
++     *             消息为 {@code "ZUNIONSTORE can only be executed when all keys map to the same slot"}。
++     *             请改为逐 key 取 zset 后在应用侧计算并集，再写入 destKey。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
+      */
++    @Deprecated
+     public Long zUnionAndStore(String key, Collection<String> otherKeys,
+             String destKey) {
+         return redisTemplate.opsForZSet()
+@@ -1344,7 +1644,13 @@ public class RedisUtil {
+      * @param otherKey
+      * @param destKey
+      * @return
++     * @deprecated 多 key zset 运算，key 不在同一 slot 时会失败，但抛出的不是 CROSSSLOT 错误，
++     *             而是 {@code org.springframework.dao.InvalidDataAccessApiUsageException}，
++     *             消息为 {@code "ZINTERSTORE can only be executed when all keys map to the same slot"}。
++     *             请改为逐 key 取 zset 后在应用侧计算交集，再写入 destKey。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
+      */
++    @Deprecated
+     public Long zIntersectAndStore(String key, String otherKey,
+             String destKey) {
+         return redisTemplate.opsForZSet().intersectAndStore(key, otherKey,
+@@ -1358,7 +1664,13 @@ public class RedisUtil {
+      * @param otherKeys
+      * @param destKey
+      * @return
++     * @deprecated 多 key zset 运算，key 不在同一 slot 时会失败，但抛出的不是 CROSSSLOT 错误，
++     *             而是 {@code org.springframework.dao.InvalidDataAccessApiUsageException}，
++     *             消息为 {@code "ZINTERSTORE can only be executed when all keys map to the same slot"}。
++     *             请改为逐 key 取 zset 后在应用侧计算交集，再写入 destKey。
++     *             注：本方法在本代码库中已无调用方，属于遗留接口，仅保留以提示风险。
+      */
++    @Deprecated
+     public Long zIntersectAndStore(String key, Collection<String> otherKeys,
+             String destKey) {
+         return redisTemplate.opsForZSet().intersectAndStore(key, otherKeys,
+diff --git a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisPipelineUtil.java b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisPipelineUtil.java
+index ecf04d5..d40cd5e 100644
+--- a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisPipelineUtil.java
++++ b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisPipelineUtil.java
+@@ -20,8 +20,6 @@ import org.springframework.data.redis.core.RedisTemplate;
+ import org.springframework.data.redis.serializer.RedisSerializer;
+ import org.springframework.data.redis.serializer.StringRedisSerializer;
+ 
+-import com.sac.platform.realserver.entity.HashData;
+-
+ @SuppressWarnings("all")
+ public class RedisPipelineUtil {
+ 
+@@ -263,36 +261,6 @@ public class RedisPipelineUtil {
+         return result;
+     }
+ 
+-    /**
+-     * 批量设值 - HashData 列表
+-     * 集群模式：按 key 分组用 putAll
+-     * 单机模式：使用 pipeline
+-     */
+-    public void opsHashSetPipeByHashData(List<HashData> hashDatas) {
+-        if (hashDatas == null || hashDatas.isEmpty()) {
+-            return;
+-        }
+-        if (isCluster()) {
+-            // 集群：按 key 分组，单 key 用 putAll
+-            Map<String, Map<String, Object>> grouped = new LinkedHashMap<>();
+-            for (HashData hashData : hashDatas) {
+-                grouped.computeIfAbsent(hashData.getKey(), k -> new LinkedHashMap<>())
+-                        .put(hashData.getFied(), hashData.getValue());
+-            }
+-            grouped.forEach(redisTemplate.opsForHash()::putAll);
+-        } else {
+-            redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+-                for (HashData hashData : hashDatas) {
+-                    connection.hSet(
+-                            stringSerializer.serialize(hashData.getKey()),
+-                            hashKeySerializer.serialize(hashData.getFied()),
+-                            hashValueSerializer.serialize(hashData.getValue()));
+-                }
+-                return null;
+-            });
+-        }
+-    }
+-
+     /**
+      * scan 实现（集群/单机自适应），统一委托 RedisScanUtils。
+      */
+diff --git a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/JedisUtils.java b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/JedisUtils.java
+deleted file mode 100644
+index a5915d5..0000000
+--- a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/JedisUtils.java
++++ /dev/null
+@@ -1,1045 +0,0 @@
+-/** 
+- * @Author: caileiming boboclmomi@163.com
+- * @Date: 2022-07-13 09:24:34
+- * @LastEditors: caileiming boboclmomi@163.com
+- * @LastEditTime: 2022-07-13 09:55:51
+- * @FilePath: \realserver\oms\src\main\java\com\sac\platform\realserver\oms\tils\JedisUtils.java
+- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+- */
+-package com.sac.platform.realserver.oms.utils;
+-
+-import java.util.List;
+-import java.util.Map;
+-import java.util.Set;
+-
+-import redis.clients.jedis.Jedis;
+-import redis.clients.jedis.Pipeline;
+-
+-public class JedisUtils {
+-
+-    private JedisUtils() {
+-    }
+-
+-    private static final int REDIS_DB_MAXNUM = 16;
+-
+-    /*
+-     * 除了该工具类提供的方法外，还可以在外面调用getJedis()方法，获取到jedis实例后，调用它原生的api来操作
+-     */
+-
+-    /**
+-     * 获取jedis对象，并选择redis库。jedis默认是0号库，可传入1-16之间的数选择库存放数据
+-     * 原则上使用一个redis库存放数据，通过特定的key的命令规则来区分不同的数据就行了。
+-     *
+-     * @param index redis库号。使用可变参数的目的就是该参数可传可不传。
+-     * @return 返回jedis对象
+-     */
+-    public static Jedis getJedis(int... index) {
+-        Jedis jedis = JedisPoolUtils.getJedis();
+-
+-        if (index != null && index.length > 0 && index[0] <= REDIS_DB_MAXNUM) {
+-            jedis.select(index[0]);
+-        } else {
+-            jedis.select(0);
+-        }
+-        return jedis;
+-    }
+-
+-    /* ######################## key的操作 ################################ */
+-
+-    /**
+-     * 根据pattern返回当前库中的key
+-     *
+-     * @param pattern
+-     * @return
+-     */
+-    public static Set<String> keys(String pattern) {
+-        Jedis jedis = null;
+-        Set<String> keys = null;
+-        try {
+-            jedis = getJedis();
+-            keys = jedis.keys(pattern);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return keys;
+-    }
+-
+-    /**
+-     * 删除一个或多个key
+-     *
+-     * @param key 一个或多个key
+-     */
+-    public static Long del(String... key) {
+-        Jedis jedis = null;
+-        Long delNum = 0L;
+-        try {
+-            jedis = getJedis();
+-            delNum = jedis.del(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return delNum;
+-    }
+-
+-    /**
+-     * 批量删除
+-     * 
+-     * @param keyList 要删除的key的集合
+-     */
+-    public static void mdel(List<String> keyList) {
+-        Jedis jedis = getJedis();
+-        // 获取pipeline
+-        Pipeline pipeline = jedis.pipelined();
+-        for (String key : keyList) {
+-            pipeline.del(key);
+-        }
+-        // 执行结果同步，这样才能保证结果的正确性。实际上不执行该方法也执行了上面的命令，但是结果确不一定完全正确。
+-        // 注意
+-        pipeline.sync();
+-        // 关闭连接
+-        jedis.close();
+-    }
+-
+-    /**
+-     * 判断某个key是否还存在
+-     *
+-     * @param key key
+-     * @return
+-     */
+-    public static Boolean exists(String key) {
+-        Jedis jedis = null;
+-        Boolean flag = false;
+-        try {
+-            jedis = getJedis();
+-            flag = jedis.exists(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return flag;
+-    }
+-
+-    /**
+-     * 设置某个key的过期时间，单位秒
+-     *
+-     * @param key     key
+-     * @param seconds 过期时间秒
+-     */
+-    public static void expire(String key, long seconds) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.expire(key, seconds);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 查看某个key还有几秒过期，-1表示永不过期 ，-2表示已过期
+-     *
+-     * @param key key
+-     * @return
+-     */
+-    public static Long timeToLive(String key) {
+-        Jedis jedis = null;
+-        Long ttl;
+-        try {
+-            jedis = getJedis();
+-            ttl = jedis.ttl(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return ttl;
+-    }
+-
+-    /**
+-     * 查看某个key对应的value的类型
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static String type(String key) {
+-        Jedis jedis = null;
+-        String type = null;
+-        try {
+-            jedis = getJedis();
+-            type = jedis.type(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return type;
+-    }
+-
+-    /* ######################## string(字符串)的操作 #################### */
+-
+-    /**
+-     * 获取某个key的value，类型要对，只能value是string的才能获取
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static String get(String key) {
+-        Jedis jedis = null;
+-        String value = null;
+-        try {
+-            jedis = getJedis();
+-            value = jedis.get(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return value;
+-    }
+-
+-    /**
+-     * 设置某个key的value
+-     *
+-     * @param key
+-     * @param value
+-     */
+-    public static void set(String key, String value) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.set(key, value);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 字符串后追加内容
+-     *
+-     * @param key           key
+-     * @param appendContent 要追加的内容
+-     */
+-    public static void append(String key, String appendContent) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.append(key, appendContent);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 返回key的value的长度
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static Long strlen(String key) {
+-        Jedis jedis = null;
+-        Long strLen = 0L;
+-        try {
+-            jedis = getJedis();
+-            strLen = jedis.strlen(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return strLen;
+-    }
+-
+-    /**
+-     * value 加1 必
+-     * 须是字符型数字
+-     * 
+-     * @param key
+-     * @return 增加后的值
+-     */
+-    public static Long incr(String key) {
+-        Jedis jedis = null;
+-        Long incrResult = 0L;
+-        try {
+-            jedis = getJedis();
+-            incrResult = jedis.incr(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return incrResult;
+-    }
+-
+-    /**
+-     * value 减1 必须是字符型数字
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static Long decr(String key) {
+-        Jedis jedis = null;
+-        Long decrResult = 0L;
+-        try {
+-            jedis = getJedis();
+-            decrResult = jedis.decr(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return decrResult;
+-    }
+-
+-    /**
+-     * value 加increment
+-     *
+-     * @param key       key
+-     * @param increment 加几
+-     * @return
+-     */
+-    public static Long incrby(String key, int increment) {
+-        Jedis jedis = null;
+-        Long incrByResult = 0L;
+-        try {
+-            jedis = getJedis();
+-            incrByResult = jedis.incrBy(key, increment);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return incrByResult;
+-    }
+-
+-    /**
+-     * value 减increment
+-     *
+-     * @param key
+-     * @param increment
+-     * @return
+-     */
+-    public static Long decrby(String key, int increment) {
+-        Jedis jedis = null;
+-        Long decrByResult = 0L;
+-        try {
+-            jedis = getJedis();
+-            decrByResult = jedis.decrBy(key, increment);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return decrByResult;
+-    }
+-
+-    /**
+-     * 给某个key设置过期时间和value，成功返回OK
+-     *
+-     * @param key     key
+-     * @param seconds 过期时间秒
+-     * @param value   设置的值
+-     * @return
+-     */
+-    public static String setex(String key, long seconds, String value) {
+-        Jedis jedis = null;
+-        String result = null;
+-        try {
+-            jedis = getJedis();
+-            result = jedis.setex(key, seconds, value);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return result;
+-    }
+-
+-    /* ######################## list(列表)的操作 ####################### */
+-    // lpush rpush lpop rpop lrange lindex llen lset
+-
+-    /**
+-     * 从左边向列表中添加值
+-     *
+-     * @param key key
+-     * @param str 要添加的值
+-     */
+-    public static void lpush(String key, String str) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.lpush(key, str);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 从右边向列表中添加值
+-     *
+-     * @param key key
+-     * @param str 要添加的值
+-     */
+-    public static void rpush(String key, String str) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.rpush(key, str);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 从左边取出一个列表中的值
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static String lpop(String key) {
+-        Jedis jedis = null;
+-        String lpop = null;
+-        try {
+-            jedis = getJedis();
+-            lpop = jedis.lpop(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return lpop;
+-    }
+-
+-    /**
+-     * 从右边取出一个列表中的值
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static String rpop(String key) {
+-        Jedis jedis = null;
+-        String rpop = null;
+-        try {
+-            jedis = getJedis();
+-            rpop = jedis.rpop(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return rpop;
+-    }
+-
+-    /**
+-     * 取出列表中指定范围内的值，0 到 -1 表示全部
+-     *
+-     * @param key
+-     * @param startIndex
+-     * @param endIndex
+-     * @return
+-     */
+-    public static List<String> lrange(String key, int startIndex, int endIndex) {
+-        Jedis jedis = null;
+-        List<String> result = null;
+-        try {
+-            jedis = getJedis();
+-            result = jedis.lrange(key, startIndex, endIndex);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return result;
+-    }
+-
+-    /**
+-     * 返回某列表指定索引位置的值
+-     *
+-     * @param key   列表key
+-     * @param index 索引位置
+-     * @return
+-     */
+-    public static String lindex(String key, int index) {
+-        Jedis jedis = null;
+-        String lindex = null;
+-        try {
+-            jedis = getJedis();
+-            lindex = jedis.lindex(key, index);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return lindex;
+-    }
+-
+-    /**
+-     * 返回某列表的长度
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static Long llen(String key) {
+-        Jedis jedis = null;
+-        Long llen = 0L;
+-        try {
+-            jedis = getJedis();
+-            llen = jedis.llen(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return llen;
+-    }
+-
+-    /**
+-     * 给某列表指定位置设置为指定的值
+-     *
+-     * @param key
+-     * @param index
+-     * @param str
+-     */
+-    public static void lset(String key, Long index, String str) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.lset(key, index, str);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 对列表进行剪裁，保留指定闭区间的元素(索引位置也会重排)
+-     * 
+-     * @param key        列表key
+-     * @param startIndex 开始索引位置
+-     * @param endIndex   结束索引位置
+-     */
+-    public static void ltrim(String key, Integer startIndex, Integer endIndex) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.ltrim(key, startIndex, endIndex);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 从列表的左边阻塞弹出一个元素
+-     * 
+-     * @param key     列表的key
+-     * @param timeout 阻塞超时时间，0表示若没有元素就永久阻塞
+-     * @return
+-     */
+-    public static List<String> blpop(String key, Integer timeout) {
+-        Jedis jedis = null;
+-        List<String> valueList = null;
+-        try {
+-            jedis = getJedis();
+-            valueList = jedis.blpop(timeout, key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return valueList;
+-    }
+-
+-    /**
+-     * 从列表的右边阻塞弹出一个元素
+-     * 
+-     * @param key     列表的key
+-     * @param timeout 阻塞超时时间，0表示若没有元素就永久阻塞
+-     * @return
+-     */
+-    public static List<String> brpop(String key, Integer timeout) {
+-        Jedis jedis = null;
+-        List<String> valueList = null;
+-        try {
+-            jedis = getJedis();
+-            valueList = jedis.brpop(timeout, key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return valueList;
+-    }
+-
+-    /* ######################## hash(哈希表)的操作 ####################### */
+-    // hset hget hmset hmget hgetall hdel hkeys hvals hexists hincrby
+-
+-    /**
+-     * 给某个hash表设置一个键值对
+-     *
+-     * @param key
+-     * @param field
+-     * @param value
+-     */
+-    public static void hset(String key, String field, String value) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.hset(key, field, value);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 取出某个hash表中某个field对应的value
+-     *
+-     * @param key   key
+-     * @param field field
+-     * @return
+-     */
+-    public static String hget(String key, String field) {
+-        Jedis jedis = null;
+-        String hget = null;
+-        try {
+-            jedis = getJedis();
+-            hget = jedis.hget(key, field);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return hget;
+-    }
+-
+-    /**
+-     * 某个hash表设置一个或多个键值对
+-     *
+-     * @param key
+-     * @param kvMap
+-     */
+-    public static void hmset(String key, Map<String, String> kvMap) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.hmset(key, kvMap);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 取出某个hash表中任意多个key对应的value的集合
+-     *
+-     * @param key
+-     * @param fields
+-     * @return
+-     */
+-    public static List<String> hmget(String key, String... fields) {
+-        Jedis jedis = null;
+-        List<String> hmget = null;
+-        try {
+-            jedis = getJedis();
+-            hmget = jedis.hmget(key, fields);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return hmget;
+-    }
+-
+-    /**
+-     * 取出某个hash表中所有的键值对
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static Map<String, String> hgetall(String key) {
+-        Jedis jedis = null;
+-        Map<String, String> kvMap = null;
+-        try {
+-            jedis = getJedis();
+-            kvMap = jedis.hgetAll(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return kvMap;
+-    }
+-
+-    /**
+-     * 判断某个hash表中的某个key是否存在
+-     *
+-     * @param key
+-     * @param field
+-     * @return
+-     */
+-    public static Boolean hexists(String key, String field) {
+-        Jedis jedis = null;
+-        Boolean exists = null;
+-        try {
+-            jedis = getJedis();
+-            exists = jedis.hexists(key, field);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return exists;
+-    }
+-
+-    /**
+-     * 返回某个hash表中所有的key
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static Set<String> hkeys(String key) {
+-        Jedis jedis = null;
+-        Set<String> keys = null;
+-        try {
+-            jedis = getJedis();
+-            keys = jedis.hkeys(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return keys;
+-    }
+-
+-    /**
+-     * 返回某个hash表中所有的value
+-     *
+-     * @param key
+-     * @return
+-     */
+-    public static List<String> hvals(String key) {
+-        Jedis jedis = null;
+-        List<String> hvals = null;
+-        try {
+-            jedis = getJedis();
+-            hvals = jedis.hvals(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return hvals;
+-    }
+-
+-    /**
+-     * 删除某个hash表中的一个或多个键值对
+-     *
+-     * @param key
+-     * @param fields
+-     */
+-    public static void hdel(String key, String... fields) {
+-        Jedis jedis = null;
+-        try {
+-            jedis = getJedis();
+-            jedis.hdel(key, fields);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-    }
+-
+-    /**
+-     * 给某个hash表中的某个field的value增加多少
+-     *
+-     * @param key       hash表的key
+-     * @param field     表中的某个field
+-     * @param increment 增加多少
+-     * @return
+-     */
+-    public static Long hincrby(String key, String field, Long increment) {
+-        Jedis jedis = null;
+-        Long result = null;
+-        try {
+-            jedis = getJedis();
+-            result = jedis.hincrBy(key, field, increment);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return result;
+-    }
+-
+-    /* ######################## set(集合)的操作 ########################### */
+-
+-    /**
+-     * 往set集合中添加一个或多个元素
+-     * 
+-     * @param key     key
+-     * @param members 要添加的元素
+-     * @return 添加成功的元素个数
+-     */
+-    public static Long sadd(String key, String... members) {
+-        Jedis jedis = null;
+-        Long num = 0L;
+-        try {
+-            jedis = getJedis();
+-            num = jedis.sadd(key, members);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return num;
+-    }
+-
+-    /**
+-     * 返回set集合中的所有元素，顺序与加入时的顺序一致
+-     * 
+-     * @param key key
+-     * @return
+-     */
+-    public static Set<String> smembers(String key) {
+-        Jedis jedis = null;
+-        Set<String> members = null;
+-        try {
+-            jedis = getJedis();
+-            members = jedis.smembers(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return members;
+-    }
+-
+-    /**
+-     * 判断集合中是否存在某个元素
+-     * 
+-     * @param key    key
+-     * @param member 某个元素
+-     * @return true存在，false不存在
+-     */
+-    public static Boolean sismember(String key, String member) {
+-        Jedis jedis = null;
+-        Boolean isMember = false;
+-        try {
+-            jedis = getJedis();
+-            isMember = jedis.sismember(key, member);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return isMember;
+-    }
+-
+-    /**
+-     * 返回set集合的长度
+-     * 
+-     * @param key key
+-     * @return
+-     */
+-    public static Long scard(String key) {
+-        Jedis jedis = null;
+-        Long len = 0L;
+-        try {
+-            jedis = getJedis();
+-            len = jedis.scard(key);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return len;
+-    }
+-
+-    /**
+-     * 删除set集合中指定的一个或多个元素
+-     * 
+-     * @param key
+-     * @param members 要删除的元素
+-     * @return 删除成功的元素个数
+-     */
+-    public static Long srem(String key, String... members) {
+-        Jedis jedis = null;
+-        Long num = 0L;
+-        try {
+-            jedis = getJedis();
+-            num = jedis.srem(key, members);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return num;
+-    }
+-
+-    /**
+-     * 将key1中的元素key1Member移动到key2中
+-     * 
+-     * @param key1       来源集合key
+-     * @param key2       目的地集合key
+-     * @param key1Member key1中的元素
+-     * @return 1成功，0失败
+-     */
+-    public static Long smove(String key1, String key2, String key1Member) {
+-        Jedis jedis = null;
+-        Long num = 0L;
+-        try {
+-            jedis = getJedis();
+-            num = jedis.smove(key1, key2, key1Member);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return num;
+-    }
+-
+-    /**
+-     * 随机查询返回集合中的指定个数的元素（若count为负数，返回的元素可能会重复）
+-     * 
+-     * @param key   key
+-     * @param count 要查询返回的元素个数
+-     * @return 元素list集合
+-     */
+-    public static List<String> srandmember(String key, int count) {
+-        Jedis jedis = null;
+-        List<String> members = null;
+-        try {
+-            jedis = getJedis();
+-            members = jedis.srandmember(key, count);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return members;
+-    }
+-
+-    /**
+-     * 从set集合中随机弹出指定个数个元素
+-     * 
+-     * @param key   key
+-     * @param count 要弹出的个数
+-     * @return 随机弹出的元素
+-     */
+-    public static Set<String> spop(String key, int count) {
+-        Jedis jedis = null;
+-        Set<String> members = null;
+-        try {
+-            jedis = getJedis();
+-            members = jedis.spop(key, count);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return members;
+-    }
+-
+-    /**
+-     * 求交集，返回多个set集合相交的部分
+-     * 
+-     * @param setKeys 多个set集合的key
+-     * @return 相交的元素集合
+-     */
+-    public static Set<String> sinter(String... setKeys) {
+-        Jedis jedis = null;
+-        Set<String> members = null;
+-        try {
+-            jedis = getJedis();
+-            members = jedis.sinter(setKeys);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return members;
+-    }
+-
+-    /**
+-     * 求并集，求几个set集合的并集（因为set中不会有重复的元素，合并后的集合也不会有重复的元素）
+-     * 
+-     * @param setKeys 多个set的key
+-     * @return 合并后的集合
+-     */
+-    public static Set<String> sunion(String... setKeys) {
+-        Jedis jedis = null;
+-        Set<String> members = null;
+-        try {
+-            jedis = getJedis();
+-            members = jedis.sunion(setKeys);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return members;
+-    }
+-
+-    /**
+-     * 求差集，求几个集合之间的差集
+-     * 
+-     * @param setKeys 多个set的key
+-     * @return 差集
+-     */
+-    public static Set<String> sdiff(String... setKeys) {
+-        Jedis jedis = null;
+-        Set<String> members = null;
+-        try {
+-            jedis = getJedis();
+-            members = jedis.sdiff(setKeys);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return members;
+-    }
+-
+-    /* ######################## zset(有序集合)的操作 ####################### */
+-
+-    /**
+-     * 添加一个元素到zset
+-     * 
+-     * @param key    key
+-     * @param score  元素的分数
+-     * @param member 元素
+-     * @return 成功添加的元素个数
+-     */
+-    public static Long zadd(String key, double score, String member) {
+-        Jedis jedis = null;
+-        Long num = null;
+-        try {
+-            jedis = getJedis();
+-            num = jedis.zadd(key, score, member);
+-        } finally {
+-            if (jedis != null) {
+-                jedis.close();
+-            }
+-        }
+-        return num;
+-    }
+-}
+diff --git a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/JedisPoolUtils.java b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/JedisPoolUtils.java
+deleted file mode 100644
+index e5b906a..0000000
+--- a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/JedisPoolUtils.java
++++ /dev/null
+@@ -1,51 +0,0 @@
+-/** 
+- * @Author: caileiming boboclmomi@163.com
+- * @Date: 2022-07-13 09:24:34
+- * @LastEditors: caileiming boboclmomi@163.com
+- * @LastEditTime: 2022-07-13 09:25:39
+- * @FilePath: \realserver\oms\src\main\java\com\sac\platform\realserver\oms\tils\JedisPoolUtils.java
+- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+- */
+-package com.sac.platform.realserver.oms.utils;
+-
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.util.Properties;
+-
+-import redis.clients.jedis.Jedis;
+-import redis.clients.jedis.JedisPool;
+-import redis.clients.jedis.JedisPoolConfig;
+-
+-public class JedisPoolUtils {
+-
+-    private JedisPoolUtils() {
+-    }
+-
+-    private static JedisPool jedisPool;
+-
+-    static {
+-        // 获取输入流
+-        InputStream is = JedisPoolUtils.class.getClassLoader().getResourceAsStream("jedis.properties");
+-        // 创建properties对象
+-        Properties properties = new Properties();
+-        try {
+-            properties.load(is);
+-        } catch (IOException e) {
+-            e.printStackTrace();
+-        }
+-        // 获取数据、设置到JedisPoolConfig中
+-        JedisPoolConfig jedisPoolConfig = new JedisPoolConfig();
+-        jedisPoolConfig.setMaxTotal(Integer.parseInt(properties.getProperty("maxTotal")));
+-        jedisPoolConfig.setMaxIdle(Integer.parseInt(properties.getProperty("maxIdle")));
+-        String host = properties.getProperty("host");
+-        Integer port = Integer.parseInt(properties.getProperty("port"));
+-        jedisPool = new JedisPool(jedisPoolConfig, host, port);
+-    }
+-
+-    /**
+-     * 获取连接的方法
+-     */
+-    public static Jedis getJedis() {
+-        return jedisPool.getResource();
+-    }
+-}
+diff --git a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisPropertiesConfig.java b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisPropertiesConfig.java
+index 7fc7e1d..cee8833 100644
+--- a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisPropertiesConfig.java
++++ b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/config/RedisPropertiesConfig.java
+@@ -15,7 +15,17 @@ import org.springframework.context.annotation.Configuration;
+ 
+ @Configuration
+ public class RedisPropertiesConfig {
+-    @Bean
++    /**
++     * bean 名为 omsRedisConfigProperties（不是 redisConfigProperties）：
++     * 三个工程（realserver / modelserver / napstarweb）都会扫到本类，
++     * 历史上每个工程都试过在自己包里再加一份同名的 RedisPropertiesConfig，
++     * 结果是同名 bean 重复定义、启动期 ConflictingBeanDefinitionException。
++     * 那三份尝试都已被删除，这里用一个不易撞的名字收口。
++     *
++     * <p>方法名保持 redisConfigProperties 不变 —— Spring 按类型注入，
++     * bean 名只影响按名查找，改方法名反而会波及所有注入点。
++     */
++    @Bean("omsRedisConfigProperties")
+     @ConfigurationProperties(prefix = "oms")
+     public RedisConfigProperties redisConfigProperties() {
+         return new RedisConfigProperties();
+diff --git a/realserver/common/oms/pom.xml b/realserver/common/oms/pom.xml
+index 5949dec..2e888cc 100644
+--- a/realserver/common/oms/pom.xml
++++ b/realserver/common/oms/pom.xml
+@@ -29,9 +29,13 @@
+ 			<groupId>org.apache.commons</groupId>
+ 			<artifactId>commons-pool2</artifactId>
+ 		</dependency>
++		<!-- RedisUtilConfig 直接使用 GenericJackson2JsonRedisSerializer，需要 jackson-databind。
++		     之前该依赖是通过 realserver-entity 传递进来的；解耦 realserver-entity 后必须显式声明，
++		     否则 RedisTemplate 会因 NoClassDefFoundError(StdTypeResolverBuilder) 而创建失败。
++		     版本由根 pom 的 dependencyManagement 统一管理（${jackson.version}）。 -->
+ 		<dependency>
+-			<groupId>com.sac.platform</groupId>
+-			<artifactId>realserver-entity</artifactId>
++			<groupId>com.fasterxml.jackson.core</groupId>
++			<artifactId>jackson-databind</artifactId>
+ 		</dependency>
+ 		<dependency>
+ 			<groupId>io.lettuce</groupId>
+diff --git a/realserver/dao/src/main/java/com/sac/platform/realserver/dao/impl/OmsWriteDaoImpl.java b/realserver/dao/src/main/java/com/sac/platform/realserver/dao/impl/OmsWriteDaoImpl.java
+index c3f8526..3eb4f7f 100644
+--- a/realserver/dao/src/main/java/com/sac/platform/realserver/dao/impl/OmsWriteDaoImpl.java
++++ b/realserver/dao/src/main/java/com/sac/platform/realserver/dao/impl/OmsWriteDaoImpl.java
+@@ -9,6 +9,7 @@
+ package com.sac.platform.realserver.dao.impl;
+ 
+ import java.util.HashMap;
++import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.stream.Collectors;
+@@ -143,7 +144,17 @@ public class OmsWriteDaoImpl implements OmsWriteDao {
+ 
+     @Override
+     public boolean batchWriteByHashData(List<HashData> hashDatas) {
+-        realRedisPipelineUtil.opsHashSetPipeByHashData(hashDatas);
++        if (hashDatas == null || hashDatas.isEmpty()) {
++            return true;
++        }
++        // 分组逻辑放在业务侧（这里），基础设施层只接受 Map，不依赖 realserver-entity。
++        // 集群与单机两种模式下 opsHashSetPipe 的行为与原 opsHashSetPipeByHashData 一致。
++        Map<String, Map<String, Object>> grouped = new LinkedHashMap<>();
++        for (HashData hashData : hashDatas) {
++            grouped.computeIfAbsent(hashData.getKey(), k -> new LinkedHashMap<>())
++                    .put(hashData.getFied(), hashData.getValue());
++        }
++        realRedisPipelineUtil.opsHashSetPipe(grouped);
+         return true;
+     }
+ 
+diff --git a/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImpl.java b/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImpl.java
+index 4889a73..baf4f4e 100644
+--- a/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImpl.java
++++ b/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImpl.java
+@@ -3,7 +3,7 @@
+  * @Author: caileiming boboclmomi@163.com
+  * @Date: 2022-06-13 15:48:25
+  * @LastEditors: caileiming boboclmomi@163.com
+- * @LastEditTime: 2026-10-22 10:00:00
++ * @LastEditTime: 2026-10-28 10:00:00
+  * @Description: Kafka 数据写入 Redis，集群/单机/哨兵模式自适应。
+  *               写入失败做有限重试并记录失败点数，避免哨兵切换期间静默丢数据。
+  */
+@@ -237,61 +237,26 @@ public class OmsWriteByKafkaServiceImpl implements BatchOmsWriteService<String>
+     }
+ 
+     /**
+-     * 基于 Jedis 的批量写入（带时间戳对比逻辑）
+-     * 集群模式：已不再使用 Jedis，委托给 redisRealDataService
+-     * 单机模式：保持原有 Jedis Pipeline 实现
++     * 批量写入。
++     *
++     * 集群与单机统一走 redisRealDataService：它在集群模式下按 slot 分组 pipeline，
++     * 在单机模式下用 executePipelined。
++     *
++     * 原先这里还有一条「单机用裸 Jedis pipeline」的分支（batchWirteJedisStandalone），
++     * 已删除——它依赖 jedis.properties 构造单节点 JedisPool，而该文件在生产环境并不存在
++     * （静态初始化直接 NPE）；且集群下单节点 Jedis 根本无法跨节点 pipeline。
+      */
+     public void batchWirteJedis(List<ConsumerRecord<String, String>> data, String prefix) {
+         if (data == null || data.isEmpty()) {
+             return;
+         }
+-        if (isCluster) {
+-            // 集群模式：Jedis 单连接无法跨节点 pipeline，需走 RedisRealDataService
+-            List<String> pointList = new ArrayList<>();
+-            for (ConsumerRecord<String, String> record : data) {
+-                if (record.key() != null && record.value() != null) {
+-                    pointList.add(record.key() + ";" + record.value());
+-                }
+-            }
+-            redisRealDataService.wirteOmsPip(prefix, pointList);
+-            return;
+-        }
+-        // 单机模式：原 Jedis Pipeline 实现保持不变
+-        batchWirteJedisStandalone(data, prefix);
+-    }
+-
+-    /**
+-     * 单机模式：Jedis Pipeline 实现
+-     * 注意：包含时间戳对比逻辑（仅当新值时间更大时更新）
+-     */
+-    private void batchWirteJedisStandalone(List<ConsumerRecord<String, String>> data, String prefix) {
+-        try (redis.clients.jedis.Jedis jedis = com.sac.platform.realserver.oms.utils.JedisPoolUtils.getJedis();
+-                redis.clients.jedis.Pipeline pl = jedis.pipelined()) {
+-            for (ConsumerRecord<String, String> item : data) {
+-                Long obid = Long.parseLong(item.key());
+-                int otype = SystemIDUtil.extractOType(obid);
+-                String key = prefix + ":" + otype + ":" + obid;
+-                String[] atypeRecord = item.value().split(";");
+-                for (int num = 0; num < atypeRecord.length; num++) {
+-                    String[] contents = atypeRecord[num].split(",");
+-                    String atype = contents[0];
+-                    String value = contents[2] + "," + contents[3] + "," + contents[1];
+-                    redis.clients.jedis.Response<String> recordByte = pl.hget(key, atype);
+-                    if (null != recordByte && !recordByte.get().trim().equals("")) {
+-                        String recordValue = recordByte.get();
+-                        String[] recordContents = recordValue.split(",");
+-                        if (Long.valueOf(recordContents[1]) < Long.valueOf(contents[3])) {
+-                            pl.hset(key, atype, value);
+-                        }
+-                    } else {
+-                        pl.hset(key, atype, value);
+-                    }
+-                }
++        List<String> pointList = new ArrayList<>();
++        for (ConsumerRecord<String, String> record : data) {
++            if (record.key() != null && record.value() != null) {
++                pointList.add(record.key() + ";" + record.value());
+             }
+-            pl.sync();
+-        } catch (Exception e) {
+-            logger.error("batchWirteJedis failed, prefix={}, size={}", prefix, data.size(), e);
+         }
++        redisRealDataService.wirteOmsPip(prefix, pointList);
+     }
+ 
+ }
+diff --git a/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/config/RedisPropertiesConfig.java b/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/config/RedisPropertiesConfig.java
+deleted file mode 100644
+index 0ef349d..0000000
+--- a/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/config/RedisPropertiesConfig.java
++++ /dev/null
+@@ -1,32 +0,0 @@
+-/** 
+- * @Author: caileiming boboclmomi@163.com
+- * @Date: 2025-06-10 13:39:35
+- * @LastEditors: caileiming boboclmomi@163.com
+- * @LastEditTime: 2025-07-16 16:21:03
+- * @FilePath: \backend\realserver\plugins\rtdata-module\src\main\java\com\sac\platform\config\RedisPropertiesConfig.java
+- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+- */
+-// /** 
+-//  * @Author: caileiming boboclmomi@163.com
+-//  * @Date: 2022-07-25 16:30:18
+-//  * @LastEditors: caileiming boboclmomi@163.com
+-//  * @LastEditTime: 2022-07-25 19:17:14
+-//  * @FilePath: \realserver\rtdata-consumer\src\main\java\com\sac\platform\config\RedisPropertiesConfig.java
+-//  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+-//  */
+-// package com.sac.platform.config;
+-
+-// import org.springframework.boot.context.properties.ConfigurationProperties;
+-// import org.springframework.context.annotation.Bean;
+-// import org.springframework.context.annotation.Configuration;
+-
+-// import com.sac.platform.realserver.oms.config.RedisConfigProperties;
+-
+-// @Configuration
+-// public class RedisPropertiesConfig {
+-//     @Bean
+-//     @ConfigurationProperties(prefix = "oms")
+-//     public RedisConfigProperties redisConfigProperties() {
+-//         return new RedisConfigProperties();
+-//     }
+-// }
+diff --git a/realserver/controller/src/main/resources/application.yml b/realserver/controller/src/main/resources/application.yml
+index c98274d..3e3804c 100644
+--- a/realserver/controller/src/main/resources/application.yml
++++ b/realserver/controller/src/main/resources/application.yml
+@@ -19,9 +19,22 @@
+ #     object-type:
+ #       31: DPSPoint
+ #       33: MVPoint
+-# oms:
+-#   database: 0
+-#   hostname: 10.137.220.191
+-#   port: 6379
+-#   password: sac888
+-#   timeout: 5000
++oms:
++  # Redis 部署模式：standalone | cluster | sentinel
++  # 显式写出，不依赖默认值——默认值 standalone 会让下面 clusters 缺失时静默走错分支
++  redisMode: cluster
++  # 集群节点列表（host:port）。redisMode=cluster 时必填
++  # TODO(部署): 换成生产真实地址后，必须同步 Nacos 上同名配置
++  clusters:
++    - 127.0.0.1:6379
++  password: ""
++  # 集群模式固定 db 0（Redis Cluster 不支持 SELECT）
++  database: 0
++  timeout: 5000
++  connectTimeout: 2000
++  readTimeout: 5000
++  maxWait: 3000
++  # 连接池：三个应用并发量不同，可各自覆盖
++  maxTotal: 200
++  maxIdle: 50
++  minIdle: 10
+diff --git a/modelserver/controller/src/main/java/com/sac/platform/modelserver/config/RedisPropertiesConfig.java b/modelserver/controller/src/main/java/com/sac/platform/modelserver/config/RedisPropertiesConfig.java
+deleted file mode 100644
+index ca339e1..0000000
+--- a/modelserver/controller/src/main/java/com/sac/platform/modelserver/config/RedisPropertiesConfig.java
++++ /dev/null
+@@ -1,26 +0,0 @@
+-// /**
+-// * @Author: caileiming boboclmomi@163.com
+-// * @Date: 2022-08-18 12:18:17
+-// * @LastEditors: caileiming boboclmomi@163.com
+-// * @LastEditTime: 2022-08-18 12:18:19
+-// * @FilePath:
+-// \modelserver\controller\src\main\java\com\sac\platform\modelserver\config\RedisPropertiesConfig.java
+-// * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置:
+-// https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+-// */
+-// package com.sac.platform.modelserver.config;
+-
+-// import org.springframework.boot.context.properties.ConfigurationProperties;
+-// import org.springframework.context.annotation.Bean;
+-// import org.springframework.context.annotation.Configuration;
+-
+-// import com.sac.platform.realserver.oms.config.RedisConfigProperties;
+-
+-// @Configuration
+-// public class RedisPropertiesConfig {
+-// @Bean
+-// @ConfigurationProperties(prefix = "oms")
+-// public RedisConfigProperties redisConfigProperties() {
+-// return new RedisConfigProperties();
+-// }
+-// }
+diff --git a/modelserver/controller/src/main/resources/application.yml b/modelserver/controller/src/main/resources/application.yml
+index 10a9328..6ee49df 100644
+--- a/modelserver/controller/src/main/resources/application.yml
++++ b/modelserver/controller/src/main/resources/application.yml
+@@ -86,11 +86,22 @@
+ #     workerId: 1
+ #     #序列号
+ #     datacenterId: 1
+-# oms:
+-#   database: 0
+-#   hostname: 10.137.220.191
+-#   #hostname: 127.0.0.1
+-#   port: 6379
+-#   password: sac888
+-#   #password:
+-#   timeout: 5000
++oms:
++  # Redis 部署模式：standalone | cluster | sentinel
++  # 显式写出，不依赖默认值——默认值 standalone 会让下面 clusters 缺失时静默走错分支
++  redisMode: cluster
++  # 集群节点列表（host:port）。redisMode=cluster 时必填
++  # TODO(部署): 换成生产真实地址后，必须同步 Nacos 上同名配置
++  clusters:
++    - 127.0.0.1:6379
++  password: ""
++  # 集群模式固定 db 0（Redis Cluster 不支持 SELECT）
++  database: 0
++  timeout: 5000
++  connectTimeout: 2000
++  readTimeout: 5000
++  maxWait: 3000
++  # 连接池：三个应用并发量不同，可各自覆盖
++  maxTotal: 200
++  maxIdle: 50
++  minIdle: 10
+diff --git a/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java b/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
+index c5c5222..022df57 100644
+--- a/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
++++ b/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
+@@ -70,8 +70,17 @@ public class CacheServiceImpl implements CacheService {
+ 
+     /**
+      * 集群模式：按 master 节点流式 SCAN，逐 key 删除。
+-     * 不能批量 delete：Jedis 3.10 的 JedisCluster.del(byte[]...) 以首个 key 定槽，
+-     * 跨槽批量删除会报 CROSSSLOT。
++     *
++     * 不用批量 delete 的真正理由有两条，都不是 CROSSSLOT：
++     * 1) 集群下 redisTemplate.keys(pattern) 只返回它落到的那一个节点的结果
++     *    （KEYS 是单节点命令），拿它当全集批量删会漏删其它 master 上的 key；
++     *    而且 KEYS 会在每个 master 上阻塞式全量扫描（O(N)），
++     *    并把整个集群的 keyspace 一次性拉进 JVM 堆内存。
++     * 2) 逐 key 删除可以在拿到 key 的同时立刻释放，不需要先把全集攒在内存里。
++     *
++     * 顺带说明：Spring Data Redis 2.7 的 JedisClusterKeyCommands.del 实际上会
++     * 判断 isSameSlotForAllKeys，跨槽时会按节点拆分执行，并不会抛 CROSSSLOT
++     * —— 旧注释这里说错了。
+      */
+     private void clearModelCacheCluster() {
+         String pattern = redisConfig.getKeyPrefix() + "*";

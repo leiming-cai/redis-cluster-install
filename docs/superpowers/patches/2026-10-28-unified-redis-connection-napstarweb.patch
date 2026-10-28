@@ -1,0 +1,77 @@
+diff --git a/web-controller/src/main/java/com/sac/application/napstarweb/config/RedisPropertiesConfig.java b/web-controller/src/main/java/com/sac/application/napstarweb/config/RedisPropertiesConfig.java
+deleted file mode 100644
+index 46c3e0d..0000000
+--- a/web-controller/src/main/java/com/sac/application/napstarweb/config/RedisPropertiesConfig.java
++++ /dev/null
+@@ -1,35 +0,0 @@
+-/**
+- * @Author: caileiming boboclmomi@163.com
+- * @Date: 2024-03-04 15:46:56
+- * @LastEditors: caileiming boboclmomi@163.com
+- * @LastEditTime: 2025-10-09 15:23:34
+- * @FilePath: \backend\napstarweb\web-controller\src\main\java\com\sac\application\napstarweb\config\RedisPropertiesConfig.java
+- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置:
+- *               https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+- */
+-// /**
+-// * @Author: caileiming boboclmomi@163.com
+-// * @Date: 2022-07-29 14:16:59
+-// * @LastEditors: caileiming boboclmomi@163.com
+-// * @LastEditTime: 2022-07-29 14:17:02
+-// * @FilePath:
+-// \napstarweb\web-controller\src\main\java\com\sac\application\napstarweb\config\RedisPropertiesConfig.java
+-// * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置:
+-// https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+-// */
+-// package com.sac.application.napstarweb.config;
+-
+-// import org.springframework.boot.context.properties.ConfigurationProperties;
+-// import org.springframework.context.annotation.Bean;
+-// import org.springframework.context.annotation.Configuration;
+-
+-// import com.sac.platform.realserver.oms.config.RedisConfigProperties;
+-
+-// @Configuration
+-// public class RedisPropertiesConfig {
+-// @Bean
+-// @ConfigurationProperties(prefix = "oms")
+-// public RedisConfigProperties redisConfigProperties() {
+-// return new RedisConfigProperties();
+-// }
+-// }
+diff --git a/web-controller/src/main/resources/application.yml b/web-controller/src/main/resources/application.yml
+index 07ffbb5..ba1ebc8 100644
+--- a/web-controller/src/main/resources/application.yml
++++ b/web-controller/src/main/resources/application.yml
+@@ -105,12 +105,25 @@
+ #       enable: true
+ # report:
+ #   path: /opt/software/report/
+-# oms:
+-#   database: 0
+-#   hostname: 10.137.220.108
+-#   port: 6379
+-#   password: sac888
+-#   timeout: 5000
++oms:
++  # Redis 部署模式：standalone | cluster | sentinel
++  # 显式写出，不依赖默认值——默认值 standalone 会让下面 clusters 缺失时静默走错分支
++  redisMode: cluster
++  # 集群节点列表（host:port）。redisMode=cluster 时必填
++  # TODO(部署): 换成生产真实地址后，必须同步 Nacos 上同名配置
++  clusters:
++    - 127.0.0.1:6379
++  password: ""
++  # 集群模式固定 db 0（Redis Cluster 不支持 SELECT）
++  database: 0
++  timeout: 5000
++  connectTimeout: 2000
++  readTimeout: 5000
++  maxWait: 3000
++  # 连接池：三个应用并发量不同，可各自覆盖
++  maxTotal: 200
++  maxIdle: 50
++  minIdle: 10
+ # shiroconfig:
+ #   perms:
+ #     - url: /unauth
