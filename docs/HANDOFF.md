@@ -1,10 +1,17 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-28
-**工作分支**：无 —— 第七~十二轮都在 `main` 上，**全部已推送**
+**工作分支**：无 —— 第七~十三轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
 **基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十二轮已推送
 （`525d07a..856d1b8`），bats **199 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0）
+**第十三轮（2026-10-28）**：**统一三个工程的 Redis 连接基础设施**
+（`realserver` / `modelserver` / `napstarweb`）。两步：① 修配置契约
+（`oms:` 块补全、bean 改名、删三个墓碑）；② 给 `realserver-oms` **瘦身**
+（解开对 `realserver-entity` 的依赖、删两个死代码类、27 个集群不安全方法加
+`@Deprecated`）。**最重要的收获：我原先那 20 条"跨槽会抛 CROSSSLOT"的注释是错的** ——
+SDR 2.7.18 大多**不抛**，而是**静默降级**成非原子的客户端实现。
+详见下文「第十三轮」。
 **第十二轮（2026-10-28）**：把「两台机器 + Redis 已装好」这个实际需求落进
 `cluster-config.sh` —— 第 9 步从「单条 `--cluster create --cluster-replicas 1`」
 改成**两阶段装配**（先建主、再逐个显式挂副本），新增 `lib/topology.sh`（纯函数
@@ -279,7 +286,161 @@ Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 
 ---
 
-## 第十二轮（2026-10-28）：两台机器 6 实例的显式主从装配
+## 第十三轮（2026-10-28）：统一三个工程的 Redis 连接基础设施
+
+**这一轮回答的问题是：三个独立部署的工程，怎么共用同一份 Redis 连接配置与连接代码？**
+
+涉及工程：`realserver`、`modelserver`、`napstarweb`（三个独立进程）。
+
+### 一、结论先行
+
+**统一早就"事实上"发生了，只是没人设计过它。**
+
+依赖链实测（`realserver-oms` 已被 `idgenerator` / `realserver-service` 传递依赖，
+三个工程的 `@ComponentScan` 都会扫到 `com.sac.platform.realserver.oms.config`）：
+
+```
+realserver-oms (RedisUtilConfig / RedisConfigProperties / RedisClusterHelper / …)
+   ↑ 被 modelserver（经 idgenerator）与 napstarweb（经 realserver-service）共用
+```
+
+**所以不需要"全局注入 JedisCluster"。** 反编译 `spring-data-redis-2.7.18` +
+`jedis-3.10.0` 确认：`JedisConnectionFactory` 在 `afterPropertiesSet` 里
+`createCluster()` 并持有那**一个** `JedisCluster`，`getNativeConnection()` 返回的就是它。
+**自己再造一个 = 第二个实例 = 连接池翻倍（200→400）+ slot 缓存分裂**，
+而且 `RedisClusterHashPipeline` 恰恰是靠"不共享 slot 缓存"精心设计的。
+
+真正的问题是**四层**：
+
+| # | 缺陷 | 等级 |
+|---|---|---|
+| A | 三个应用的 `oms:` 配置块**全是注释** → `redisMode` 取默认 `standalone` → 启动失败。全靠 Nacos 兜底 | P0 |
+| B | `RedisPropertiesConfig` **bean 名冲突** —— 三个工程各留了一个**被注释的墓碑**，都是同一次失败尝试 | P0 |
+| C | `realserver-oms` 依赖 `realserver-entity`（实时数据域业务实体）→ `common/idgenerator` 这个公共库被迫拖进业务实体层 | P1 |
+| D | 共享模块里有 2100+ 行死代码，其中 13 组方法在集群下不安全 | P2 |
+
+### 二、⭐ 本轮最重要的收获：**我写错了 20 条注释**
+
+Task 1 给 13 组集群不安全方法加 `@Deprecated` 时，我写的是"跨槽会抛 CROSSSLOT 错误"。
+**代码质量审查逐条核对了 spring-data-redis 2.7.18 的源码，结论是：这 20 条大多是错的。**
+
+| 命令 | 跨槽时的**真实**行为 |
+|---|---|
+| `keys()` | `executeCommandOnAllNodes` + 取并集 → 返回**整个集群的 keyspace**（不是只返回一个节点！） |
+| `del` / `mGet` / `mSet` / `mSetNX` | 按 slot 拆分 → **不抛** CROSSSLOT |
+| `rename` | 降级成 `DUMP → RESTORE(dst,0,REPLACE) → DEL` → **不抛**，但**非原子**且**丢 TTL** |
+| `renameNX` | 同上，但 `RESTORE(dst,0)` **不带 REPLACE**，且先 `EXISTS` 判断 |
+| `rPopLPush` | 降级成 `RPOP + LPUSH` → **不抛**，非原子，崩溃丢元素 |
+| `sMove` | 降级成 `EXISTS → SREM → SISMEMBER → SADD` **四步** → **不抛**；`SISMEMBER` 为真时跳过 `SADD` → **元素静默丢失** |
+| `SINTER`/`SUNION`/`SDIFF` | 逐 key `SMEMBERS` 后**在 JVM 里算** → **不抛**，非原子，整集合进堆 |
+| `ZUNIONSTORE`/`ZINTERSTORE` | **真的失败**，但抛的是 `InvalidDataAccessApiUsageException`（"can only be executed when all keys map to the same slot"），**不是** CROSSSLOT |
+| `MOVE` | 抛 `UnsupportedOperationException("Cluster mode does not allow moving keys.")` |
+
+**真正的风险不是"会抛异常"，而是"静默地、不原子地做错事"。**
+一个照着原注释排查的人会去找一个永远不会出现的异常，
+而真正会咬人的（rename 丢 TTL、sMove 丢元素、`KEYS` 拉爆内存）反而看不见。
+
+> **教训（与本文件里其它教训同源）：关于第三方库行为的断言，必须去看它的源码/字节码，
+> 不能靠"常识"推断。** 这次是我自己写的注释错了，被审查抓出来。
+> 同类错误在这个项目里已经出现过多次（DoD5 提升判定、`ReadWritePaths` 缺目录、
+> 裸 `| grep` 断言、空转断言）——**"写下了一个自己从没执行过的假设"**。
+
+### 三、改了什么（10 改 + 5 删 + 2 未改）
+
+**第一步 · 配置契约**
+| 改动 | 文件 |
+|---|---|
+| `oms:` 块补全（三个应用**完全相同**，`redisMode: cluster` **显式写出**） | 三个 `application.yml` |
+| bean 名 `redisConfigProperties` → `omsRedisConfigProperties` | `realserver-oms/…/config/RedisPropertiesConfig.java` |
+| 删三个"在消费方自己加一份配置类"的失败墓碑 | `napstarweb` / `modelserver` / `rtdata-module` 各一个 |
+
+**第二步 · `realserver-oms` 瘦身**
+| 改动 | 说明 |
+|---|---|
+| 删 `opsHashSetPipeByHashData(List<HashData>)` | `OmsWriteDaoImpl` 改调已有的 `opsHashSetPipe(Map)`，分组逻辑挪到业务侧 |
+| `oms/pom.xml` 去掉 `realserver-entity` | **oms 现在零 `com.sac.platform` 依赖** |
+| `oms/pom.xml` 显式加 `jackson-databind` | 之前是**通过 `realserver-entity` 传递**进来的，解耦后暴露出来 |
+| 删 `JedisUtils.java`（~700 行）、`JedisPoolUtils.java`（~50 行） | 死代码；后者静态读**不存在的** `jedis.properties` → 一调用就 NPE |
+| 删 `batchWirteJedisStandalone` | 单机裸 Jedis pipeline 分支；`batchWirteJedis` 改为集群/单机统一走 `wirteOmsPip` |
+| **27** 个方法加 `@Deprecated` + 准确 javadoc | 26 个原计划 + 1 个 `lBRightPopAndLeftPush`（审查时发现它同样有风险） |
+
+### 四、⭐ 让宿主机上的 Java 能用真集群
+
+之前只做到"端口可达"（socat 转发 `16379-16384` → `127.0.0.1`），
+但 **Jedis 仍然连不上**：`Cluster retry deadline exceeded.`
+
+**根因**：Jedis 连上种子节点后，会按 `CLUSTER SLOTS` 返回的**真实地址**去路由命令，
+而集群广播的是 `172.21.0.2:6379` —— Windows 宿主机**没有**到 `172.21.0.0/16` 的路由。
+
+**解法**：让集群广播宿主机可达的地址（**运行期**改动，只针对这套一次性 E2E 集群）：
+```
+CONFIG SET cluster-announce-ip   127.0.0.1
+CONFIG SET cluster-announce-port  16379 / 16380 / …
+```
+> ⚠️ **`cluster-announce-bus-port` 不能改** —— 它是节点**之间**通信用的，
+> 改了会让集群内部链路断掉（节点全部 `disconnected`）。改回 `0` 即恢复。
+
+### 五、验证结果
+
+| 检查 | 结果 |
+|---|---|
+| `realserver` / `modelserver` / `napstarweb` 全量 `clean install` | 三个都 **EXIT=0** |
+| `realserver-oms` 单测 | **56/56 绿**（基线 50 → 新增 6） |
+| `rtdata-module` 单测 | **14/14 绿** |
+| `oms` 依赖树 | 只剩自己，**零 `com.sac.platform` 依赖** |
+| `idgenerator` 依赖树 | **不含 `realserver-entity`** |
+| 三个应用启动 | **三个都打印** `*** Using Redis Cluster with nodes: … (connectTimeout=2000ms, readTimeout=5000ms, maxWait=3000ms)` |
+| **真集群 L3 契约测试** | `Tests run: 2, Failures: 0, Errors: 0, **Skipped: 0**`（真写真读了集群） |
+| patch 反向校验 | 两个根都 **exit 0** |
+| patch 正向重建 | 从纯净基线重建 → 与现网**逐文件 hash 比对** → **0 mismatch** |
+
+**三个应用启动时都只在 Nacos 上失败**（`node1:18848` 不可达），与 Redis 无关；
+Redis 的 bean 在那之前就已装配好并打印了配置行。
+
+### 六、留痕
+
+| 东西 | 位置 |
+|---|---|
+| 设计文档 | `docs/superpowers/specs/2026-10-28-unified-redis-connection-design.md` |
+| 实施计划 | `docs/superpowers/plans/2026-10-28-unified-redis-connection.md` |
+| 执行记录（含每一步的证据与踩坑） | `docs/superpowers/plans/2026-10-28-unified-redis-connection-progress.md` |
+| **代码 patch** | `docs/superpowers/patches/2026-10-28-unified-redis-connection-platform-backend.patch`（13 个文件）<br>`docs/superpowers/patches/2026-10-28-unified-redis-connection-napstarweb.patch`（2 个文件）<br>`docs/superpowers/patches/2026-10-28-unified-redis-connection.patch`（合并 15 个，仅用于合成仓库） |
+
+> **Java 源码不在本仓库**（`backend` 与 `napstarweb` **都不是 git 仓库**），
+> 所以改动只能以 patch 留痕。校验方式：
+> ```powershell
+> cd D:\javawork\1.2\cpscloud1.0\code\platform\backend
+> git apply --reverse --check "<patch>"    # 退出码 0 = 磁盘上仍是 patch 的后像
+> ```
+> **注意**：源文件行尾是**混的**（`pom.xml` 是 LF，`.java` 是 CRLF），
+> patch 用 `core.autocrlf=false` 生成。**不要重新规范化这些文件**，否则 patch 会失效。
+
+### 七、下一轮该做什么
+
+1. **填生产真值**：三个 `application.yml` 里的 `oms.clusters` 现在是**占位符**
+   `127.0.0.1:6379`，必须换成生产地址，并同步 Nacos 上的同名配置。
+   （`password` 也是空串，靠 Nacos 提供。）
+2. **设 `cluster_require_full_coverage=no`**（第十二轮的键）—— 默认 `yes` 时
+   **任一 master 挂掉 = 全集群停写**；2 机部署必须设 `no`。
+3. **读侧 pipeline**（`RedisClusterHashPipeline.getAllHashes`）——
+   `findByOtype` / `findByOtypeIds` 在集群下是 **N 次串行 `HGETALL`**，
+   写侧第十轮已按节点 pipeline 化，**读侧还没有**。这是同一根因的另一半。
+4. **合并三套 `RedisUtil`**：`oms` / `idgenerator` / `modelserver` 各一份。
+
+### 八、给下一个执行者的三个坑
+
+1. **`mvn spring-boot:run` 会 fork 新 JVM，不传递 Maven 的 `-D` 系统属性**。
+   `-Doms.clusters[0]=…` **无效**；要写
+   `"-Dspring-boot.run.jvmArguments=-Doms.clusters[0]=… -Doms.password=…"`。
+2. **`oms` 的 pom 配了 proguard，它要 JDK 8 的 `rt.jar`**，JDK 9+ 没有 →
+   `Can't read .../jre/lib/rt.jar`。构建前确认 `JAVA_HOME` 是
+   `D:\java\java-se-8u42-ri`（本机有两个 JDK，subagent 的 shell 拿到的是 JDK 21）。
+3. **PowerShell 里 `-D` 参数必须加引号**：`"-Dproguard.skip=true"`。
+   不加会被拆成 `.skip=true`，maven 报 `Unknown lifecycle phase`。
+   另外 **绝不要用 `Set-Content` 改 Java/YAML**（会加 BOM + CRLF，直接编译失败），
+   **也绝不要用它改本仓库的 md**（会加 BOM 并把 LF 换成 CRLF）。
+
+---
 
 **这一轮回答的问题是：两台机器、Redis 已装好，怎么配成集群？**
 

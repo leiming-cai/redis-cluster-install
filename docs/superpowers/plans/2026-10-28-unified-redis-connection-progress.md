@@ -32,7 +32,7 @@ $TMP  = "C:\Users\蔡雷鸣\AppData\Local\Temp\opencode"
 | 6 | 删 `JedisUtils` / `JedisPoolUtils` | ✅ DONE |
 | 7 | 修正错误注释 | ✅ DONE |
 | 8 | 生成 patch 并留痕 | ✅ DONE |
-| 9 | 三个应用最终验证（含真集群 L3） | ☐ |
+| 9 | 三个应用最终验证（含真集群 L3） | ✅ DONE |
 
 ## 完成记录
 
@@ -300,6 +300,40 @@ bean 名 `redisConfigProperties` → **`omsRedisConfigProperties`**（显式 `@B
 > **⭐ 还有一点：一个 patch 无法同时反向应用到两个根** —— 两条树的路径前缀不同
 > （`realserver/...` 与 `web-controller/...` 分属不同的绝对根），
 > 几何上不可能。所以**按根拆成两份**，合并版只用于合成仓库。README 里写清楚了。
+
+### Task 9 — 三个应用最终验证 ✅
+
+| 检查 | 结果 |
+|---|---|
+| `realserver` 全量 `clean install` | **EXIT=0** |
+| `modelserver` 全量 `clean install` | **EXIT=0** |
+| `napstarweb` 全量 `clean install` | **EXIT=0** |
+| `realserver-oms` 单测 | **56/56 绿** |
+| `rtdata-module` 单测 | **14/14 绿** |
+| `oms` 依赖树 | 只剩自己，**零 `com.sac.platform` 依赖** |
+| `idgenerator` 依赖树 | **不含 `realserver-entity`** |
+| 三个应用启动 | **三个都打印** `*** Using Redis Cluster with nodes: 127.0.0.1:16379 (connectTimeout=2000ms, readTimeout=5000ms, maxWait=3000ms)` |
+| 真集群契约测试 | `Tests run: 2, Failures: 0, Errors: 0, **Skipped: 0**` |
+
+> **三个应用都只在 Nacos 上失败**（`node1:18848` 不可达，
+> `NacosException: Client not connected, current status:STARTING`）——
+> 与 Redis 无关。**Redis 的 bean 在那之前就已经装配好并打印了配置行**，
+> 所以 Redis 侧的验证是成立的。
+
+> **⭐ 一个验证工具链的坑**：`mvn spring-boot:run` **会 fork 一个新 JVM**，
+> **不会把 Maven 的 `-D` 系统属性传进去** —— 所以
+> `-Doms.clusters[0]=127.0.0.1:16379` **无效**，应用仍然读到 yml 里的占位符 `6379`。
+> 正确写法是：
+> ```powershell
+> "-Dspring-boot.run.jvmArguments=-Doms.clusters[0]=127.0.0.1:16379 -Doms.password=CpsE2eClusterPw"
+> ```
+> （验证时用的，**没有写进任何 yml** —— 已核对三个 yml 里
+> `16379` 与 `CpsE2eClusterPw` 出现 **0** 次。）
+
+> **本轮结束时的工作树**：**10 改 + 5 删 + 2 未改**，与预期完全一致，
+> **无任何意外改动**。未改的两个是 `RedisUtilConfig.java` 与
+> `RedisConfigProperties.java`（它们本来就不需要改）。
+
 
 
 
