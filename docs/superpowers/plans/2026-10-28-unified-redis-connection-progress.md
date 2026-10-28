@@ -30,7 +30,7 @@ $TMP  = "C:\Users\蔡雷鸣\AppData\Local\Temp\opencode"
 | 4 | 补全三个应用的 `oms:` 配置块 | ✅ DONE |
 | 5 | 删 `opsHashSetPipeByHashData`，解开对 `realserver-entity` 的依赖 | ✅ DONE |
 | 6 | 删 `JedisUtils` / `JedisPoolUtils` | ✅ DONE |
-| 7 | 修正错误注释 | ☐ |
+| 7 | 修正错误注释 | ✅ DONE |
 | 8 | 生成 patch 并留痕 | ☐ |
 | 9 | 三个应用最终验证（含真集群 L3） | ☐ |
 
@@ -246,6 +246,28 @@ bean 名 `redisConfigProperties` → **`omsRedisConfigProperties`**（显式 `@B
 >    `D:\java\jdk-21.0.2`（subagent 那个 shell）。**oms 的 pom 配了 proguard，
 >    它要 JDK 8 的 `rt.jar`**，JDK 9+ 没有这个文件 → `Can't read .../rt.jar`。
 >    用 JDK 8 构建则正常。**涉及 `mvn install` 的任务要留意这个差异。**
+
+### Task 7 — 修正错误注释 ✅
+
+`modelserver/…/CacheServiceImpl.clearModelCacheCluster` 的注释原文说
+"不能批量 delete：Jedis 3.10 的 `JedisCluster.del(byte[]...)` 以首个 key 定槽，
+跨槽批量删除会报 CROSSSLOT" —— **这句是错的**（SDR 2.7.18 会按 slot 拆分，不抛）。
+已改成准确的表述：不用批量 delete 的真正理由是
+① 集群下 `redisTemplate.keys()` 只返回它落到的那**一个**节点的结果（漏删）
+＋ `KEYS` 阻塞 O(N) ＋ 整个 keyspace 进 JVM 堆；
+② 逐 key 删除可以边取边删，不用先把全集攒在内存。
+
+- **证据**：`services EXIT=0`；`oms` 56/56 绿；无 BOM；行尾保持 CRLF
+
+> **全树 CROSSSLOT 扫描结果**：Java 文件里共 27 处 ——
+> `RedisUtil.java` 25 处**全部**是"不会抛 CROSSSLOT"的正确表述（Task 1 已修），
+> `CacheServiceImpl.java` 2 处是本次改的。**无一处还在断言"会抛"。**
+>
+> 另有 8 处在 `docs/superpowers/` 下的**历史文档**里
+> （2026-10-22 那轮的 plan/spec/session 记录）。**刻意不改** ——
+> 那是已完成会话的**历史记录**，改它等于篡改当时的决策依据；
+> 而且那些结论（逐 key 删除、流式 SCAN）本身仍然正确。
+
 
 
 
