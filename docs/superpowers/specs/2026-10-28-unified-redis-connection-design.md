@@ -16,10 +16,14 @@
 
 | 工程 | 部署形态 | Redis 连接来源 | `oms:` 配置块 |
 |---|---|---|---|
-| `realserver/controller` | 独立进程 | `realserver-oms` 的 `RedisUtilConfig` | 注释掉，靠 Nacos |
-| `realserver/rtdata-consumer` | 独立进程 | 同上 | jar 内 `application.yml`（E2E 临时地址） |
+| `realserver/controller` | 独立进程 | `realserver-oms` 的 `RedisUtilConfig` | **全注释**（`application.yml:22-27`） |
+| `realserver/rtdata-consumer` | 独立进程 | 同上 | jar 内 `application.yml`（E2E 临时地址，**唯一填了真值的**） |
 | `modelserver/controller` | 独立进程 | **同一份**（经 `idgenerator` 传递依赖 + `@ComponentScan("com.sac.platform")`） | **全注释**（`application.yml:89-96`） |
 | `napstarweb/web-controller` | 独立进程 | **同一份**（经 `realserver-service` 传递依赖 + `@ComponentScan("com.sac")`） | **全注释**（`application.yml:108-113`） |
+
+> **四个应用里三个的 `oms:` 块是全注释的**，只有 `rtdata-consumer` 填了真值
+> —— 而那份真值是 E2E 的临时地址（`172.21.0.x`），**不能带进生产**。
+> 三个应用目前全靠 Nacos 补齐 `oms.*` 才能启动。
 
 依赖链实测：
 
@@ -42,8 +46,9 @@ napstarweb/napstar-app → realserver-service → realserver-oms
 
 #### 缺陷 A（P0）：`oms:` 配置块全注释 → 启动失败
 
-`modelserver/controller/src/main/resources/application.yml:89-96` 与
-`napstarweb/web-controller/src/main/resources/application.yml:108-113`：
+`modelserver/controller/src/main/resources/application.yml:89-96`、
+`napstarweb/web-controller/src/main/resources/application.yml:108-113`、
+`realserver/controller/src/main/resources/application.yml:22-27`：
 
 ```yaml
 # oms:
@@ -214,6 +219,7 @@ P0（配置缺失）与模块重构叠加时，出了问题无法定位是哪一
 | 2 | `realserver-oms/…/config/RedisUtilConfig.java` | 注入点改用新 bean 名 | 跟随改动 1 |
 | 3 | `modelserver/controller/src/main/resources/application.yml` | `oms:` 块**取消注释并补全**（含 `redisMode` / `clusters` / `password`） | 缺陷 A |
 | 4 | `napstarweb/web-controller/src/main/resources/application.yml` | 同上 | 缺陷 A |
+| 3b | `realserver/controller/src/main/resources/application.yml` | 同上 | 缺陷 A（同样是全注释） |
 | 5 | `napstarweb/web-controller/…/config/RedisPropertiesConfig.java` | **删除整个文件**（已全注释，是失败尝试的墓碑） | 缺陷 B：去掉误导 |
 | 6 | `modelserver/controller/…/config/RedisPropertiesConfig.java` | **删除整个文件**（同上墓碑） | 缺陷 B |
 | 7 | `realserver/plugins/rtdata-module/…/config/RedisPropertiesConfig.java` | **删除整个文件**（同上墓碑） | 缺陷 B |
