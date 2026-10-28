@@ -3,7 +3,8 @@
 **更新时间**：2026-10-28
 **工作分支**：无 —— 第七~十二轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = `origin/main`；第十二轮见下方「第十二轮」
+**基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十二轮已推送
+（`525d07a..856d1b8`），bats **199 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0）
 **第十二轮（2026-10-28）**：把「两台机器 + Redis 已装好」这个实际需求落进
 `cluster-config.sh` —— 第 9 步从「单条 `--cluster create --cluster-replicas 1`」
 改成**两阶段装配**（先建主、再逐个显式挂副本），新增 `lib/topology.sh`（纯函数
@@ -1103,20 +1104,22 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 
 | 命令 | 预期结果 |
 |---|---|
-| `bats tests/lib/*.bats tests/*.bats` | **163 通过 / 0 失败** |
-| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **163 通过 / 0 失败**（CI 调用方式） |
-| `bash tests/check_syntax.sh` | `TOTAL=35 FAIL=0` |
-| `bash tests/validate_libs.sh` | `PASS=50 FAIL=0` |
+| `bats tests/lib/*.bats tests/*.bats` | **199 通过 / 0 失败** |
+| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **199 通过 / 0 失败**（CI 调用方式） |
+| `bash tests/check_syntax.sh` | `TOTAL=43 FAIL=0` |
+| `bash tests/validate_libs.sh` | `PASS=54 FAIL=0` |
 | `bash scripts/check-bash-compat.sh` | `BASH_COMPAT: PASS`（在 bash 4.3 上跑同一套 bats） |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 | `bash scripts/e2e-cpsweb-nodes.sh` | `E2E PASSED`，退出码 0（需 Docker + `cpsweb-env:1.0`） |
 
-> 163 是第六轮补了 12 条用例之后的数字（第五轮 151）。
+> **199 是第十二轮的数字**（第十一轮结束时是 186，第十轮结束时是 163）。
+> 第十二轮新增：拓扑算法 15 条 + 配置键 4 条 + 渲染 3 条 + `lib/cluster.sh` 11 条
+> + `cluster-config.sh` 3 条。
 
-> ⚠️ **跑 bats 请用非特权用户。** 整套 bats 现在开了 `set -u`（与生产脚本一致），
-> 而**以 root 跑会掩盖以非特权用户跑才会暴露的问题** —— 第六轮就有一条测试
-> 因为「以 root 跑」而在本地绿、在 CI 红。CI runner 就是非特权用户。
-> **验证环境必须和目标环境一致。**
+> ⚠️ **跑 bats 请用非特权用户**（`docker run --user 1000:1000 ...`）。整套 bats 现在
+> 开了 `set -u`（与生产脚本一致），而**以 root 跑会掩盖以非特权用户跑才会暴露的问题**
+> —— 第六轮就有一条测试因为「以 root 跑」而在本地绿、在 CI 红。CI runner 就是
+> 非特权用户。**验证环境必须和目标环境一致。**
 
 > **E2E 的退出码 0 现在是可信的**（第三轮 `3b6d23a` 之前不是）：
 > 当时 DoD2/DoD3 的断言是裸 `| grep`，失败也不会让脚本非零退出。
@@ -1137,6 +1140,25 @@ $wt="D:\work\rediscluterproject"
 $tmp="C:/Users/蔡雷鸣/AppData/Local/Temp/opencode"
 docker run --rm -v "${wt}:/repo" -w /repo rc-control:bats bash -c "bats tests/cluster_config.bats"
 ```
+
+> **跑 bats 要加 `--user 1000:1000`**（非特权）：
+> ```powershell
+> docker run --rm --user 1000:1000 -v "${wt}:/repo" -w /repo rc-control:bats bash -c "find tests -name '*.bats' -print0 | xargs -0 bats"
+> ```
+> 以 root 跑会掩盖以非特权用户跑才暴露的问题（第六轮吃过这个亏）。
+
+> **`check-bash-compat.sh` 要设 `BASH_COMPAT_HOST_REPO`**（第十二轮新踩）：
+> 它内部还要再起一次 docker，所以从容器里跑时，容器内的 `/repo` daemon 解析不了，
+> 现象是 `find: tests: No such file or directory` + bats 打印用法（退出 123）。
+> ```powershell
+> docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${wt}:/repo" -w /repo `
+>   -e BASH_COMPAT_HOST_REPO="D:/work/rediscluterproject" rc-e2e-runner:local bash -c "bash scripts/check-bash-compat.sh"
+> ```
+> `scripts/e2e-cluster-config.sh` 同理，要设 `E2E_HOST_REPO`（脚本里已有这个变量）。
+
+> **不要用内联 `bash -c '...'` 处理复杂脚本**（第十二轮又踩了一次）：
+> PowerShell 会把 `$(...)`、反引号、多行 heredoc 搅坏，报的错还指向错误的行。
+> 写成 `.sh` 文件挂载进容器执行（同「写文件必须用编辑工具」那条）。
 
 ### 镜像
 
@@ -1596,9 +1618,19 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
   - `scripts/e2e-cpsweb-nodes.sh` 在本轮完整跑过 4 次，最后一次 `KEEP=1`
 - **第八轮**（ZooKeeper + Kafka 两节点集群）直接提交在 main 上，**已推送**：`3a2856d`
   - 验证：`check_syntax 35/0`、`validate_libs 50/0`、bats 163/0；脚本 A1–A7 全绿
-- **✅ `origin/main` 与 `main` 同步**（`git status -sb` 无 ahead/behind）。第十轮推于
-  `0de6426..02db42a`，之后只有文档提交；两次推送都走的 SSH
-  （HTTPS 被网络重置/PAT scope 挡住，见下）。
+- **第九轮**（端到端写入性能测量 + 写入路径诊断）直接提交在 main 上，**已推送**：`c8560a8`
+  - 测量结论：端到端写入上限 ~1.33 万/秒，根因是集群模式下每数据点一次同步 `HMSET` 往返
+- **第十轮**（集群写入按节点 pipeline）直接提交在 main 上，**已推送**：`c8560a8`..`02db42a`
+  - 同机交替 A/B 12 轮：配对中位数 **2.8×**（1.7–4.1×），守恒精确、失败 0
+  - Java 源码不在本仓库，patch 见 `docs/superpowers/patches/2026-10-27-cluster-pipeline.patch`
+- **第十一轮**（两个消费者的对照测试 + 配置搬进 application.yaml）直接提交在 main 上，**已推送**：`43d781d..90c801e`
+  - 验证：`bats 186/0`；`scripts/bench-consumer-write.sh` 新增 `CONSUMERS` / `CONFIG_FROM_YAML`
+- **第十二轮**（两台机器 6 实例的显式主从装配）直接提交在 main 上，**已推送**：`525d07a..856d1b8`
+  - 验证：`bats 199/0`、`check_syntax 43/0`、`validate_libs 54/0`、bash 4.3 `PASS`、
+    `scripts/e2e-cluster-config.sh` `E2E PASSED` 退出码 0（A0–A6 全绿）
+  - 变异检验：去掉异机约束 → A2 变红（实测退出码 1）
+- **✅ `origin/main` 与 `main` 同步**（`git status -sb` 无 ahead/behind）。第十二轮推于
+  `525d07a..856d1b8`；各轮推送都走的 SSH（HTTPS 被 PAT scope 挡住，见下）。
   > 前三轮之所以推不了，是 GitHub 从这台机器不可达
   > （`Recv failure: Connection was reset` / `Failed to connect to github.com:443`），
   > **不是**配置问题。网络恢复后一次推成功。
@@ -1654,43 +1686,58 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ## 下一步具体动作
 
-**第七~十一轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
-第十一轮已推送：`43d781d..90c801e`（CI success）。
+**第七~十二轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
+第十二轮已推送：`525d07a..856d1b8`。
 
-### 下一次会话从这里开始（第十一轮结束时）
+### 下一次会话从这里开始（第十二轮结束时）
 
 ```powershell
 cd D:\work\rediscluterproject
 git status -sb            # main...origin/main，工作区干净
-git log --oneline -3      # 90c801e / 43d781d / 02db42a
+git log --oneline -3      # 856d1b8 / f063299 / 46eb005
 ```
 
 环境（本轮结束时仍在跑，没有拆）：
 
 ```
-rc-cpsweb-app      跑的是**新 jar**（target/rtdata-consumer-1.0.14.jar，140,519,854 B）
+rc-cpsweb-app      跑的是新 jar（target/rtdata-consumer-1.0.14.jar，140,519,854 B）
                    配置来自 jar 内 application.yml（CONFIG_FROM_YAML=1 那轮留下的状态）
 rc-cpsweb-node-a/b Redis 6 节点集群，cluster_state:ok
                    ⚠️ **3 个主全在 node-a**，每主 ~190 万 keys（合计 ~570 万）
 Kafka/ZooKeeper    两节点集群，未改动
-Docker VM          2 vCPU / 3.8 GB；⚠️ **已换出 1.77 GB**，MemAvailable ~470 MB
+Docker VM          2 vCPU / 3.8 GB；MemAvailable ~945 MB，⚠️ **SwapFree 只剩 35 MB**
 ```
 
-### 三个待定/待办，按优先级
+> 本轮的 E2E 容器（`e2e-node-a/b`）已由脚本自己的 trap 清理干净 ✓。
+> 上面这些 `rc-cpsweb-*` 是第十一轮留下的，跟本轮无关。
 
-1. **验证 `max-poll-records`**（最值得先做的一个）：
-   生产 Nacos `share_base` 里是 **100000**，而测试没配 → 生效值是 Spring Boot 默认 **500**
-   （每批 500 条，pipeline 摊薄得差）。做法：在 app 的 `application.yml` 里加
-   `spring.kafka.consumer.max-poll-records: 100000` → 重新打包 → 用
-   `CONFIG_FROM_YAML=1` 跑 3 轮，与本轮记录的 13,333/s 对比。
+### 本轮（第十二轮）的待办，按优先级
+
+1. **填真机信息并上真机**（唯一还欠的事）：
+   把 `cluster.conf` 里的 `<A机IP>` / `<B机IP>` / 密码换成真值 → 先
+   `bash cluster-config.sh --dry-run` 看拓扑 → `bash cluster-config.sh` → 按
+   `docs/USAGE.md` 5.7.8 的「第 5 步：验证」核对 `cluster_state:ok` +
+   `cluster_known_nodes:6`。
+2. **演练一次整机故障**：杀掉「master 数少」的那台 → 期望集群**仍可读写**（降级）；
+   杀掉「master 数多」的那台 → 期望停写（这是**已知限制**，不是 bug）。
+   真机的 `cluster-node-timeout` 是 15000ms，比 E2E 慢，给足等待时间。
+3. **如果需要真正的双机容错**：加到 **3 台机器**。两台机器在数学上做不到对称容错
+   （副本提升要过半 master 存活），见「第十二轮」第八节。
+
+### 第十一轮遗留的待办（仍然有效，与本轮无冲突）
+
+1. **验证 `max-poll-records`**：生产 Nacos `share_base` 里是 **100000**，而测试没配
+   → 生效值是 Spring Boot 默认 **500**（每批 500 条，pipeline 摊薄得差）。
+   做法：在 app 的 `application.yml` 里加 `spring.kafka.consumer.max-poll-records:
+   100000` → 重新打包 → 用 `CONFIG_FROM_YAML=1` 跑 3 轮，与记录的 13,333/s 对比。
    **这很可能比「加消费者」更能解释当前吞吐上限。**
-2. **在干净集群上重测倍率**（收紧「1.7–4.1×，中位数 2.8×」）：
-   当前环境键数已到 ~570 万 + 每轮触发 BGSAVE + VM 换出 1.77 GB，差值不可信。
-   **先换机器/换集群，再谈倍率** —— 在这台机器上测出来的一切并发结论都不可信。
+2. **在干净集群上重测倍率**（收紧「1.7–4.1×，中位数 2.8×」）：当前环境键数已到
+   ~570 万 + 每轮触发 BGSAVE + VM 的 swap 只剩 35 MB，差值不可信。
 3. **可选**：把 `scripts/check-bash-compat.sh` 接进 CI（旧待办，仍未做）。
+   ⚠️ 它内部还要起 docker，CI 的 `container:` 作业要自己验一下。
 
-> **给下一个执行者的一条硬约束**：这台机器现在 **CPU/内存饱和**。
-> 「加消费者」「加线程」类的实验在这里**得不出可信结论** ——
+> **给下一个执行者的一条硬约束**：这台机器现在 **CPU/内存饱和**（swap 2 GB 几乎
+> 用尽）。「加消费者」「加线程」类的实验在这里**得不出可信结论** ——
 > 第十一轮的实测是：2 个消费者比 1 个**慢 3 倍**（中位数 16,006 vs 49,750），
 > 而同一配置单消费者的波动范围本身就是 14,250–50,000（**3.5 倍**）。
 > **先看 `docker stats` 和 `/proc/meminfo` 的 SwapFree，再决定要不要跑性能实验。**
