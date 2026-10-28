@@ -29,7 +29,7 @@ $TMP  = "C:\Users\蔡雷鸣\AppData\Local\Temp\opencode"
 | 3 | 删三个墓碑文件 | ✅ DONE |
 | 4 | 补全三个应用的 `oms:` 配置块 | ✅ DONE |
 | 5 | 删 `opsHashSetPipeByHashData`，解开对 `realserver-entity` 的依赖 | ✅ DONE |
-| 6 | 删 `JedisUtils` / `JedisPoolUtils` | ☐ |
+| 6 | 删 `JedisUtils` / `JedisPoolUtils` | ✅ DONE |
 | 7 | 修正错误注释 | ☐ |
 | 8 | 生成 patch 并留痕 | ☐ |
 | 9 | 三个应用最终验证（含真集群 L3） | ☐ |
@@ -220,6 +220,33 @@ bean 名 `redisConfigProperties` → **`omsRedisConfigProperties`**（显式 `@B
 > 现在 `jackson-databind` 已**显式声明**为 oms 的直接依赖（版本仍由根 pom 的
 > `${jackson.version}` = 2.13.5 管理，解析到的构件与之前完全一致）。
 > **这就是"删掉一个传递依赖"的典型代价：藏着的直接依赖会被暴露出来。**
+
+### Task 6 — 删两个死代码类 ✅
+
+`JedisUtils.java`（~700 行，单节点 + `jedis.select()`，集群非法）与
+`JedisPoolUtils.java`（~50 行，静态读**不存在的** `jedis.properties` → 一调用就 NPE）
+已删除。
+
+顺带处理了唯一的调用点：`OmsWriteByKafkaServiceImpl.batchWirteJedisStandalone`
+（单机裸 Jedis pipeline 分支）**整个方法删除**，`batchWirteJedis` 改为集群与单机
+统一走 `redisRealDataService.wirteOmsPip`（集群按 slot 分组 pipeline，单机用
+`executePipelined`）。实测 `batchWirteJedis` **本身也无外部调用方**。
+
+- **证据**：两个文件 `Test-Path` = `False`；全树（含 napstarweb）grep
+  `JedisUtils|JedisPoolUtils` **无任何命中**；`oms/utils` 现在只剩 5 个活类
+  （`RedisClusterHashPipeline` / `RedisClusterHelper` / `RedisPipelineUtil` /
+  `RedisScanUtils` / `RedisUtil`）；`oms` 56/56 绿、`rtdata-module` 14/14 绿、
+  `dao` / `rtdata` / `realserver` 全部 `EXIT=0`
+
+> **两个 PowerShell 坑（都记一下）**：
+> 1. **`-D` 参数在 PowerShell 里必须加引号**。`-Dproguard.skip=true` 不加引号会被
+>    PowerShell 拆成 `.skip=true`，maven 报 `Unknown lifecycle phase ".skip=true"`。
+>    写成 `"-Dproguard.skip=true"` 才对。
+> 2. **本机 `JAVA_HOME` 有两个值**：`D:\java\java-se-8u42-ri`（JDK 8，我这个 shell）与
+>    `D:\java\jdk-21.0.2`（subagent 那个 shell）。**oms 的 pom 配了 proguard，
+>    它要 JDK 8 的 `rt.jar`**，JDK 9+ 没有这个文件 → `Can't read .../rt.jar`。
+>    用 JDK 8 构建则正常。**涉及 `mvn install` 的任务要留意这个差异。**
+
 
 
 
