@@ -218,6 +218,13 @@ majority = floor(M / 2) + 1
     存活条件 = (H 上的每个 master 都有异机副本) 且 (不在 H 上的 master 数 >= majority)
 ```
 
+**数组下标约定**：`lib/topology.sh` 导出的**所有数组都是 1-based**，
+与 `lib/conf.sh` 的 `CONF_NODE_*` 一致 —— 一个 0-based 数组挨着一个
+1-based 数组，就是一个等着发生的 off-by-one。调用方把「第 i 个节点组」
+直接映射到 `TOPO_SURVIVES[i]`。
+（`TOPO_MASTER` / `TOPO_REPLICA` 的顺序是**选取顺序**，不是实例的扁平顺序；
+两者在 2 节点 3 实例时恰好不同，混用会让「同数按选取顺序」的平手规则失效。）
+
 本例：`majority = 2`
 
 | 主机 | master 数 | 判定 |
@@ -291,7 +298,7 @@ cluster_require_full_coverage = yes        # 默认 yes；设成 no 则 master �
 | 2 | `lib/conf.sh` | 解析 `cluster_require_full_coverage`；导出 `CONF_REQUIRE_FULL_COVERAGE` | `tests/lib/conf.bats`：合法值 / 非法值报错 / 重复键报错 / 默认值 |
 | 3 | `config/redis.conf.template` | `cluster-require-full-coverage %REQUIRE_FULL_COVERAGE%` | `tests/cluster_config_render.bats` |
 | 4 | `lib/config_gen.sh` | 渲染函数增加一个参数 | 同上 |
-| 5 | `lib/cluster.sh` | `build_create_command` **写死了 `--cluster-replicas 1`** → 改为可传参（默认仍为 1，保持 `install.sh` 时代的语义与既有测试不变）；新增 `build_add_replica_command` | `tests/validate_libs.sh` 里 `build_create_command` 的 4 条断言（`--cluster-replicas 1` 那条改为断言默认值）+ 新增参数化用例 |
+| 5 | `lib/cluster.sh` | `build_create_command` **写死了 `--cluster-replicas 1`** → 改为可传参（默认仍为 1，保持 `install.sh` 时代的语义与既有测试不变）；新增 `build_add_replica_command`（显式指定副本挂在哪个 master 上）与 `build_eval_argv`（把逐行的 argv 变成**安全引用**的字符串，供 `eval` 使用 —— 密码是任意用户输入，含 `'` `;` `$(...)` 反引号时不能被当成命令执行） | `tests/validate_libs.sh` 里 `build_create_command` 的 4 条断言（`--cluster-replicas 1` 那条改为断言默认值）+ 新增参数化用例 + `build_eval_argv` 的注入用例 |
 | 6 | **新** `lib/topology.sh` | 纯函数：`plan_topology`（master 集合 + 副本映射 + 不变式自检 + 故障存活判定） | **新** `tests/lib/topology.bats`（重点） |
 | 7 | `cluster-config.sh` | 第 9 步三小步；打印拓扑表；幂等处理。<br>**注意：现第 9 步是直接调 `redis-cli --cluster create`（L628），并没有走 `lib/cluster.sh` 的 `build_create_command`** —— 后者目前只被 `tests/validate_libs.sh` 测到，属于事实上没人调用的遗留。改造时让新路径**用上**它，避免再留一份「测得到但没人用」的代码 | `tests/cluster_config.bats` |
 | 8 | `scripts/e2e-cluster-config.sh` | 新增 A1–A7 断言（§5） | — |
