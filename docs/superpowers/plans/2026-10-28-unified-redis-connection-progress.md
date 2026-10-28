@@ -28,7 +28,7 @@ $TMP  = "C:\Users\蔡雷鸣\AppData\Local\Temp\opencode"
 | 2 | `RedisPropertiesConfig` bean 改名 | ✅ DONE |
 | 3 | 删三个墓碑文件 | ✅ DONE |
 | 4 | 补全三个应用的 `oms:` 配置块 | ✅ DONE |
-| 5 | 删 `opsHashSetPipeByHashData`，解开对 `realserver-entity` 的依赖 | ☐ |
+| 5 | 删 `opsHashSetPipeByHashData`，解开对 `realserver-entity` 的依赖 | ✅ DONE |
 | 6 | 删 `JedisUtils` / `JedisPoolUtils` | ☐ |
 | 7 | 修正错误注释 | ☐ |
 | 8 | 生成 patch 并留痕 | ☐ |
@@ -188,6 +188,39 @@ bean 名 `redisConfigProperties` → **`omsRedisConfigProperties`**（显式 `@B
 >
 > **变异检验**：把 `clusters` 指到错误端口 `127.0.0.1:19999` → 该条**跳过**（1 skipped）
 > —— 证明它不是空转，也没有让没有集群的环境变红。
+
+### Task 5 — 解开 `realserver-oms → realserver-entity` ✅
+
+删掉 `opsHashSetPipeByHashData(List<HashData>)`，`OmsWriteDaoImpl.batchWriteByHashData`
+改为先把 `List<HashData>` 聚成 `Map<String,Map<String,Object>>` 再调**已有的**
+`opsHashSetPipe(Map)` —— 分组逻辑挪到业务侧。
+
+- **证据**：56/56 绿；`mvn dependency:tree` 里 **oms 已经是零 `com.sac.platform` 依赖**
+  （只剩自己），`idgenerator` 的依赖树也不再含 `realserver-entity`；
+  `oms` 源码里对 `realserver.entity` 的引用只剩守卫测试自己那一条；
+  `dao` / `rtdata-module` / `idgenerator` / `services` / `controller` 全部 `EXIT=0`
+
+> **⭐ 我的测试设计有缺陷，被 subagent 抓出来了**：
+> 我原本让测试扫 `target/classes/com/sac/platform/realserver/entity`，
+> 但 **Maven 只把本模块自己的源编译进 `target/classes`，依赖 jar 不会解包进去** ——
+> 所以这个检查**永远为真、约束不住任何东西**（变异后依然绿）。
+> 而且我写的断言 `assertFalse(scan.contains("com/sac/platform/realserver/entity"))`
+> 里，失败消息又拼了同一个字符串 —— **恒真的同义反复**。
+>
+> 改成真正的检查：`Class.forName("com.sac.platform.realserver.entity.HashData", false, classLoader)`
+> 必须**加载失败**（entity jar 里有这个类，依赖存在时就会加载成功 → 测试红）。
+>
+> **我亲自复核了变异**：把 `realserver-entity` 依赖加回 pom → 测试**变红**
+> （`got: ENTITY_DEPENDENCY_PRESENT`）→ 恢复后 56/56 绿。**证明这条守卫不是空转。**
+
+> **⭐ 解耦暴露了一个真实的隐式依赖**：去掉 `realserver-entity` 后，
+> `RedisUtilConfig` 里的 `GenericJackson2JsonRedisSerializer` 报
+> `NoClassDefFoundError: com/fasterxml/jackson/databind/jsontype/impl/StdTypeResolverBuilder`
+> —— Jackson 之前是**通过 `realserver-entity` 传递进来**的。
+> 现在 `jackson-databind` 已**显式声明**为 oms 的直接依赖（版本仍由根 pom 的
+> `${jackson.version}` = 2.13.5 管理，解析到的构件与之前完全一致）。
+> **这就是"删掉一个传递依赖"的典型代价：藏着的直接依赖会被暴露出来。**
+
 
 
 
