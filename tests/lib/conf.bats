@@ -1336,3 +1336,75 @@ CONFEOF
     [ -z "$output" ]
     [[ "$output" != *"unbound variable"* ]]
 }
+
+# --- cluster_require_full_coverage ---------------------------------------
+#
+# With `yes` (the historical behaviour, and the default) a cluster whose slots
+# are not all covered refuses EVERY write: one dead master stops the whole
+# cluster. With `no` the surviving slots stay writable. On a two-machine
+# deployment that difference is the difference between "degraded" and "down",
+# so the operator has to be able to choose it per cluster.
+
+@test "parse_conf defaults cluster_require_full_coverage to yes" {
+    write_conf <<'EOF'
+cluster_password = pw
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383,6384
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_REQUIRE_FULL_COVERAGE" = "yes" ]
+}
+
+@test "parse_conf reads cluster_require_full_coverage" {
+    write_conf <<'EOF'
+cluster_password = pw
+cluster_require_full_coverage = no
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383,6384
+EOF
+    parse_conf "$CONF_TMP/cluster.conf"
+    [ "$CONF_REQUIRE_FULL_COVERAGE" = "no" ]
+}
+
+@test "parse_conf rejects a cluster_require_full_coverage that is not yes or no" {
+    # `maybe` must not be carried forward as a value: it would be rendered
+    # into redis.conf, where redis-server aborts on start with an unresolved
+    # configuration -- a failure far away from the config line that caused it.
+    write_conf <<'EOF'
+cluster_password = pw
+cluster_require_full_coverage = maybe
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383,6384
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cluster_require_full_coverage"* ]]
+}
+
+@test "parse_conf rejects a duplicate cluster_require_full_coverage" {
+    write_conf <<'EOF'
+cluster_password = pw
+cluster_require_full_coverage = no
+cluster_require_full_coverage = yes
+[node.a]
+host  = h1
+ports = 6379,6380,6381
+[node.b]
+host  = h2
+ports = 6382,6383,6384
+EOF
+    run parse_conf "$CONF_TMP/cluster.conf"
+    [ "$status" -ne 0 ]
+}

@@ -12,6 +12,7 @@
 #
 # Outputs (see spec §3.2):
 #   CONF_REDIS_PREFIX CONF_PASSWORD CONF_BIND_ADDR CONF_REPLICAS
+#   CONF_REQUIRE_FULL_COVERAGE
 #   CONF_NODE_COUNT CONF_TOTAL_INSTANCES
 #   CONF_NODE_GROUP[i] CONF_NODE_ENVKEY[i] CONF_NODE_HOST[i]
 #   CONF_NODE_SSH_PORT[i] CONF_NODE_PORTS[i]
@@ -249,6 +250,13 @@ parse_conf() {
     # Fixed constant, NOT configurable (spec 3.4). Kept as parser output so a
     # future 2-replica topology need not change the parser's contract.
     CONF_REPLICAS=1
+    # cluster-require-full-coverage. `yes` is the historical behaviour and the
+    # default: a cluster whose slots are not all covered refuses every write,
+    # so one dead master takes the whole cluster down. `no` keeps the surviving
+    # slots writable -- which is what a two-machine deployment wants, because a
+    # host failure there can never be fully covered (a replica needs a
+    # majority of the masters alive to be promoted).
+    CONF_REQUIRE_FULL_COVERAGE="yes"
     CONF_NODE_COUNT=0
     CONF_TOTAL_INSTANCES=0
     CONF_UNKNOWN_KEYS=""
@@ -273,6 +281,7 @@ parse_conf() {
     # top-level ones live for the whole file.
     local pending_host_line="" pending_ports_line="" pending_ssh_port_line=""
     local seen_prefix_line="" seen_password_line="" seen_bind_line=""
+    local seen_coverage_line=""
 
     while IFS= read -r line || [ -n "$line" ]; do
         lineno=$((lineno + 1))
@@ -430,6 +439,18 @@ parse_conf() {
                     conf_reject_duplicate "$file" "$lineno" "the top level" "$key" "$seen_bind_line"
                     seen_bind_line="$lineno"
                     CONF_BIND_ADDR="$value"
+                    ;;
+                cluster_require_full_coverage)
+                    conf_reject_duplicate "$file" "$lineno" "the top level" "$key" "$seen_coverage_line"
+                    seen_coverage_line="$lineno"
+                    # Only yes/no: this value is rendered straight into
+                    # redis.conf, and anything else makes redis-server abort on
+                    # start with an unresolved configuration -- a failure far
+                    # from the config line that caused it.
+                    case "$value" in
+                        yes|no) CONF_REQUIRE_FULL_COVERAGE="$value" ;;
+                        *) die "$file:$lineno: invalid value for key 'cluster_require_full_coverage': '$value'; expected 'yes' or 'no'" ;;
+                    esac
                     ;;
                 *)                conf_record_unknown "$key" ;;
             esac
