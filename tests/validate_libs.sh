@@ -186,6 +186,17 @@ mypass" "$out"
 assert_contains "build_create_command has first node arg" "127.0.0.1:6379" "$out"
 assert_contains "build_create_command has second node arg" "127.0.0.1:6380" "$out"
 
+# The two-phase assembly: create the masters with 0 replicas, then attach each
+# replica explicitly.
+out=$(build_create_command "mypass" 0 "127.0.0.1:6379")
+assert_contains "build_create_command honours an explicit replica count" "--cluster-replicas
+0" "$out"
+
+out=$(build_add_replica_command "mypass" "127.0.0.1:6383" "127.0.0.1:6379")
+assert_contains "build_add_replica_command names the new node" "127.0.0.1:6383" "$out"
+assert_contains "build_add_replica_command names the master" "127.0.0.1:6379" "$out"
+assert_contains "build_add_replica_command asks for a slave" "--cluster-slave" "$out"
+
 echo
 echo "============================="
 echo "SUMMARY: PASS=$PASS  FAIL=$FAIL"
