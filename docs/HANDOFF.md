@@ -258,6 +258,118 @@ Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 
 ---
 
+## 第十一轮（2026-10-28）：两个消费者的对照测试 + 配置搬进 application.yaml
+
+**这一轮回答两个问题：（1）把消费者从 1 个改成 2 个，写入会更快吗？
+（2）把配置写进 `application.yaml` 而不是命令行参数，能生效吗？**
+Redis / Kafka 配置**一个字没改**。
+
+### 一、两个消费者：功能都对，吞吐没上去（在这台机器上反而更慢）
+
+`scripts/bench-consumer-write.sh` 新增 `CONSUMERS=N`（同一消费组的 N 个容器，
+Kafka 把 `INCDATA` 的两个分区分给它们）。**交替 A/B，每轮 20 万条**：
+
+| # | 消费者 | 均值 条/秒 | 活跃秒 | 峰值 | 备注 |
+|---|---|---|---|---|---|
+| 1 | 1 | 14,250 | 14 | 57,000 | |
+| 2 | **2** | 20,000 | 10 | 37,957 | 断言被误判，数据由容器日志重算（见下） |
+| 3 | **2** | 16,666 | 12 | 26,363 | 两实例 79,920 / 120,080 |
+| 4 | 1 | **49,750** | 4 | 81,000 | |
+| 5 | **2** | 14,285 | 14 | 27,716 | 120,384 / 79,616 |
+| 6 | 1 | **50,000** | 4 | 71,000 | |
+| 7 | **2** | 15,346 | 13 | 31,000 | 带资源采样 |
+
+**中位数：1 实例 49,750 ／ 2 实例 16,006 → 加消费者不但没提速，反而约 0.32×。**
+4 次两实例运行**没有一次**超过 20k；1 实例有 2 次跑到 50k。
+
+**正确性 7/7 轮全绿**：写入 200,000 精确守恒、失败 0、lag 0、`delta_per_record=1.00`、
+三个主节点各 ~66.6k 次 HSET、8/8 抽样值逐字匹配。
+
+**瓶颈不在消费者数量，证据是资源采样**（第 7 轮，`docker stats` 每 2 秒一次）：
+
+```
+rc-cpsweb-app-1   mean 43.1%  max 98.8%     每个容器都能打满一个核
+rc-cpsweb-app-2   mean 45.9%  max 97.4%
+rc-cpsweb-node-a  mean 43.4%  max 98.9%     3 个 Redis 主节点挤在这一个容器里
+rc-cpsweb-node-b  mean 30.4%  max 98.0%
+MemAvailable 468 MB ；SwapFree 208 MB / 2 GB    已换出 1.77 GB
+```
+
+叠加三件事：① Docker VM 只有 **2 vCPU**；② **内存已换出 1.77 GB**；
+③ 每轮 20 万写入都触发三个主节点并发 `BGSAVE`（跑完时 `rdb_bgsave_in_progress:1`）。
+**加第二个 JVM 只会把同一份 CPU/内存预算切得更碎。**
+
+> 与第九轮的否定结果同源：concurrency 1→2（一个 JVM 加线程）写入速率不动；
+> 这次是实例 1→2（加 JVM）写入速率下降。**两条证据指向同一个结论。**
+>
+> **两实例的写入分布是 40/60 而不是 50/50**，说明排空途中发生过一次 rebalance
+> （第二个实例的 8 个消费线程陆续入组）。
+
+### 二、配置搬进 application.yaml：生效，但有一个 bootstrap 阶段的坑
+
+**Java 侧**：`plugins/rtdata-consumer/src/main/resources/application.yml` 原本 **45 行全是注释**
+（等于空文件）。现在把原来靠命令行传的 `oms.*` / `spring.kafka.*` / `commitdata.*` /
+`server.port` 都写进去，重新打包（`mvn -o -pl realserver/plugins/rtdata-consumer -am
+-DskipTests package`），再用 `CONFIG_FROM_YAML=1` 启动 —— **命令行一个配置参数都不带**。
+
+**结果：全部生效。** 日志逐字对上：
+
+```
+*** Using Redis Cluster with nodes: 172.21.0.2:6379,172.21.0.2:6380,172.21.0.3:6382
+*** Redis mode detected: CLUSTER ***
+[Consumer clientId=consumer-rc-kafka-cluster-1793069287-1, groupId=rc-kafka-cluster-1793069287]
+```
+
+`CONFIG_FROM_YAML=1` 与 `CONFIG_FROM_YAML=0`（同 jar、同环境）各跑一轮：
+**13,333/s vs 13,333/s，活跃秒 15 vs 15**，写失败 0、lag 0、守恒精确、8/8 抽样匹配。
+
+> **⚠️ 坑：`spring.cloud.nacos.config.enabled=false` 写在 `application.yml` 里不生效。**
+> Nacos 客户端是在 **bootstrap 阶段**创建的，那时只看得到 `bootstrap.yml` 和命令行参数，
+> `application.yml` 太晚。实测：写在 yaml 里，客户端照样去连 `node1:18848`，
+> 每次启动多花约 **12 秒**在 grpc 超时上（`Fail to connect server, after trying 8 times`）。
+> 生产要用 Nacos，所以**不能**把它写进 `bootstrap.yml`；测试时这两个开关仍由命令行传入。
+
+### 三、这一轮顺手修掉的三个脚本缺陷（都是实测撞出来的，不是推理）
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| `docker logs \| grep -q` + `set -o pipefail` | `grep -q` 匹配后立刻退出 → `docker logs` 被 **SIGPIPE** 打死（141）→ 管道状态非零 → **一次成功的运行被判成 FAIL** | 改成先落临时文件再 `grep -q -F`（`log_has`）。**已复现**：管道版 `exit=141`，文件版 `exit=0`，而模式确实存在 |
+| `kafka-consumer-groups --members` 的输出**首行是空行**，表头 `HOST` 落在第 3 列 | awk 把表头当成一个主机 → 断言「组里应有 2 个容器」看到 3 个 → 假失败 | 只接受形如 `/1.2.3.4` 的字段。**回归用例**：旧过滤 → 3，新过滤 → 2 |
+| 生产者 `acks=all` 但**没开幂等** | 一次 publish 出现 **12,763 条重复**（acks 超时重发），消费者写了 212,763 条 → 守恒断言抓到 | 生产者加 `enable.idempotence=true`；并新增断言：**按 log-end offset 差值核对 topic 实际收到多少条**，必须等于 N |
+
+另外新增两条启动断言（否则 yaml 没加载也会「测了个寂寞」）：
+`Using Redis Cluster with nodes: <期望节点>` 和 `groupId=<期望消费组>`。
+**变异检验**：把期望节点改成 `172.21.0.9:6379` → 正确 FAIL（断言不是空转）。
+
+### 四、这一轮的产物
+
+| 东西 | 位置 |
+|---|---|
+| Java 侧 yaml 改动（权威 diff） | `docs/superpowers/patches/2026-10-28-yaml-config.patch`（2,281 B；已用 `git apply --reverse --check` 对当前源码校验通过） |
+| 测量脚本 | `scripts/bench-consumer-write.sh`（新增 `CONSUMERS` / `CONFIG_FROM_YAML` / `log_has` / publish 计数断言 / 启动断言） |
+| 交接正文 | 本节 |
+
+> Java 源码不在本仓库，**yaml 的改动同样只能以 patch 留痕**。
+> 旧文件（45 行全注释）重建后 **1,225 B**，与原文件字节数一致 —— 重建是可信的。
+
+### 五、环境现状（本轮结束时）
+
+```
+rc-cpsweb-app    跑新 jar（target/rtdata-consumer-1.0.14.jar，140,519,854 B），lag=0，concurrency=1
+Redis            3 主 × 1 从；**3 个主全在 node-a**，每主 ~190 万 keys（合计 ~570 万）
+Kafka/ZooKeeper  两节点集群，未改动
+Docker VM        2 vCPU / 3.8 GB；**已换出 1.77 GB**，MemAvailable ~470 MB
+```
+
+> **下一步建议（优先级从高到低）**：
+> 1. **别再在这台机器上加并发** —— 它已经 CPU/内存饱和，任何「加实例/加线程」的结论都不可信。
+> 2. 换一台**干净集群**（键数少、无 AOF/RDB 压力、每主独立物理机）再测倍率。
+> 3. 生产里 `max-poll-records` 是 **100000**，而测试里没配 → 生效值是 Boot 默认 **500**
+>    （每批 500 条，pipeline 摊薄得差）。**这很可能是当前吞吐的真实上限**，
+>    比「加消费者」更值得先验证。
+
+---
+
 ## 第九轮（2026-10-27）：端到端写入性能测量 + 写入路径诊断
 
 **这一轮不改任何生产代码。** 它测出「Kafka → `RTListener.onMessage` → Redis Cluster」

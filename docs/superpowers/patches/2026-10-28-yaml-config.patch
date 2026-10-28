@@ -1,0 +1,57 @@
+--- a/plugins/rtdata-consumer/src/main/resources/application.yml
++++ b/plugins/rtdata-consumer/src/main/resources/application.yml
+@@ -1,3 +1,54 @@
++# ===========================================================================
++# 第十一轮：把「原来靠命令行传的配置」搬进 application.yaml，验证 yaml 真的生效。
++#
++# 这里的键与 scripts/bench-consumer-write.sh 之前用
++#   --oms.* / --spring.kafka.* / --commitdata.* / --server.port
++# 传的一一对应。用 CONFIG_FROM_YAML=1 启动时命令行不再带这些业务参数，
++# 因此生效值只能来自本文件 —— 这正是这次要验证的东西。
++#
++# ⚠️ 里面的地址是 E2E 集群的临时地址（172.21.0.x），**不能带进生产**。
++#    生产配置来自 Nacos：share_base（spring.kafka / spring.redis）与
++#    ext_base（oms.hostname / oms.port / oms.password ...），不是本文件。
++#
++# ⚠️ 这里**不能**写 spring.cloud.nacos.config.enabled=false：
++#    Nacos 客户端是在 bootstrap 阶段创建的，那时只看得到 bootstrap.yml 和命令行参数，
++#    application.yml 太晚。实测把它写在这里，客户端照样去连 node1:18848，
++#    每次启动多花约 12 秒在 grpc 超时上。测试时这两个开关仍由命令行传入。
++# ===========================================================================
++server:
++  port: 8092
++
++spring:
++  kafka:
++    bootstrap-servers: 172.21.0.2:9092,172.21.0.3:9092
++    consumer:
++      bootstrap-servers: 172.21.0.2:9092,172.21.0.3:9092
++      group-id: rc-kafka-cluster-1793069287
++      auto-offset-reset: earliest
++      enable-auto-commit: false
++    listener:
++      type: batch
++      concurrency: 1
++
++oms:
++  redisMode: cluster
++  clusters:
++    - 172.21.0.2:6379
++    - 172.21.0.2:6380
++    - 172.21.0.3:6382
++  password: CpsE2eClusterPw
++  database: 0
++  timeout: 5000
++
++commitdata:
++  inclusions:
++    object-type:
++      "31": DPSPoint
++      "33": MVPoint
++
++# ---------------------------------------------------------------------------
++# 下面是本文件原来的内容（整份都是注释，从未生效过），保留备查：
++# ---------------------------------------------------------------------------
+ # server:
+ #   port: 8092
+ #   servlet:
