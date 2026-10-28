@@ -33,6 +33,7 @@ $TMP  = "C:\Users\蔡雷鸣\AppData\Local\Temp\opencode"
 | 7 | 修正错误注释 | ✅ DONE |
 | 8 | 生成 patch 并留痕 | ✅ DONE |
 | 9 | 三个应用最终验证（含真集群 L3） | ✅ DONE |
+| 10 | **终审发现的 5 个问题**（修复 + 回归） | ✅ DONE |
 
 ## 完成记录
 
@@ -333,6 +334,38 @@ bean 名 `redisConfigProperties` → **`omsRedisConfigProperties`**（显式 `@B
 > **本轮结束时的工作树**：**10 改 + 5 删 + 2 未改**，与预期完全一致，
 > **无任何意外改动**。未改的两个是 `RedisUtilConfig.java` 与
 > `RedisConfigProperties.java`（它们本来就不需要改）。
+
+### Task 10 — 终审发现的 5 个问题 ✅
+
+终审（对整个实现的最后一遍审查）找出 5 个问题，**全部已修**。
+
+| # | 问题 | 修法 | 证据 |
+|---|---|---|---|
+| **1** | **`CacheServiceImpl` 注释又引入了一个新的错误说法** —— 我在 Task 7 写"集群下 `redisTemplate.keys()` 只返回它落到的那**一个**节点的结果"，**这也是错的** | 改成准确表述，并注明 `JedisClusterKeyCommands.keys` 是 `executeCommandOnAllNodes` + 取并集 | **从 SDR 源码逐字核对**：`JedisClusterKeyCommands.keys` 确实是 `executeCommandOnAllNodes(...).resultsAsList()` 然后 `keys.addAll(keySet)` |
+| **2** | **`oms.redisMode` 大小写敏感** → 写成 `CLUSTER` 时**三个分支一个都不激活**，**一个 `RedisConnectionFactory` bean 都不会创建**，报错停在 "No qualifying bean of type 'RedisConnectionFactory'"，完全指不到真正原因 | 三个 `@ConditionalOnExpression` 改成 `'${oms.redisMode:standalone}'.trim().toLowerCase() == 'cluster'`（与 `parseMode` 的归一化规则一致） | 实测：`CLUSTER`/`Cluster`/`STANDALONE` 修复前 **startupFailure=true**，修复后 **全部 PRESENT** |
+| **3** | L3 契约测试**只断言了 `props`，没断言属性真的落进了 `JedisPoolConfig`** —— 把 `setMaxTotal` 写死成常量，测试依然绿 | 加断言：`JedisPoolConfig.getMaxTotal/MaxIdle/MinIdle/MaxWaitMillis` + `JedisConnectionFactory.getClientConfiguration().getConnectTimeout/getReadTimeout` | **变异检验**：把 `setMaxTotal` 写死 → 测试**变红** `expected: <16> but was: <200>`（改之前这个变异是绿的） |
+| **4** | L3 契约测试**可能偶发变红** —— 守卫只护住了探针那一次 GET，真正的 `put` 没护 | 整段读写用 `catch (DataAccessException) → assumeTrue(false, …)` 守卫 | 集群不可达时**跳过**而不是变红 |
+| **5** | 补丁生成用 `Out-File -Encoding ascii` 会把**中文全变成 `?`**，`git apply` 报 `corrupt patch` | 改用 `git diff --output=<file>`（原始字节） | 补丁里 `集群` 二字完好，**无 `?` 替换符**；反向校验 0、正向重建 0 mismatch |
+
+另外新增了一条永久回归守卫 `RedisModeCaseSensitivityTest`（3 条），
+把「模式大小写不敏感 + 未知模式必须**响亮地失败**」锁住。
+
+> **⭐ 又一次印证：关于第三方库行为的断言必须去看源码。**
+> 这次不是"我写错了注释"，而是"**审查者与我各错一半**"——
+> 我在 Task 1 写"keys 只返回一个节点"，Task 7 又写了一遍；
+> 终审用**在真集群上种 8 个 key 再查**的方式证伪了它。
+> **从源码 + 实测两头对上，才算真结论。**
+
+**patch 已重新生成**（含 4 个新增测试文件）：
+
+| 文件 | 大小 | 校验 |
+|---|---|---|
+| `…-platform-backend.patch` | 107,604 B | 反向 0；正向 `checked=19 mismatches=0` |
+| `…-napstarweb.patch` | 3,138 B | 反向 0；正向 `checked=2 mismatches=0` |
+| `…-unified-redis-connection.patch`（合并） | 110,742 B | 20 个 `diff --git`（4 新增 / 5 删除） |
+
+**最终测试基线**：`realserver-oms` **59/59 绿**（原 50 → 新增 9）。
+
 
 
 

@@ -385,7 +385,7 @@ CONFIG SET cluster-announce-port  16379 / 16380 / …
 | 检查 | 结果 |
 |---|---|
 | `realserver` / `modelserver` / `napstarweb` 全量 `clean install` | 三个都 **EXIT=0** |
-| `realserver-oms` 单测 | **56/56 绿**（基线 50 → 新增 6） |
+| `realserver-oms` 单测 | **59/59 绿**（基线 50 → 新增 9） |
 | `rtdata-module` 单测 | **14/14 绿** |
 | `oms` 依赖树 | 只剩自己，**零 `com.sac.platform` 依赖** |
 | `idgenerator` 依赖树 | **不含 `realserver-entity`** |
@@ -397,6 +397,29 @@ CONFIG SET cluster-announce-port  16379 / 16380 / …
 **三个应用启动时都只在 Nacos 上失败**（`node1:18848` 不可达），与 Redis 无关；
 Redis 的 bean 在那之前就已装配好并打印了配置行。
 
+### 五之二、⭐ 终审又找出 5 个问题（全部已修）
+
+写完 9 个 Task 之后又做了一遍**整体终审**（不是逐 Task 的检查），
+找出 5 个问题。**其中两个是我自己在前面几轮埋的错误。**
+
+| # | 问题 | 状态 |
+|---|---|---|
+| 1 | **我在 Task 7 写的注释又引入了一个新的错误说法** —— "集群下 `keys()` 只返回它落到的那**一个**节点的结果"。**这也是错的**（SDR 会 `executeCommandOnAllNodes` + 取并集，返回**整个集群的 keyspace**）。**我错了一次还把它抄进了第二处。** | 已改 |
+| 2 | **`oms.redisMode` 大小写敏感** —— 写成 `CLUSTER` 时三个分支**一个都不激活**，**一个 `RedisConnectionFactory` bean 都不创建**，报错停在 "No qualifying bean"，完全指不到真正原因 | 三个 `@ConditionalOnExpression` 改为 `.trim().toLowerCase()`，与 `parseMode` 一致；新增 `RedisModeCaseSensitivityTest` |
+| 3 | L3 契约测试**只断言 `props`**，没断言属性真的落进了 `JedisPoolConfig` —— 把 `setMaxTotal` 写死，测试照样绿 | 加断言 `JedisPoolConfig` + `JedisClientConfiguration`；**变异后确实变红** |
+| 4 | L3 契约测试**可能偶发变红**（守卫只护住了探针那次 GET） | 整段读写都进守卫 |
+| 5 | 补丁生成用 `Out-File -Encoding ascii` 会把**中文全变成 `?`**，patch 直接 corrupt | 改用 `git diff --output=` |
+
+> **问题 1 的教训最值钱**：我在 Task 1 已经把 `RedisUtil` 的 27 条 javadoc 改对了
+> （明确写"返回整个集群的 keyspace，不是只返回某一个节点"），
+> **结果 Task 7 修另一处注释时又写反了**。
+> **修正一处错误，反而在另一处引入同类错误。**
+> 所以终审必须**逐条对源码**，不能凭印象。
+
+> **问题 2 是给运维的坑**：Nacos 上有人把 `redisMode` 写成大写，
+> 应用会报"找不到 RedisConnectionFactory"，而不是"模式字符串不对"。
+> **这就是"配置契约"必须包含"取值格式"的原因。**
+
 ### 六、留痕
 
 | 东西 | 位置 |
@@ -404,7 +427,7 @@ Redis 的 bean 在那之前就已装配好并打印了配置行。
 | 设计文档 | `docs/superpowers/specs/2026-10-28-unified-redis-connection-design.md` |
 | 实施计划 | `docs/superpowers/plans/2026-10-28-unified-redis-connection.md` |
 | 执行记录（含每一步的证据与踩坑） | `docs/superpowers/plans/2026-10-28-unified-redis-connection-progress.md` |
-| **代码 patch** | `docs/superpowers/patches/2026-10-28-unified-redis-connection-platform-backend.patch`（13 个文件）<br>`docs/superpowers/patches/2026-10-28-unified-redis-connection-napstarweb.patch`（2 个文件）<br>`docs/superpowers/patches/2026-10-28-unified-redis-connection.patch`（合并 15 个，仅用于合成仓库） |
+| **代码 patch** | `docs/superpowers/patches/2026-10-28-unified-redis-connection-platform-backend.patch`（18 个文件）<br>`docs/superpowers/patches/2026-10-28-unified-redis-connection-napstarweb.patch`（2 个文件）<br>`docs/superpowers/patches/2026-10-28-unified-redis-connection.patch`（合并 20 个，仅用于合成仓库） |
 
 > **Java 源码不在本仓库**（`backend` 与 `napstarweb` **都不是 git 仓库**），
 > 所以改动只能以 patch 留痕。校验方式：
