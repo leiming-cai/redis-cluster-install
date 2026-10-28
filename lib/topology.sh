@@ -79,9 +79,33 @@ topology_plan() {
     TOPO_ERROR=""
 
     # --- input ----------------------------------------------------------
-    local -a g_host=() g_ports=()
+    local -a g_host=() g_ports=() g_raw=()
     local item
+    # Word splitting on the space-separated group list is wanted, but
+    # pathname expansion is NOT. An unquoted expansion does BOTH, so a group
+    # whose host is `*` would expand to the files in the current directory
+    # and the parsed layout would depend on $PWD -- the same trap
+    # lib/conf.sh documents for `IFS=',' local -a x=($raw)`, where the old
+    # `ports = *` became the listing of the working directory.
+    #
+    # `set -f` is a SHELL option and not a local variable: it applies to the
+    # whole shell, the caller's included. So the previous state is recorded
+    # and restored before anything can return, and the split is kept in a
+    # block with no `return` of its own -- every early exit below happens
+    # after the restore.
+    local noglob_was_off=0
+    case "$-" in
+        *f*) ;;
+        *) noglob_was_off=1; set -f ;;
+    esac
     for item in $groups; do
+        g_raw+=("$item")
+    done
+    if [ "$noglob_was_off" -eq 1 ]; then set +f; fi
+
+    # The HOST:PORT shape is checked after the restore, so a rejected group
+    # cannot leave the caller with noglob switched off.
+    for item in "${g_raw[@]+"${g_raw[@]}"}"; do
         case "$item" in
             *:*) ;;
             *) TOPO_ERROR="node group '$item' is not HOST:PORT[,PORT...]"; return 1 ;;
