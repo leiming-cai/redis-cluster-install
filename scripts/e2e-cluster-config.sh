@@ -120,6 +120,99 @@ run_config() {
 log "Pre-provisioning nodes (binaries, redis user, directories)"
 # NOTE: nodes must be addressed by IP, not hostname — CLUSTER MEET cannot
 # resolve container hostnames in this network.
+
+# --- helpers for the topology assertions (A1-A6) ------------------------
+#
+# A1/A2 check the layout the two-phase assembly produced. A3 recomputes the
+# fragile host HERE, with its own awk, instead of reading the script's own
+# answer: using one implementation to check itself proves nothing.
+# A4/A5/A6 each need a fresh cluster, because a killed master leaves a
+# topology that no longer matches the plan.
+
+# reset_cluster LOGFILE — throw the cluster away and build it again.
+#
+# Wiping nodes.conf AND the data directory is what makes the instances come
+# back as fresh nodes: the AOF in the data directory would otherwise make
+# them rejoin the old cluster.
+reset_cluster() {
+    local logfile="$1"
+    log "Resetting the cluster"
+    local spec host port
+    for spec in "$A_IP:6379" "$A_IP:6380" "$A_IP:6381" \
+                "$B_IP:6382" "$B_IP:6383" "$B_IP:6384"; do
+        host="${spec%:*}"
+        port="${spec##*:}"
+        ssh_root "$host" "systemctl stop redis-$port" >/dev/null 2>&1 || true
+    done
+    sleep 2
+    for spec in "$A_IP:6379" "$A_IP:6380" "$A_IP:6381" \
+                "$B_IP:6382" "$B_IP:6383" "$B_IP:6384"; do
+        host="${spec%:*}"
+        port="${spec##*:}"
+        ssh_root "$host" "rm -rf $PREFIX/cluster/$port /var/lib/redis/cluster/$port /var/run/redis/cluster/$port" \
+            >/dev/null 2>&1 || true
+    done
+    run_config "$logfile" || fail "rebuilding the cluster failed"
+}
+
+# cluster_nodes_index — "id host:port role master-id" per node.
+cluster_nodes_index() {
+    ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning \
+              -h $A_IP -p 6379 cluster nodes" \
+        | awk 'NF>=4 { addr=$2; sub(/@.*$/,"",addr); role=($3 ~ /master/)?"master":"replica"; print $1, addr, role, $4 }'
+}
+
+# host_of_master_count HOST — how many masters HOST holds.
+#
+# The separator is space AND colon, so the line
+#   "421018a0... 10.0.0.1:6379 master 421018a0..."
+# splits into $1=id, $2=host, $3=port, $4=role, $5=master-id. The role is
+# therefore $4, NOT $3.
+host_of_master_count() {
+    cluster_nodes_index | awk -v h="$1" -F'[ :]' '$2==h && $4=="master"' | wc -l
+}
+
+# pick_fragile_and_protected — set fragile/protected and their port lists from
+# the LIVE cluster.
+#
+# The fragile host is the one holding MORE masters: a replica can only be
+# promoted when a majority of the masters is alive, so losing the host with
+# the majority takes the cluster down. The host holding fewer masters is the
+# one whose failure the cluster survives.
+fragile=""; fragile_ports=""; protected=""; protected_ports=""
+pick_fragile_and_protected() {
+    local a_masters b_masters
+    a_masters="$(host_of_master_count "$A_IP")"
+    b_masters="$(host_of_master_count "$B_IP")"
+    if [ "$a_masters" -gt "$b_masters" ]; then
+        fragile="$A_IP"; fragile_ports="6379 6380 6381"
+        protected="$B_IP"; protected_ports="6382 6383 6384"
+    elif [ "$b_masters" -gt "$a_masters" ]; then
+        fragile="$B_IP"; fragile_ports="6382 6383 6384"
+        protected="$A_IP"; protected_ports="6379 6380 6381"
+    else
+        fail "both hosts hold $a_masters master(s); the layout is not the one this test expects"
+    fi
+    echo "  fragile=$fragile ($a_masters vs $b_masters masters), protected=$protected"
+}
+
+# wait_for_state HOST PORT WANTED — poll cluster_state on one instance.
+wait_for_state() {
+    local host="$1" port="$2" wanted="$3" state=""
+    local _
+    for _ in $(seq 1 12); do
+        sleep 5
+        state="$(ssh_root "$host" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning \
+                 -h $host -p $port cluster info" 2>&1 | grep '^cluster_state:' | cut -d: -f2 | tr -d '[:space:]')"
+        if [ "$state" = "$wanted" ]; then
+            printf '%s' "$state"
+            return 0
+        fi
+    done
+    printf '%s' "$state"
+    return 1
+}
+
 provision() {
     local host="$1" out rc=0
     # Quoted heredoc: nothing is expanded locally, so the remote script needs
@@ -276,6 +369,78 @@ v="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP
 [ "$v" = "from-B" ] || fail "A GET -> '$v'"
 echo "  B->A OK"
 
+# --- A1/A2/A3: the topology invariants ---------------------------------
+#
+# These three are the whole point of the two-phase assembly. Before it,
+# `redis-cli --cluster create --cluster-replicas 1` picked the roles itself,
+# and its pick put all 3 masters on ONE host: killing that host then left the
+# cluster with no quorum at all (measured).
+
+log "A0: the live cluster is exactly the layout the script planned"
+# A1/A2 below check properties (each master has a replica, replicas are on
+# another host) but NOT that the cluster is the one the plan asked for. The
+# old single-command assembly produced all 3 masters on one host and all 3
+# replicas on the other, which satisfies A1 and A2: every replica really was
+# on a different host from its master. Only comparing the mapping pins it.
+planned_masters="$(grep -oE 'master  [0-9.]+:[0-9]+' "$WORK/install.log" | awk '{print $2}' | sort -u)"
+live_masters="$(cluster_nodes_index | awk '$3=="master" {print $2}' | sort -u)"
+[ -n "$planned_masters" ] || fail "the install log contains no planned master list"
+[ "$planned_masters" = "$live_masters" ] || fail "the live master set does not match the planned one:
+planned: $(echo $planned_masters)
+live:    $(echo $live_masters)"
+echo "  OK masters: $(echo $live_masters)"
+
+planned_replicas="$(grep -oE 'replica [0-9.]+:[0-9]+ -> master [0-9.]+:[0-9]+' "$WORK/install.log" | sed -e 's/^replica //' -e 's/ -> master / -> /' | sort -u)"
+live_replicas="$(cluster_nodes_index | awk '
+    { addr[$1]=$2; role[$1]=$3; mid[$1]=$4 }
+    END { for (i in addr) if (role[i]=="replica" && (mid[i] in addr)) print addr[i] " -> " addr[mid[i]] }
+' | sort -u)"
+[ -n "$planned_replicas" ] || fail "the install log contains no planned replica map"
+[ "$planned_replicas" = "$live_replicas" ] || fail "the live replica map does not match the planned one:
+planned:
+$(echo "$planned_replicas")
+live:
+$(echo "$live_replicas")"
+echo "  OK replicas match the plan"
+
+log "A1: every master has at least one replica"
+nodes="$(cluster_nodes_index)"
+[ -n "$nodes" ] || fail "could not read cluster nodes"
+for mid in $(awk '$3=="master" {print $1}' <<< "$nodes"); do
+    maddr="$(awk -v id="$mid" '$1==id {print $2}' <<< "$nodes")"
+    nrep="$(awk -v id="$mid" '$3=="replica" && $4==id' <<< "$nodes" | wc -l)"
+    [ "$nrep" -ge 1 ] || fail "master $maddr has no replica"
+    echo "  OK master $maddr has $nrep replica(s)"
+done
+
+log "A2: every replica lives on a different host than its master"
+bad="$(awk '
+    { addr[$1]=$2; role[$1]=$3; mid[$1]=$4 }
+    END {
+        n = 0
+        for (id in addr) {
+            if (role[id] == "replica" && (mid[id] in addr)) {
+                split(addr[id], a, ":"); split(addr[mid[id]], b, ":")
+                if (a[1] == b[1]) {
+                    print "replica " addr[id] " is on the same host as its master " addr[mid[id]]
+                    n++
+                }
+            }
+        }
+        exit (n > 0) ? 1 : 0
+    }
+' <<< "$nodes")" || fail "a replica shares a host with its master: $bad"
+echo "  OK"
+
+log "A3: the script names the host the cluster cannot survive losing"
+pick_fragile_and_protected
+grep -q "host $fragile: if it fails the cluster STOPS serving" "$WORK/install.log" \
+    || fail "cluster-config.sh did not name $fragile as the host the cluster cannot survive losing:
+$(grep -i 'if it fails' "$WORK/install.log" || true)"
+grep -q "host $protected: if it fails the cluster keeps serving" "$WORK/install.log" \
+    || fail "cluster-config.sh did not name $protected as the survivable host"
+echo "  OK"
+
 log "DoD7: idempotent re-run"
 run_config "$WORK/rerun.log" || fail "re-run exited non-zero"
 grep -q "already healthy" "$WORK/rerun.log" || fail "re-run did not skip cluster create"
@@ -371,5 +536,122 @@ sleep 8
 final_report="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 cluster info")"
 grep -E "^cluster_state:ok" <<< "$final_report" \
     || fail "cluster_state is not ok after the killed master was restarted"
+
+# --- A5: the fragile host takes the cluster down -------------------------
+#
+# This asserts a LIMITATION, not a goal. With 3 masters spread over 2 hosts
+# one host always holds the majority, and a replica can only be promoted when
+# a majority of the masters is alive. So the host holding more masters cannot
+# be lost without stopping the cluster.
+#
+# Asserting it is still worth it: if a future change made the cluster survive
+# that too, this would go red and the documented limit would have to be
+# updated. A test that can never fail is not a test.
+
+log "A5: killing the fragile host must stop the cluster"
+pick_fragile_and_protected
+for p in $fragile_ports; do
+    ssh_root "$fragile" "systemctl stop redis-$p" >/dev/null 2>&1 || true
+done
+# Poll instead of sleeping a fixed time: the masters are only marked fail
+# after cluster-node-timeout (15s in the template), and until then the
+# cluster can still look healthy and accept writes.
+survivor_first_port="${protected_ports%% *}"
+state5="$(wait_for_state "$protected" "$survivor_first_port" fail)" \
+    || fail "the cluster never noticed the fragile host's masters were gone (state=$state5)"
+out="$(ssh_root "$protected" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning \
+          -h $protected -p $survivor_first_port -c SET e2e:fragile v" 2>&1 | tr -d '\r')"
+case "$out" in
+    *CLUSTERDOWN*) echo "  OK: the cluster refuses writes ($out)" ;;
+    *) fail "the cluster still accepted writes after the fragile host died: '$out'" ;;
+esac
+
+# --- A4: the protected host leaves the cluster serving -------------------
+#
+# A fresh cluster is needed: A5 killed a host, so the surviving topology is no
+# longer the one the plan describes.
+
+log "A4: killing the protected host must leave the cluster serving"
+reset_cluster "$WORK/rebuild-a4.log" || fail "rebuilding the cluster for A4 failed"
+pick_fragile_and_protected
+fragile_first_port="${fragile_ports%% *}"
+for p in $protected_ports; do
+    ssh_root "$protected" "systemctl stop redis-$p" >/dev/null 2>&1 || true
+done
+state4="$(wait_for_state "$fragile" "$fragile_first_port" ok)" \
+    || fail "the cluster did not recover after the protected host died (state=$state4)"
+out="$(ssh_root "$fragile" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning \
+          -h $fragile -p $fragile_first_port -c SET e2e:protected v" 2>&1 | tr -d '\r')"
+[ "$out" = "OK" ] || fail "the cluster refused writes after the protected host died: '$out'"
+echo "  OK: the cluster kept serving"
+
+# --- A6: cluster_require_full_coverage=no --------------------------------
+#
+# With the default (yes) a master failure stops EVERY write, because the slots
+# it owned are not covered. With `no` the surviving slots stay writable.
+#
+# The setting has to come from the config file: `CONFIG SET` only changes the
+# parameter on the node it runs on (measured on 8.10.2) and Redis reads it per
+# node, so a runtime CONFIG SET on one node would prove nothing about what the
+# other five do.
+
+log "A6: cluster_require_full_coverage=no keeps the surviving slots writable"
+cat > "$WORK/cluster-nocov.conf" <<CONF
+redis_prefix     = $PREFIX
+cluster_password = $PASS
+bind_addr        = 0.0.0.0
+cluster_require_full_coverage = no
+
+[node.a]
+host     = $A_IP
+ssh_port = 22
+ports    = 6379,6380,6381
+
+[node.b]
+host     = $B_IP
+ssh_port = 22
+ports    = 6382,6383,6384
+CONF
+export CLUSTER_CONF="$(cat "$WORK/cluster-nocov.conf")"
+reset_cluster "$WORK/rebuild-a6.log" || fail "rebuilding the cluster for A6 failed"
+
+rendered="$(ssh_root "$A_IP" "grep -h 'cluster-require-full-coverage' /etc/redis/cluster/redis-6379.conf" | tr -d '\r')"
+[ "$rendered" = "cluster-require-full-coverage no" ] \
+    || fail "the rendered redis.conf does not carry the setting: '$rendered'"
+
+for i in $(seq 1 60); do
+    ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning \
+        -h $A_IP -p 6379 -c SET e2e:cov:$i v$i" >/dev/null
+done
+# Kill master 6379 AND its replica 6383. Killing only the master would let the
+# replica take over and cover its slots again -- the test would then be green
+# even with cluster-require-full-coverage=yes, i.e. it would assert nothing.
+# With both gone, 6379's slots are deterministically uncovered: the remaining
+# two masters cannot promote a replica that no longer exists, and the
+# replicas of THOSE masters have no reason to be promoted.
+ssh_root "$A_IP" "systemctl stop redis-6379" >/dev/null 2>&1 || true
+ssh_root "$B_IP" "systemctl stop redis-6383" >/dev/null 2>&1 || true
+sleep 25
+writable=0
+refused=0
+for i in $(seq 1 60); do
+    out="$(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning \
+              -h $A_IP -p 6380 -c SET e2e:cov:$i v$i" 2>&1 | tr -d '\r')"
+    if [ "$out" = "OK" ]; then
+        writable=$((writable + 1))
+    else
+        refused=$((refused + 1))
+    fi
+done
+# Both halves matter. `refused > 0` is the anti-vacuity guard: it proves the
+# killed master's slots really are uncovered, so the `writable > 0` half is
+# measuring the `no` behaviour rather than a cluster where every slot still
+# has an owner.
+[ "$writable" -gt 0 ] \
+    || fail "no key could be written after a master lost its replica, even with cluster-require-full-coverage=no"
+[ "$refused" -gt 0 ] \
+    || fail "every key was still writable after 6379 and 6383 died; the test did not exercise an uncovered slot at all"
+echo "  OK: $writable writable / $refused refused of 60 keys (uncovered slots exist and the rest still serve)"
+echo "  cluster_state: $(ssh_root "$A_IP" "$PREFIX/bin/redis-cli -a $PASS --no-auth-warning -h $A_IP -p 6380 cluster info" | grep '^cluster_state:' | tr -d '\r')"
 
 log "E2E PASSED"

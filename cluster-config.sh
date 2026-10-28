@@ -152,14 +152,15 @@ for (( i = 1; i <= CONF_NODE_COUNT; i++ )); do
     [ -n "$_dry_groups" ] && _dry_groups="$_dry_groups "
     _dry_groups="${_dry_groups}${CONF_NODE_HOST[$i]}:${CONF_NODE_PORTS[$i]}"
 done
-if topology_plan "$_dry_groups"; then
-    log_info "  Planned topology (from the config hosts; the real run uses the resolved SSH hosts):"
-    print_topology
-else
-    # Not fatal here: with NODE_X_HOST overrides the resolved hosts can still
-    # work out, and the real run reports that properly. A dry-run should not
-    # reject a config it is only being asked to describe.
-    log_warn "  topology cannot be planned from the config hosts: $TOPO_ERROR"
+if [ "$DRY_RUN" = "1" ]; then
+    # Only a dry-run prints the topology here; a real run prints the
+    # authoritative one at step 9, computed from the resolved SSH hosts.
+    if topology_plan "$_dry_groups"; then
+        log_info "  Planned topology (from the config hosts; the real run uses the resolved SSH hosts):"
+        print_topology
+    else
+        log_warn "  topology cannot be planned from the config hosts: $TOPO_ERROR"
+    fi
 fi
 
 if [ "$DRY_RUN" = "1" ]; then
