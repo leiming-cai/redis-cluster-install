@@ -31,7 +31,7 @@ $TMP  = "C:\Users\蔡雷鸣\AppData\Local\Temp\opencode"
 | 5 | 删 `opsHashSetPipeByHashData`，解开对 `realserver-entity` 的依赖 | ✅ DONE |
 | 6 | 删 `JedisUtils` / `JedisPoolUtils` | ✅ DONE |
 | 7 | 修正错误注释 | ✅ DONE |
-| 8 | 生成 patch 并留痕 | ☐ |
+| 8 | 生成 patch 并留痕 | ✅ DONE |
 | 9 | 三个应用最终验证（含真集群 L3） | ☐ |
 
 ## 完成记录
@@ -267,6 +267,40 @@ bean 名 `redisConfigProperties` → **`omsRedisConfigProperties`**（显式 `@B
 > （2026-10-22 那轮的 plan/spec/session 记录）。**刻意不改** ——
 > 那是已完成会话的**历史记录**，改它等于篡改当时的决策依据；
 > 而且那些结论（逐 key 删除、流式 SCAN）本身仍然正确。
+
+### Task 8 — 生成 patch 并留痕 ✅
+
+三份 patch 进 `docs/superpowers/patches/`：
+
+| 文件 | 目标根 | 文件数 |
+|---|---|---|
+| `2026-10-28-unified-redis-connection-platform-backend.patch` | `platform\backend` | 13 |
+| `2026-10-28-unified-redis-connection-napstarweb.patch` | `application\backend\napstarweb` | 2 |
+| `2026-10-28-unified-redis-connection.patch` | 两个根合并（合成仓库用）| 15 |
+
+- **证据（我亲自复核）**：
+  - `git apply --reverse --check` → backend **0**、napstarweb **0**
+  - **正向重建**：从纯净基线 + patch 重建 → 与现网**逐文件 hash 比对**
+    → backend `checked=15 mismatches=0`、napstarweb `mismatches=0`
+  - patch 首 3 字节 = `100,105,102`（`dif`），无 BOM，UTF-8
+  - 15 个 `diff --git`、5 个 `deleted file mode`；
+    `^\+.*realserver-entity` **无命中**（确认依赖是被移除而非新增）
+
+> **⭐ 计划里的 Step 2b 有个会静默出错的坑**（subagent 发现）：
+> 它只"复制存在的文件"，**从不删除已删的文件**，于是 `git add -A` 认为它们没变，
+> **5 个删除全部丢失** —— 第一版 patch 只有 10 个 `diff --git`、**0** 个 `deleted file mode`。
+> 必须显式把不存在的文件从工作树里 `Remove-Item` 掉。
+>
+> **⭐⭐ 另一个更隐蔽的坑：`core.autocrlf=true` 会毁掉 patch**。
+> 源文件**行尾是混的**（`pom.xml` 是 LF，`RedisUtil.java` 是 CRLF）。
+> Windows 默认 `autocrlf=true` 会在提交时把 CRLF 规范化成 LF，
+> 于是 patch 的"改动前"那一侧**与磁盘原始字节对不上** → patch 应用失败。
+> 必须用 `core.autocrlf=false` / `core.eol=lf` 建工作仓库。
+>
+> **⭐ 还有一点：一个 patch 无法同时反向应用到两个根** —— 两条树的路径前缀不同
+> （`realserver/...` 与 `web-controller/...` 分属不同的绝对根），
+> 几何上不可能。所以**按根拆成两份**，合并版只用于合成仓库。README 里写清楚了。
+
 
 
 
