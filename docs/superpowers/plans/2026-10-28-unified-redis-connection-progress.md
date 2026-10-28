@@ -26,7 +26,7 @@ $TMP  = "C:\Users\蔡雷鸣\AppData\Local\Temp\opencode"
 | 0 | 备份原始文件（17 个 + manifest） | ✅ DONE |
 | 1 | `RedisUtil` 13 组方法加 `@Deprecated` | ✅ DONE |
 | 2 | `RedisPropertiesConfig` bean 改名 | ✅ DONE |
-| 3 | 删三个墓碑文件 | ☐ |
+| 3 | 删三个墓碑文件 | ✅ DONE |
 | 4 | 补全三个应用的 `oms:` 配置块 | ☐ |
 | 5 | 删 `opsHashSetPipeByHashData`，解开对 `realserver-entity` 的依赖 | ☐ |
 | 6 | 删 `JedisUtils` / `JedisPoolUtils` | ☐ |
@@ -104,6 +104,30 @@ bean 名 `redisConfigProperties` → **`omsRedisConfigProperties`**（显式 `@B
 - **变异检验（我亲自做的）**：把 `@Bean("omsRedisConfigProperties")` 改回裸 `@Bean` 后
   重跑 → **2 条全红**（`theOldBeanNameNoLongerResolves` 报 `expected: <false> but was: <true>`，
   另一条因新名不存在而 Error）→ 证明这条测试**不是空转**，改回去文件即恢复。
+
+### Task 3 — 删三个墓碑文件 ✅
+
+三个「在消费方自己加一份 `RedisPropertiesConfig`」的失败尝试墓碑已删除。
+**全树现在只剩一个** `RedisPropertiesConfig.java`（`realserver-oms` 里的真身）。
+
+- **证据**：三个文件 `Test-Path` 均为 `False`；全树 grep 只剩 1 个；
+  `modelserver-controller EXIT=0`；`rtdata-module EXIT=0`；`napstarweb EXIT=0`；
+  `realserver clean install EXIT=0`；`oms` 52/52 绿
+
+> **两个环境坑（都不是本次改动引起的，但会绊住后续任务）**：
+>
+> 1. **本地仓库里的 `realserver-oms` jar 是旧的**。`rtdata-module` 通过
+>    `realserver-service` **传递依赖** `oms`，maven 从
+>    `D:\java\apache-maven\mvnRepo`（`settings.xml` 的 `localRepository`）取到
+>    10/23 的旧 jar —— 那里面连 `RedisClusterHashPipeline` 都没有，
+>    报"找不到符号"。**改了 `oms` 之后必须 `mvn install` 重装它**，
+>    否则下游模块编译的是旧代码。
+> 2. **proguard 需要 JDK 8**。`oms/pom.xml` 配了 `proguard-maven-plugin`，
+>    它要 `${JAVA_HOME}/jre/lib/rt.jar`，**JDK 9+ 没有这个文件**。
+>    用 JDK 21 构建会报 `Can't read .../jre/lib/rt.jar`。
+>    **本机 `JAVA_HOME` 是 `D:\java\java-se-8u42-ri`（JDK 8），没问题**；
+>    但如果哪个 shell 把它切到 JDK 21，`clean install` 就会失败。
+
 
 
 
