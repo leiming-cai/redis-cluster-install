@@ -86,7 +86,7 @@ NODE_A_SSH_USER=root NODE_A_HOST=10.0.0.1 NODE_A_SSH_PORT=22 NODE_A_SSH_PASS='..
 NODE_B_SSH_USER=root NODE_B_HOST=10.0.0.2 NODE_B_SSH_PORT=22 NODE_B_SSH_PASS='...' \
 bash cluster-config.sh
 
-# 先看要做什么，不实际执行
+# 先看要做什么，不实际执行（会打印将要建的主从拓扑）
 bash cluster-config.sh --dry-run
 
 # 只解析凭证并打印，不实际执行
@@ -99,6 +99,25 @@ bash cluster-config.sh --print-credentials
 
 **脚本不负责**（需预先准备）：编译安装 Redis、创建 `redis` 用户。
 运行前脚本会**校验**这两项，缺失时报出具体缺哪几项。
+
+### 两台机器，每台 3 个实例（3 主 3 从）
+
+```bash
+cp cluster.conf.example cluster.conf   # 填上两台机器的 IP、端口和密码
+export NODE_A_SSH_PASS='...' NODE_B_SSH_PASS='...'
+bash cluster-config.sh --dry-run        # 先看拓扑推导
+bash cluster-config.sh                  # 执行
+```
+
+主从映射由脚本**显式推导**（副本一定挂在另一台机器的 master 上），不是交给
+`redis-cli` 自动分配 —— 自动分配实测会把 3 个 master 全放到一台机器上。
+
+**容错边界**：3 个 master 分到 2 台机器，必有一台承担 2 个；那台挂掉集群停写，
+另一台挂掉集群仍可用（降级）。这是因为副本提升需要过半 master 存活授权。
+**要两头都活，至少需要 3 台机器。**
+
+完整说明（前置条件、拓扑推导、容错边界、回滚）见
+[docs/USAGE.md 的 5.7.8 节](docs/USAGE.md)。
 
 **脚本负责创建**：运行时目录（`/etc/redis/cluster`、每实例的数据目录、运行目录、日志目录），
 并把归属修正为 `redis:redis`。这一点与 `install.sh` 不同。

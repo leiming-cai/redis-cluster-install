@@ -316,13 +316,24 @@ cluster_require_full_coverage = yes        # 默认 yes；设成 no 则 master �
 
 | 断言 | 内容 | 判定方式 |
 |---|---|---|
+| **A0** | 实际的主从映射 == 脚本计划的那一份 | 从 `install.log` 提取计划、从 `CLUSTER NODES` 提取实际，排序后比对 |
 | **A1** | 每个 master 至少 1 个副本 | 解析 `CLUSTER NODES`：master 的 `flags` 与其后继副本行的 `master-id` |
 | **A2** | **每个副本与其 master 不同机** | 比对两行的 IP 段 | 
 | **A3** | 脚本打印的脆弱主机 == E2E **独立算**出的那台 | E2E 用自己的算式（不看脚本输出）重算一遍再比对 |
 | **A4** | 杀掉**主数较少**的那台 → 集群仍可用 | `cluster_state:ok`（**轮询**，不单次读）+ `SET`/`GET` 成功 |
 | **A5** | 杀掉**主数较多**的那台 → 集群不可用 | 期望 `CLUSTERDOWN`（把已知限制钉死） |
-| **A6** | `cluster_require_full_coverage=no` 生效 | 杀一个 master 后，存活槽位仍可写 |
+| **A6** | `cluster_require_full_coverage=no` 生效 | 杀一个 master **连同它的副本**，存活槽位仍可写 |
 | **A7** | 现有 DoD1–DoD5、DoD7 保持绿 | 原样不动 |
+
+> **A0 是执行后补上的**：A1/A2 只验证「性质」，验不了「集群是不是按计划装的」。
+> 旧的单条 `--cluster-replicas 1` 会产出「3 个 master 全在 A、3 个副本全在 B」，
+> 这种布局**同时满足 A1 和 A2**（每个副本确实与它的 master 异机），所以只有比对
+> 映射本身才能钉住两阶段装配。
+
+> **A6 的执行补注**：第一版只杀了 master 6379，结果它的副本 6383 被提升，
+> 槽位仍被覆盖 → 60 个 key 全可写，**即使 `coverage=yes` 也会绿**。
+> 现版本连同副本一起杀，并同时断言「可写 > 0」与「被拒 > 0」，
+> 后者是反空转守卫。
 
 **A3 的用意**：脚本的拓扑算法和 E2E 的判定算法**故意写成两份**。
 用同一份代码自证，等于没验 —— 这是本仓库反复吃过的亏（DoD5 那个「一直是绿的断言」）。
@@ -388,9 +399,10 @@ $env:NODE_B_SSH_PASS = "<B机ssh密码>"
 
 ### 7.3 证据（探针脚本入仓）
 
-§3 的 4 个探针脚本（4 节点 / 3主1从 / 6 节点两种顺序 / full-coverage）
-存到 `tests/probes/`，**让本 spec 的每条事实都能被重跑验证**，
-而不是只以文字形式存在于 spec 里。
+§3 的探针脚本（`probe-4node` / `probe-3m1r` / `probe-order` / `probe-final` /
+`probe-coverage`，共 **5** 个）已存到 `tests/probes/`，**让本 spec 的每条事实都能
+被重跑验证**，而不是只以文字形式存在于 spec 里。`tests/check_syntax.sh` 已纳入
+这批脚本的语法检查。
 
 ### 7.4 文档（**含用户明确要求的使用说明**）
 

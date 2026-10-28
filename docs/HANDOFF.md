@@ -1,9 +1,15 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-28
-**工作分支**：无 —— 第七~十一轮都在 `main` 上，**全部已推送**
+**工作分支**：无 —— 第七~十二轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十一轮已推送（`43d781d..90c801e`，CI success）
+**基线**：`main` = `origin/main`；第十二轮见下方「第十二轮」
+**第十二轮（2026-10-28）**：把「两台机器 + Redis 已装好」这个实际需求落进
+`cluster-config.sh` —— 第 9 步从「单条 `--cluster create --cluster-replicas 1`」
+改成**两阶段装配**（先建主、再逐个显式挂副本），新增 `lib/topology.sh`（纯函数
+算主从映射）、`cluster_require_full_coverage` 配置键，以及 Docker E2E 的
+**A0–A6** 七条断言。**关键结论：redis-cli 的自动分配会让整机故障致命；两台机器
+做不到对称容错。** 详见下文「第十二轮」。
 **第七轮（2026-10-27）**：在 CPS 节点镜像上部署集群 + 跑 `RTListener.onMessage`
 写入测试，并固化成 `scripts/e2e-cpsweb-nodes.sh`。
 **已提交**（`e2d01b4`），详见下文「第七轮」。
@@ -74,6 +80,14 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 
 **下一步**：第十轮改动待推送。**在一台干净的集群上重测倍率**（当前环境键数涨到 480 万、
 AOF/RDB 反复触发，噪声盖过了差值）；再要提速就做消费/解析侧。
+
+**第十二轮（2026-10-28）把「两台机器 + Redis 已装好」这个实际需求落进了脚本**：
+第 9 步从单条 `--cluster create --cluster-replicas 1` 改成**两阶段装配**
+（先 `--cluster-replicas 0` 建主，再逐个 `--cluster add-node --cluster-slave` 挂副本），
+新增 `lib/topology.sh`（纯函数算主从映射）与 `cluster_require_full_coverage` 配置键。
+**实测证明 `redis-cli` 的自动分配会让整机故障致命**（3 个 master 全挤到一台），
+并且**两台机器在数学上做不到对称容错** —— 要两头都活至少需要 3 台机器。
+bats 163 → **199**，E2E 新增 A0–A6 七条断言并全绿。
 
 ---
 
@@ -261,6 +275,130 @@ Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 
 > 键数比第九轮涨了 6 倍，是这轮每轮 20 万新 obid 累积出来的。
 > 要恢复干净基线，要么删掉 benchmark 数据，要么让脚本复用固定 obid 段（会牺牲抽样检测能力）。
+
+---
+
+## 第十二轮（2026-10-28）：两台机器 6 实例的显式主从装配
+
+**这一轮回答的问题是：两台机器、Redis 已装好，怎么配成集群？**
+
+### 一、结论先行
+
+`cluster-config.sh` 原来第 9 步是一条
+`redis-cli --cluster create <全部实例> --cluster-replicas 1`。
+**实测证明这条路在 2 台机器上是错的**：
+
+| 6 实例 / 2 台机器，create 的节点顺序 | redis-cli 的分法 | 杀掉一台机器 |
+|---|---|---|
+| `A,A,A,B,B,B`（配置文件分组顺序） | **3 个 master 全在 A** | `CLUSTERDOWN` |
+| `A,B,A,B,A,B`（交错） | A:2 主，B:1 主 | `CLUSTERDOWN`（存活 master 只有 1，达不到多数派） |
+| `A,B,B,A,B,A` | A:1 主，B:2 主 | **集群仍可用，写入 OK** |
+
+原因是**副本提升需要过半 master 存活授权**（`cluster_size/2 + 1`）。
+3 个 master 分到 2 台机器，必有一台承担 2 个；那台挂掉就只剩 1 个 master，
+副本**无权**提升 → 槽位无人接管 → 集群停写。
+
+所以：**主从映射必须显式算出来，且副本必须挂在另一台机器的 master 上。**
+
+### 二、改动（7 个提交）
+
+| 提交 | 内容 |
+|---|---|
+| `8f6baa2` | 新增 `lib/topology.sh`：纯函数，按节点组 round-robin 选主、按「异机候选最少者优先」配副本，自检 4 条不变式，并判定每台机器故障时集群是否还活 |
+| `7e78fc7` | 补 5 条单测（锁住「protected 半条规则」「最稀缺优先」「只跨一机必须拒绝」「通配符 host 不得被 shell 展开」）+ 修掉 `for item in $groups` 的路径名展开隐患（`lib/conf.sh` 里有过同款坑） |
+| `7710993` | `cluster.conf` 新增 `cluster_require_full_coverage`（默认 `yes`，非法值报错） |
+| `241e7cb` | 该键渲染进 `redis.conf`（`%REQUIRE_FULL_COVERAGE%`） |
+| `9c4d6a0` | `lib/cluster.sh` 增加 `build_add_replica_command` / `build_eval_argv` / `cluster_nodes_index` / `cluster_role_of` / `cluster_replica_master_of` / `cluster_exists`；`build_create_command` 的 replicas 可传参 |
+| `28298b0` | 第 9 步改成两阶段装配；`--dry-run` 现在也会打印拓扑；幂等（已正确的跳过、角色不符报错） |
+| `46eb005` | Docker E2E 增加 **A0–A6** 七条断言 |
+| `f063299` | 5 个探针脚本入仓（`tests/probes/`），spec §3 的每条事实可复现 |
+
+### 三、两阶段装配
+
+```
+9a  选主 + 配副本    lib/topology.sh（纯函数）
+9b  建主            redis-cli --cluster create <3 个 master> --cluster-replicas 0
+9c  加副本          redis-cli --cluster add-node <副本> <master> --cluster-slave   （逐个）
+```
+
+`--cluster-replicas 0` 是关键：先不分配副本，把 master 完全由我们决定，再逐个
+指定副本挂到哪个 master 上。
+
+**拓扑推导（2 台 × 3 实例）**：
+
+```
+master  A:6379   replica: B:6383
+master  B:6382   replica: A:6381
+master  A:6380   replica: B:6384
+脆弱主机：A（2 个 master）—— A 挂掉集群不可用
+受保护主机：B（1 个 master）—— B 挂掉集群仍可用（降级）
+```
+
+布局由**配置文件里节点组的顺序 + 组内端口顺序**确定性推导。想让另一台受保护，
+把 `[node.a]` / `[node.b]` 对调即可。
+
+### 四、Docker E2E 的七条新断言（A0–A6）
+
+| 断言 | 内容 | 为什么必须有 |
+|---|---|---|
+| A0 | 实际主从映射 == 脚本计划的那份 | A1/A2 只验「性质」，验不了「是不是按计划装的」：旧的单条 create 产生「主全在 A、从全在 B」，**A1 和 A2 都会绿** |
+| A1 | 每个 master 至少 1 个副本 | |
+| A2 | 每个副本与其 master **不同机** | 同机副本 = 同机故障双杀，等于没有副本 |
+| A3 | 脚本打印的脆弱主机 == E2E **独立算**出的那台 | 用同一份代码自证等于没验 |
+| A4 | 杀掉受保护的那台 → 集群仍可用 | 真提升，真写入 |
+| A5 | 杀掉脆弱的那台 → 集群停写 | **把已知限制钉死**：将来若布局逻辑变了，这条会红，提示重新评估 |
+| A6 | `coverage=no` 时无覆盖槽位存在、其余仍可写 | 见下面的「空转」教训 |
+
+**E2E 现在会装配 3 次集群**（初始 + A4 重建 + A6 重建），耗时明显变长。
+
+### 五、这一轮抓到的两个「空转断言」（都是实测出来的）
+
+1. **A6 第一版是空转的**：它只杀了 master 6379，但 6379 的副本 6383 被提升
+   → 槽位仍被覆盖 → 60 个 key 全可写。**即使 `coverage=yes` 也会绿。**
+   现在改成**连同副本一起杀**（6379 + 6383），并加断言：必须**同时**有
+   「可写 > 0」和「被拒 > 0」—— 后者是反空转守卫，证明真的构造出了未被覆盖的槽位。
+   实测结果：39 可写 / 21 被拒。
+2. **A0 第一版把日志里的计划读了两次**（第 2 步 dry-run 预览 + 第 9 步正式打印），
+   导致 `planned` 里每个 master 出现两次。改成 `sort -u`，同时把第 2 步的打印
+   限制在 `--dry-run` 时才输出。
+
+### 六、变异检验
+
+| 变异 | 结果 |
+|---|---|
+| 把拓扑算法的异机约束去掉（副本挂同机 master） | **A2 变红**：`replica 172.22.0.2:6381 is on the same host as its master 172.22.0.2:6379`，退出码 1；A0 仍绿（计划 == 实际） |
+| `cluster_require_full_coverage` 的取值校验去掉 | `conf.bats` 第 67 条变红 |
+| 拓扑算法的 15 种变异（由 spec 审查方执行） | 每条都有对应断言变红 |
+
+### 七、验证结果（本轮结束）
+
+| 检查 | 结果 |
+|---|---|
+| bats（非特权用户，bash 5.1） | **199 通过 / 0 失败**（基线 163 → 199） |
+| `check_syntax.sh` | `TOTAL=43 FAIL=0` |
+| `validate_libs.sh` | `PASS=54 FAIL=0` |
+| bash 4.3 兼容 | **199 通过**，`BASH_COMPAT: PASS` |
+| `scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 **0**，A0–A6 全绿 |
+
+> **跑 `check-bash-compat.sh` 的坑**：它内部还要起 docker，所以从容器里跑时必须
+> 设 `BASH_COMPAT_HOST_REPO=D:/work/rediscluterproject`，否则 daemon 解析不到
+> 容器内的 `/repo`，现象是 `find: tests: No such file or directory` + bats 用法报错。
+
+### 八、已知限制（写进文档，不要当 bug）
+
+1. **两台机器做不到对称容错**（多数派原理）。本轮布局下：主数少的那台故障 →
+   集群可用（降级）；主数多的那台故障 → 集群停写。**要两头都活，至少 3 台机器。**
+2. `cluster_require_full_coverage=yes`（默认）时任一 master 挂掉即全集群停写。
+   2 机部署建议显式设 `no`。
+3. 拓扑算法对 N 台机器通用，但**只在 2 台上验证过**。
+4. 真机的 `cluster-node-timeout` 是模板默认 15000ms，故障转移比 E2E（5000ms 探针）慢。
+
+### 九、下一步
+
+1. 把 `cluster.conf` 的 `<A机IP>` / `<B机IP>` / 密码填成真值，先 `--dry-run`，
+   再正式执行，按 `docs/USAGE.md` 5.7.8 的「第 5 步：验证」核对。
+2. 在真机上演练一次「挂掉受保护那台」—— 期望集群仍可读写（降级）。
+3. （可选）若要真正的双机容错，评估加到 3 台机器。
 
 ---
 

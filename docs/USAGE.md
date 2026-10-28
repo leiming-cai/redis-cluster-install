@@ -333,17 +333,182 @@ bash scripts/e2e-cluster-config.sh
 
 需要 Docker。会在本地起两个容器模拟节点（真实 sshd + systemd），基于官方
 `redis:8` 镜像，然后跑完整流程并校验：6 实例 PING、16384 槽位覆盖、跨机读写、
-幂等重跑、删掉 `redis` 用户后 preflight 必须拒绝、以及杀主节点后**其副本**必须
-被提升。
+幂等重跑、删掉 `redis` 用户后 preflight 必须拒绝、杀主节点后**其副本**必须
+被提升，以及 5.7.8 里列出的 A0–A6（拓扑不变式与两种整机故障的结果）。
 
 节点与控制机都跑真实 Redis 8，脚本会先断言版本，不是 8 直接失败 —— 否则换回
 旧底包时这套测试依然会全绿，却什么 Redis 8 的行为都没验证。
+
+这套 E2E 会装配 **3 次**集群（初始 + A4 重建 + A6 重建），耗时比早期版本长。
 
 镜像源可通过环境变量切换：
 
 ```bash
 E2E_REGISTRY=docker.1ms.run/library bash scripts/e2e-cluster-config.sh
 ```
+
+---
+
+### 5.7.8 两台机器部署 6 实例集群（每台 3 个）
+
+这是 `cluster-config.sh` 最常用的形态：两台机器，Redis 已装好，每台 3 个实例，
+一共 3 主 3 从。
+
+#### 前置条件
+
+每台机器上都要有：
+
+| 项 | 检查命令 | 期望 |
+|---|---|---|
+| Redis 二进制 | `ls /opt/software/redis/bin/redis-server /opt/software/redis/bin/redis-cli` | 两个文件都在且可执行 |
+| `redis` 用户 | `id redis` | 有输出 |
+| systemd | `systemctl --version` | 有版本号 |
+| 两台互通 | A 上 `ping -c1 <B的IP>`、`nc -z <B的IP> 6379` | 通 |
+
+脚本**不会**替你装 Redis、也不建 `redis` 用户 —— preflight 会检查并指名缺哪一项。
+控制机上需要 `bash 4+`、`sshpass`、`openssh-client`，`redis-cli` 可选
+（没有就从节点上跑）。
+
+#### 第 1 步：写 cluster.conf
+
+```bash
+cp cluster.conf.example cluster.conf
+```
+
+```ini
+redis_prefix     = /opt/software/redis
+cluster_password = <你的集群密码>
+bind_addr        = 0.0.0.0
+cluster_require_full_coverage = no
+
+[node.a]
+host     = <A机IP>
+ssh_port = 22
+ports    = 6379,6380,6381
+
+[node.b]
+host     = <B机IP>
+ssh_port = 22
+ports    = 6382,6383,6384
+```
+
+`cluster.conf` 含密码，已在 `.gitignore` 里，不要提交。
+
+**为什么两台机器建议 `cluster_require_full_coverage = no`**：默认的 `yes` 表示
+「只要有槽位没被覆盖就拒绝一切写入」，master 一挂整个集群停写；`no` 时存活
+master 负责的槽位仍可读写。实测（redis 8.10.2）：`yes` 时 master 挂掉后 `SET`
+返回 `CLUSTERDOWN`，`no` 时存活槽位的 `SET`/`GET` 正常。
+
+#### 第 2 步：设置 SSH 密码
+
+环境变量优先，缺了才交互式问：
+
+```bash
+export NODE_A_SSH_USER=root NODE_A_SSH_PASS='<A机的ssh密码>'
+export NODE_B_SSH_USER=root NODE_B_SSH_PASS='<B机的ssh密码>'
+```
+
+#### 第 3 步：先看计划（不改任何东西）
+
+```bash
+bash cluster-config.sh --dry-run
+```
+
+会打印节点、端口，以及**将要建的集群布局**：
+
+```
+[INFO]    Planned topology (from the config hosts; the real run uses the resolved SSH hosts):
+[INFO]    master  10.0.0.1:6379
+[INFO]    master  10.0.0.2:6382
+[INFO]    master  10.0.0.1:6380
+[INFO]    replica 10.0.0.1:6381 -> master 10.0.0.2:6382
+[INFO]    replica 10.0.0.2:6383 -> master 10.0.0.1:6379
+[INFO]    replica 10.0.0.2:6384 -> master 10.0.0.1:6380
+[WARN]    host 10.0.0.1: if it fails the cluster STOPS serving (...)
+[INFO]    host 10.0.0.2: if it fails the cluster keeps serving (degraded)
+```
+
+#### 第 4 步：执行
+
+```bash
+bash cluster-config.sh
+```
+
+9 步：读配置 → 计划 + 拓扑 → 凭证 → preflight → 建目录 → 下发 auth.conf →
+下发 redis.conf 和 systemd unit → 启动并 PING → 建集群。
+
+第 9 步是**两阶段装配**：
+
+1. `redis-cli --cluster create <3 个 master> --cluster-replicas 0`
+2. 逐个 `redis-cli --cluster add-node <副本> <master> --cluster-slave`
+
+为什么不是一条 `--cluster create --cluster-replicas 1`：redis-cli 自己分配角色，
+实测（6 实例 / 2 台机器）会把 3 个 master 全放到一台机器上，那台一挂就没有任何
+master 存活；即使交错顺序让它变成 2/1，挂掉有 2 个 master 的那台仍然致命。
+副本提升需要**过半 master 存活授权**，所以主从映射必须显式指定，且副本必须挂在
+**另一台**机器上的 master。
+
+**可以重复执行**：重跑会重新下发配置并重启实例；集群已健康时跳过建集群
+（打印 `Cluster already healthy — skipping create`）；中途失败也能重跑，会从断点
+继续（已是正确副本的跳过；角色不符的直接报错，不静默改动）。
+
+#### 第 5 步：验证
+
+```bash
+redis-cli -c -a '<集群密码>' -h <A机IP> -p 6379 PING
+redis-cli -c -a '<集群密码>' -h <A机IP> -p 6379 cluster info
+```
+
+期望：
+
+```
+cluster_state:ok
+cluster_slots_assigned:16384
+cluster_known_nodes:6
+cluster_size:3
+```
+
+跨机读写：
+
+```bash
+redis-cli -c -a '<集群密码>' -h <A机IP> -p 6379 SET demo:key from-A
+redis-cli -c -a '<集群密码>' -h <B机IP> -p 6382 GET demo:key     # -> from-A
+```
+
+#### 容错边界：两台机器的硬限制
+
+| 故障 | 结果 |
+|---|---|
+| 挂 1 个实例 | 副本接管，集群可用 |
+| 挂「master 数少」的那台 | 副本提升，集群仍可用（降级） |
+| 挂「master 数多」的那台 | 只剩 1 个 master，达不到多数派，副本**无权**提升 → 集群停写 |
+
+3 个 master 分到 2 台机器，必有一台承担 2 个 —— 这是算术，不是配置问题。
+**要两头都活，至少需要 3 台机器。**
+
+脚本每次运行都会把哪台是脆弱的打印出来。想让另一台受保护，把 `cluster.conf`
+里 `[node.a]` / `[node.b]` 两段对调即可（布局由节点组顺序确定性推导）。
+
+#### 回滚
+
+```bash
+bash uninstall.sh --force
+```
+
+#### 这一步的自动化验证
+
+`scripts/e2e-cluster-config.sh` 就是按这个形态跑的（2 节点 × 3 实例），并额外断言：
+
+| 断言 | 内容 |
+|---|---|
+| A0 | 实际的主从映射 == 脚本计划的那一份 |
+| A1 | 每个 master 至少 1 个副本 |
+| A2 | 每个副本与它的 master **不同机** |
+| A3 | 脚本打印的脆弱主机 == 独立重算出来的那台 |
+| A4 | 杀掉受保护的那台 → 集群仍可用 |
+| A5 | 杀掉脆弱的那台 → 集群停写（把已知限制钉住） |
+| A6 | `cluster_require_full_coverage=no` 时，无覆盖槽位存在、其余槽位仍可写 |
+| DoD1–DoD7 | 原有的 PING / 槽位 / 跨机读写 / 幂等 / preflight / 副本提升 |
 
 ---
 

@@ -8,6 +8,22 @@
 
 **Tech Stack:** bash 4.0+、bats 1.2.1、Redis 8（官方 `redis:8` 镜像，redis-cli 8.10.2）、Docker、systemd（容器内）
 
+> **执行后的补注（2026-10-28）** —— 计划里以下几处与实际执行不同，以实际为准：
+>
+> 1. **Task 1 的两条测试写法有误**：bats 1.2.1 的 `run` 是 `output="$("$@" 2>&1)"`
+>    （命令替换 = 子 shell），函数里设的全局变量随子 shell 消失，所以
+>    `run topology_plan ...` 之后断言 `$TOPO_ERROR` 会报 unbound variable。
+>    实际改成直接调用 + `|| rc=$?`。
+> 2. **Task 1 的 Step 5 预测不准**：只把 `gi` 固定成 0 时，第 5 条用例仍然绿
+>    （`TOPO_SURVIVES` 在两种布局下都是 `no,yes`）。实际补了「前提」断言
+>    （第 1 台 2 个 master、第 2 台 1 个），才让它变红。
+> 3. **Task 6 多了一条 A0**（实际映射 == 计划映射）和一条反空转守卫（A6 的
+>    「被拒 > 0」），单靠 A1/A2 抓不住「退回旧的单条 create」。
+> 4. **Task 7 是 5 个探针脚本**，不是 4 个（另有 `probe-final.sh`）。
+> 5. **Task 5 额外改了 `--dry-run`**：原本第 2 步就退出，看不到拓扑；现在纯计算
+>    的拓扑规划提前到 dry-run 之前，正式运行只在第 9 步打印一次（避免重复）。
+> 6. **`check-bash-compat.sh` 从容器里跑**要设 `BASH_COMPAT_HOST_REPO`。
+
 ---
 
 ## 0. 执行环境（必读）
