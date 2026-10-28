@@ -176,8 +176,8 @@ $targets = @(
   "$BE\modelserver\controller\src\main\java\com\sac\platform\modelserver\config\RedisPropertiesConfig.java",
   "$BE\modelserver\controller\src\main\resources\application.yml",
   "$BE\modelserver\services\src\main\java\com\sac\platform\modelserver\service\impl\CacheServiceImpl.java",
-  "$BE2\napstarweb\web-controller\src\main\java\com\sac\application\napstarweb\config\RedisPropertiesConfig.java",
-  "$BE2\napstarweb\web-controller\src\main\resources\application.yml"
+  "$BE2\web-controller\src\main\java\com\sac\application\napstarweb\config\RedisPropertiesConfig.java",
+  "$BE2\web-controller\src\main\resources\application.yml"
 )
 foreach($t in $targets){
   if(Test-Path $t){
@@ -194,16 +194,22 @@ Expected: `baseline files: 17`
 - [ ] **Step 2b: 写一份 manifest（Task 8 靠它把备份还原成相对路径）**
 
 备份文件名里 `\` 与 `:` 都被换成了 `__`，**反推回相对路径有歧义**
-（原始路径里本来就有下划线）。所以 Task 0 必须同时写一份清单：
+（原始路径里本来就有下划线）。所以 Task 0 必须同时写一份清单。
+
+> ⚠️ **manifest 必须是 3 列**：`ROOT` / `相对路径` / `备份文件名`。
+> 只用 2 列（相对路径 + 备份名）**不足以区分来源** ——
+> `web-controller\...`（来自 BE2）与 `realserver\...`（来自 BE）
+> 的前缀判断会混淆。ROOT 取值 `BE` 或 `BE2`。
 
 ```powershell
 $manifestPath = "$bak\manifest.tsv"
 $rows = @()
 foreach($t in $targets){
   if(Test-Path $t){
-    $rel = $t.Replace("$BE\","").Replace("$BE2\","")
+    $root = if($t.StartsWith("$BE2\")){ "BE2" } else { "BE" }
+    $rel  = $t.Replace("$BE\","").Replace("$BE2\","")
     $safe = $rel.Replace("\","__").Replace(":","_")
-    $rows += "$rel`t$safe"
+    $rows += "$root`t$rel`t$safe"
   }
 }
 Set-Content -Path $manifestPath -Value $rows -Encoding UTF8
@@ -216,6 +222,16 @@ Expected: `manifest rows: 17`
 > `Out-File` 在 Windows PowerShell 5.1 下默认写 UTF-16LE。
 > 这个文件只是给 `git` 用的中间产物，用 UTF8 即可；
 > 但**绝不要用它写 Java 源码或 YAML**（见 §0.3）。
+>
+> **反过来也成立**：**绝不要用 `Set-Content` 改本计划文档本身** ——
+> 它会加 BOM 并把 LF 换成 CRLF。已经踩过一次，改文档一律用编辑工具。
+
+> ⚠️ **注意 `$BE2` 已经指向 `napstarweb` 目录本身**：
+> ```powershell
+> $BE2 = "D:\javawork\1.2\cpscloud1.0\code\application\backend\napstarweb"
+> ```
+> 所以路径是 `"$BE2\web-controller\..."`，**不是** `"$BE2\napstarweb\web-controller\..."`
+> （后者会把 `napstarweb` 重复一次，路径不存在）。
 
 - [ ] **Step 3: 验证备份完整（每个都有非空副本）**
 
@@ -491,7 +507,7 @@ Expected: 匹配到 1 行。**匹配不到就是没改成功。**
 `RedisPropertiesConfig`，结果 bean 名冲突）。留着它们，下一个人会以为"这条路可行"。
 
 **Files:**
-- Delete: `$BE2\napstarweb\web-controller\src\main\java\com\sac\application\napstarweb\config\RedisPropertiesConfig.java`
+- Delete: `$BE2\web-controller\src\main\java\com\sac\application\napstarweb\config\RedisPropertiesConfig.java`
 - Delete: `$BE\modelserver\controller\src\main\java\com\sac\platform\modelserver\config\RedisPropertiesConfig.java`
 - Delete: `$BE\realserver\plugins\rtdata-module\src\main\java\com\sac\platform\config\RedisPropertiesConfig.java`
 
@@ -499,7 +515,7 @@ Expected: 匹配到 1 行。**匹配不到就是没改成功。**
 
 ```powershell
 $graves = @(
-  "$BE2\napstarweb\web-controller\src\main\java\com\sac\application\napstarweb\config\RedisPropertiesConfig.java",
+  "$BE2\web-controller\src\main\java\com\sac\application\napstarweb\config\RedisPropertiesConfig.java",
   "$BE\modelserver\controller\src\main\java\com\sac\platform\modelserver\config\RedisPropertiesConfig.java",
   "$BE\realserver\plugins\rtdata-module\src\main\java\com\sac\platform\config\RedisPropertiesConfig.java"
 )
@@ -573,7 +589,7 @@ Expected: 两个都 `EXIT=0`，无 `ERROR`。
 **Files:**
 - Modify: `$BE\realserver\controller\src\main\resources\application.yml`（第 22-27 行附近）
 - Modify: `$BE\modelserver\controller\src\main\resources\application.yml`（第 89-96 行附近）
-- Modify: `$BE2\napstarweb\web-controller\src\main\resources\application.yml`（第 108-113 行附近）
+- Modify: `$BE2\web-controller\src\main\resources\application.yml`（第 108-113 行附近）
 
 - [ ] **Step 1: 先看每个文件当前的 `oms:` 块**
 
@@ -581,7 +597,7 @@ Expected: 两个都 `EXIT=0`，无 `ERROR`。
 foreach($f in @(
   "$BE\realserver\controller\src\main\resources\application.yml",
   "$BE\modelserver\controller\src\main\resources\application.yml",
-  "$BE2\napstarweb\web-controller\src\main\resources\application.yml")){
+  "$BE2\web-controller\src\main\resources\application.yml")){
   Write-Output "=== $f ==="
   Select-String -Path $f -Pattern "oms:" -Context 0,8
 }
@@ -631,7 +647,7 @@ oms:
 foreach($f in @(
   "$BE\realserver\controller\src\main\resources\application.yml",
   "$BE\modelserver\controller\src\main\resources\application.yml",
-  "$BE2\napstarweb\web-controller\src\main\resources\application.yml")){
+  "$BE2\web-controller\src\main\resources\application.yml")){
   Write-Output "=== $f ==="
   Select-String -Path $f -Pattern "^oms:" -Context 0,20
 }
@@ -646,7 +662,7 @@ $blocks = @()
 foreach($f in @(
   "$BE\realserver\controller\src\main\resources\application.yml",
   "$BE\modelserver\controller\src\main\resources\application.yml",
-  "$BE2\napstarweb\web-controller\src\main\resources\application.yml")){
+  "$BE2\web-controller\src\main\resources\application.yml")){
   $lines = Get-Content $f
   $i = ($lines | Select-String -Pattern "^oms:" | Select-Object -First 1).LineNumber
   $blocks += ,($lines[($i-1)..($i+17)] -join "`n")
@@ -1184,16 +1200,16 @@ cd $work
 
 **Step 2a: 铺「改动前」的版本**
 
-用 Task 0 写的 manifest（`rel` ↔ `safe` 两列）：
+用 Task 0 写的 manifest（3 列：`ROOT` / `相对路径` / `备份文件名`）：
 
 ```powershell
 $bak = "$env:TEMP\opencode\redis-unify-baseline"
 $manifest = @()
 foreach($line in (Get-Content "$bak\manifest.tsv")){
   if($line.Trim() -eq ''){ continue }
-  $parts = $line -split "`t"
-  if($parts.Count -ge 2){
-    $manifest += [PSCustomObject]@{ Rel = $parts[0]; Safe = $parts[1] }
+  $p = $line -split "`t"
+  if($p.Count -ge 3){
+    $manifest += [PSCustomObject]@{ Root = $p[0]; Rel = $p[1]; Safe = $p[2] }
   }
 }
 Write-Output "manifest entries: $($manifest.Count)"
@@ -1219,21 +1235,18 @@ foreach($m in $manifest){
 
 **Step 2c: 铺「改动后」的版本并提交**
 
-manifest 里只有**相对路径**，需要还原成绝对路径 —— 用 `rel` 的前缀判断来源：
+manifest 的 ROOT 列决定用哪个根目录：
 
 ```powershell
 foreach($m in $manifest){
-  $abs = if($m.Rel.StartsWith("napstarweb/")){
-           Join-Path "$BE2" ($m.Rel.Replace('/','\'))
-         } else {
-           Join-Path "$BE" ($m.Rel.Replace('/','\'))
-         }
+  $base = if($m.Root -eq "BE2"){ "$BE2" } else { "$BE" }
+  $abs  = Join-Path $base $m.Rel
   if(Test-Path $abs){
     $dest = Join-Path $work $m.Rel
     New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
     Copy-Item $abs $dest -Force
   }
-  # 已被删除的文件（三个墓碑）走不到这里 → 第二�� commit 里自然消失
+  # 已被删除的文件（三个墓碑）走不到这里 → 第二次 commit 里自然消失
 }
 & git add -A
 & git commit -q -m "unified redis connection"
@@ -1346,7 +1359,7 @@ function Test-RedisBoot([string]$dir, [string]$label){
 }
 Test-RedisBoot "$BE\realserver\controller"  "realserver"
 Test-RedisBoot "$BE\modelserver\controller" "modelserver"
-Test-RedisBoot "$BE2\napstarweb\web-controller" "napstarweb"
+Test-RedisBoot "$BE2\web-controller" "napstarweb"
 ```
 
 Expected: 三行都 `OK`
