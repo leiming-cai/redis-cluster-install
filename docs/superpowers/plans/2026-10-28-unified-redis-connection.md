@@ -51,13 +51,34 @@ PowerShell 的 `Out-File` / `Set-Content` / `echo >>` 会引入 BOM 或 CRLF，J
 
 ### 0.5 三个应用如何验证启动
 
-**本机上没有可用的 Redis 集群**（`cluster-config.sh` 那套需要 Docker，且 HANDOFF 记录
-"Docker VM 2 vCPU / 3.8 GB，swap 只剩 35 MB"）。因此：
+**本机有一套正在运行的 Redis 集群**（上一轮留下的 `rc-cpsweb-node-a` / `rc-cpsweb-node-b`），
+实测状态：
 
-- **第一步的取证靠「启动到 Redis 连接建立这一步」**，观察 `RedisUtilConfig` 打印的那行
-  `*** Using Redis Cluster with nodes: …`（见 Task 4 Step 5）
-- **不要求**在真实集群上验证写入（那是 `scripts/bench-consumer-write.sh` 的活，本轮不碰）
-- **每个 Task 结束都必须留一条「可复现的证据命令」**，写进该 Task 的完成记录
+```
+cluster_state:ok   cluster_slots_assigned:16384   cluster_known_nodes:6   cluster_size:3
+
+MASTER  172.21.0.2:6379  (node-a)  slots 0-5460
+MASTER  172.21.0.2:6380  (node-a)  slots 10923-16383
+MASTER  172.21.0.2:6381  (node-a)  slots 5461-10922
+REPLICA 172.21.0.3:6382  (node-b)  -> master 6379
+REPLICA 172.21.0.3:6383  (node-b)  -> master 6380
+REPLICA 172.21.0.3:6384  (node-b)  -> master 6381
+```
+
+- **集群密码**：`CpsE2eClusterPw`
+- **容器里的 redis-cli 不在 PATH 上**，要用 `/opt/software/redis/bin/redis-cli`
+- **已实测可用**：`HSET` / `HGETALL` / `CLUSTER KEYSLOT` 全部正常
+- 宿主机 `D:\work\rediscluterproject` 与集群**同机**，但 Java 应用在 Windows 上跑，
+  `172.21.0.x` 是 Docker 网络地址 —— **Windows 宿主机通常无法直连**。
+  因此 Java 侧的验证要放进**容器**里跑（见 §0.7）。
+
+**验证分层**：
+
+| 层次 | 手段 | 覆盖 |
+|---|---|---|
+| L1 单元 | `mvn -o test`（oms 模块） | 逻辑正确性 |
+| L2 装配 | 启动 Spring，看 `*** Using Redis Cluster with nodes: …` | 配置被读到 |
+| L3 **真集群** | 在容器里连 `172.21.0.2:6379` 真实写入/读回 | 端到端可用 |
 
 ### 0.6 ⚠️ Task 0 必须最先做：备份原始文件
 
@@ -73,6 +94,49 @@ $REPO = "D:\work\rediscluterproject"
 ```
 
 **Task 0 的完整步骤见文末「Task 0：备份原始文件（必须最先执行）」。**
+
+### 0.7 L3 真集群验证怎么做
+
+**已打通**：Windows 宿主机现在可以直连那套运行中的集群。
+
+宿主机本来**没有**到 `172.21.0.0/16` 的路由（实测 `Test-NetConnection` 全部 NO），
+容器也没把 Redis 端口发布到宿主机。解法是起一个 socat 转发容器
+（`rc-redis-publish`，在 `rc-cpsweb-net` 上），把 6 个实例发布到宿主机的
+`127.0.0.1:16379-16384`：
+
+| 宿主机端口 | 集群实例 | 角色 |
+|---|---|---|
+| `127.0.0.1:16379` | `172.21.0.2:6379` | master（slots 0-5460） |
+| `127.0.0.1:16380` | `172.21.0.2:6380` | master（slots 10923-16383） |
+| `127.0.0.1:16381` | `172.21.0.2:6381` | master（slots 5461-10922） |
+| `127.0.0.1:16382` | `172.21.0.3:6382` | replica |
+| `127.0.0.1:16383` | `172.21.0.3:6383` | replica |
+| `127.0.0.1:16384` | `172.21.0.3:6384` | replica |
+
+密码：`CpsE2eClusterPw`。**已实测** `AUTH` / `CLUSTER INFO` / `HSET` /
+`CLUSTER KEYSLOT` / `HGETALL` / `DEL` 全部正常。
+
+> **转发器是临时的**：`docker rm -f rc-redis-publish` 就没了。
+> 重建脚本见 `%TEMP%\opencode\start-publish.sh`，
+> 说明见 `%TEMP%\opencode\REDIS-CLUSTER-ACCESS.md`。
+>
+> **如果转发器不在了**，先重建再跑 L3 验证 ——
+> 否则 Java 会连不上，症状是连接超时而不是配置错误。
+
+**Java 侧的 `oms.clusters` 在真集群验证时用**：
+
+```yaml
+oms:
+  redisMode: cluster
+  clusters:
+    - 127.0.0.1:16379
+    - 127.0.0.1:16380
+    - 127.0.0.1:16381
+  password: CpsE2eClusterPw
+```
+
+> 只列 3 个 master 就够（Redis Cluster 的种子节点）。
+> 副本不需要列 —— `CLUSTER SLOTS` 会返回全部 6 个。
 
 ---
 
