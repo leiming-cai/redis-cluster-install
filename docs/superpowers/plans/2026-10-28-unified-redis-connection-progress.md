@@ -25,7 +25,7 @@ $TMP  = "C:\Users\蔡雷鸣\AppData\Local\Temp\opencode"
 |---|---|---|
 | 0 | 备份原始文件（17 个 + manifest） | ✅ DONE |
 | 1 | `RedisUtil` 13 组方法加 `@Deprecated` | ✅ DONE |
-| 2 | `RedisPropertiesConfig` bean 改名 | ☐ |
+| 2 | `RedisPropertiesConfig` bean 改名 | ✅ DONE |
 | 3 | 删三个墓碑文件 | ☐ |
 | 4 | 补全三个应用的 `oms:` 配置块 | ☐ |
 | 5 | 删 `opsHashSetPipeByHashData`，解开对 `realserver-entity` 的依赖 | ☐ |
@@ -89,5 +89,21 @@ javadoc（写明集群下的**真实**行为 + 正确替代 + 注明本代码库
 
 > **顺带发现**：`lBRightPopAndLeftPush`（阻塞版 `lRightPopAndLeftPush`）也是双 key 命令、
 > 同样有非原子降级风险，但原先没被弃用。实测**全仓库无调用方** → 一并弃用（26 → 27）。
+
+### Task 2 — `RedisPropertiesConfig` bean 改名 ✅
+
+bean 名 `redisConfigProperties` → **`omsRedisConfigProperties`**（显式 `@Bean("...")`）。
+**方法名保持不变** —— Spring 按类型注入，bean 名只影响按名查找；
+改方法名会波及所有注入点。`RedisUtilConfig.java` **一行没动**（实测确认：它的 6 处
+`RedisConfigProperties redisConfigProperties` 都是方法参数，不是按名注入）。
+
+新增回归守卫 `RedisPropertiesConfigBeanNameTest`（2 条）：
+按新名取到 bean、按类型取到同一个实例、**旧名必须已不存在**。
+
+- **证据**：`mvn -o test` → `Tests run: 52, Failures: 0, Errors: 0` + `BUILD SUCCESS`
+- **变异检验（我亲自做的）**：把 `@Bean("omsRedisConfigProperties")` 改回裸 `@Bean` 后
+  重跑 → **2 条全红**（`theOldBeanNameNoLongerResolves` 报 `expected: <false> but was: <true>`，
+  另一条因新名不存在而 Error）→ 证明这条测试**不是空转**，改回去文件即恢复。
+
 
 
