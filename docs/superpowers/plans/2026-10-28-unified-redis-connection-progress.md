@@ -27,7 +27,7 @@ $TMP  = "C:\Users\蔡雷鸣\AppData\Local\Temp\opencode"
 | 1 | `RedisUtil` 13 组方法加 `@Deprecated` | ✅ DONE |
 | 2 | `RedisPropertiesConfig` bean 改名 | ✅ DONE |
 | 3 | 删三个墓碑文件 | ✅ DONE |
-| 4 | 补全三个应用的 `oms:` 配置块 | ☐ |
+| 4 | 补全三个应用的 `oms:` 配置块 | ✅ DONE |
 | 5 | 删 `opsHashSetPipeByHashData`，解开对 `realserver-entity` 的依赖 | ☐ |
 | 6 | 删 `JedisUtils` / `JedisPoolUtils` | ☐ |
 | 7 | 修正错误注释 | ☐ |
@@ -127,6 +127,68 @@ bean 名 `redisConfigProperties` → **`omsRedisConfigProperties`**（显式 `@B
 >    用 JDK 21 构建会报 `Can't read .../jre/lib/rt.jar`。
 >    **本机 `JAVA_HOME` 是 `D:\java\java-se-8u42-ri`（JDK 8），没问题**；
 >    但如果哪个 shell 把它切到 JDK 21，`clean install` 就会失败。
+
+### Task 4 — 补全三个应用的 `oms:` 配置块 ✅
+
+三个应用的 `application.yml` 都有了**完全相同**的 `oms:` 块（SHA-256 一致：
+`70c10ee4…`），`redisMode: cluster` **显式写出**（不靠默认值），
+并含 `clusters` / `password` / `database` / 三个超时 / 三个连接池参数。
+
+- **证据**：Python `yaml.safe_load` 解析三个文件 → 各自**只有一个顶层键 `oms`**，
+  11 个键齐全；无 BOM；三个工程 `mvn test` 全 `EXIT=0`
+- **⭐ R1 风险没有发生**：Nacos 并没有在 bootstrap 阶段用空值覆盖 `oms.*`。
+  正常启动与 `-Dspring.cloud.nacos.config.enabled=false` 两种情况下，
+  日志**都**打印
+  `*** Using Redis Cluster with nodes: 127.0.0.1:6379 (connectTimeout=2000ms, readTimeout=5000ms, maxWait=3000ms)`
+  —— 说明本地 `application.yml` 能独立撑起启动，Nacos 只是覆盖层。
+  （顺带发现：Nacos 服务 `node1:18848` 在本机根本连不上，重试 23 次但不影响启动，
+  这反而让"本地兜底有效"的结论更强了。）
+
+> **⭐ 为此新增了一条 L3 真集群契约测试** `RedisClusterOmsContractTest`（2 条）：
+> ① 断言 `oms.*` 绑定的值真的传到了 `JedisConnectionFactory`（含连接池参数）；
+> ② 用这个工厂对**真实集群**写入 → 读回 → 删除。
+> 集群不可达时用 `assumeTrue` **跳过**而不是变红（没有集群的构建环境不受影响）。
+>
+> 写这条测试时踩了两个坑：
+> - `@ConfigurationProperties` 打在 `@Bean` 方法上时，绑定由
+>   `ConfigurationPropertiesBindingPostProcessor` 完成，而 `ApplicationContextRunner`
+>   **不自动注册**它 → properties 全是 null →
+>   `RedisUtilConfig` 抛 `Redis mode mismatch: oms.redisMode='null'`。
+>   解法：`.withInitializer(ctx -> ConfigurationPropertiesBindingPostProcessor.register(...))`。
+> - `RedisClusterHelper` 是 `@Component` 不在 `AutoConfigurations` 里 →
+>   `NoSuchBeanDefinitionException`。解法：显式 `@ComponentScan` 扫 utils 包。
+
+> **⭐⭐ 让宿主机上的 Java 能用真集群 —— 这是本轮最费劲也最有价值的一段**
+>
+> 之前只做到"端口可达"（socat 转发 16379-16384 → 127.0.0.1），
+> 但 **Jedis 仍然连不上**：
+> ```
+> JedisClusterOperationException: Cluster retry deadline exceeded.
+> ```
+> 根因：**Jedis 连上种子节点后，会按 `CLUSTER SLOTS` 返回的"真实地址"去路由命令**，
+> 而集群广播的是 `172.21.0.2:6379` —— Windows 宿主机**没有**到 `172.21.0.0/16` 的路由
+> （`Get-NetRoute` 查不到，实测 `Test-NetConnection` 全 NO）。
+>
+> 解法：**让集群广播宿主机可达的地址**：
+> ```
+> CONFIG SET cluster-announce-ip   127.0.0.1
+> CONFIG SET cluster-announce-port  16379 / 16380 / …（转发端口）
+> ```
+> ⚠️ **踩坑：`cluster-announce-bus-port` 不能改**。它是节点**之间**通信用的，
+> 改了会让集群内部链路断掉（节点全部变 `disconnected`）。改回 `0`（= 用真实 bus 端口）即恢复。
+>
+> 改完后（这是**运行期**改动，只针对这套一次性 E2E 集群，不是生产配置）：
+> ```
+> 198348f5… 127.0.0.1:16379@16379 myself,master - 0 0 1 connected 0-5460
+> 1394f9b2… 127.0.0.1:16380@16380 master  - 0 1793170700000 2 connected 10923-16383
+> efe15966… 127.0.0.1:16381@16381 master  - 0 1793170701272 7 connected 5461-10922
+> ```
+> 实测 Jedis 从宿主机：`set -> OK`、`get -> probe:value` ✅
+> L3 契约测试 **2/2 绿、0 skipped**（真写真读了集群）。
+>
+> **变异检验**：把 `clusters` 指到错误端口 `127.0.0.1:19999` → 该条**跳过**（1 skipped）
+> —— 证明它不是空转，也没有让没有集群的环境变红。
+
 
 
 
