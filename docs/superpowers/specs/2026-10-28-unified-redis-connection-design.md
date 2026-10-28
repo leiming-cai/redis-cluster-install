@@ -399,6 +399,8 @@ map.forEach(redisTemplate.opsForHash()::putAll);
 >
 > **净效果**：`realserver-oms` 少一个方法、少一条依赖；
 > `realserver-dao` 多几行分组代码（那里本来就 import 了 `HashData`）。
+>
+> **已决策（2026-10-28 评审）**：采纳 A1，**删除** `opsHashSetPipeByHashData`。
 
 #### 5.1.2 清理死代码（缺陷 D / 目标 G6）
 
@@ -406,10 +408,15 @@ map.forEach(redisTemplate.opsForHash()::putAll);
 |---|---|---|---|
 | 4 | `realserver-oms/…/utils/JedisUtils.java` | **整个删除**（~700 行） | 全仓库零调用方；`jedis.select()` 在集群下非法 |
 | 5 | `realserver-oms/…/utils/JedisPoolUtils.java` | **整个删除**（~50 行） | 静态初始化读不存在的 `jedis.properties` → 调用即 NPE；唯一调用方 `OmsWriteByKafkaServiceImpl:268` 在 `isCluster` 分支外 |
-| 6 | `realserver-oms/…/utils/RedisUtil.java` | 删除 13 个集群不安全的死方法（清单见 §7.1） | 全仓库零调用方 |
+| 6 | `realserver-oms/…/utils/RedisUtil.java` | 13 个集群不安全的死方法：**加 `@Deprecated` 保留**，不删除 | 全部无调用方；保留可避免破坏潜在的外部/反射调用 |
 | 7 | `realserver-oms/…/utils/RedisUtil.java` | 修正 `CacheServiceImpl:73-74` 那类**错误注释** | 见 §7.2 |
 
-**`RedisUtil` 删除后的规模**：1400 行 → 约 700 行。
+> **已决策（2026-10-28 评审）**：13 个方法采用 **`@Deprecated` 保留**，不删除。
+> 理由：删除虽然零风险（已验证无调用方），但 `@Deprecated` 保留了 API 兼容性，
+> 且能在 IDE / 编译警告里**主动提示**后续使用者"这个方法在集群下不安全"——
+> 删除则只是让它们悄悄消失，下一个人可能重新写一个。
+> 每个方法加 `@Deprecated` 时**必须同时加一行 javadoc 说明集群下的正确做法**，
+> 例如"集群模式下请改用 `RedisPipelineUtil.delete(List)`（逐 key 删除）"。
 
 #### 5.1.3 不动的部分
 
@@ -423,8 +430,8 @@ map.forEach(redisTemplate.opsForHash()::putAll);
 
 | 问题 | 现状 | 决定 |
 |---|---|---|
-| 目录在 `realserver/common/oms/` 下 | 看起来像"实时数据的内部模块" | **不动**（N5）。目录位置是命名问题，不影响依赖正确性；移动目录会让 §5.1 的改动面翻倍 |
-| artifactId 叫 `realserver-oms` | "oms" 实为 order-management-system 的历史包袱，这里装的是 Redis 基础设施 | **不改**（N6）。改名要同步 `backend/pom.xml` 的 `dependencyManagement` + 三个工程的 pom + Artifactory 上架，是纯粹的仪式性成本 |
+| 目录在 `realserver/common/oms/` 下 | 看起来像"实时数据的内部模块" | **不动**（N5）。目录位置是命名问题，不影响依赖正确性；移动目录会让 §5.1 的改动面翻倍。**已决策（2026-10-28 评审）：不移动** |
+| artifactId 叫 `realserver-oms` | "oms" 实为 order-management-system 的历史包袱，这里装的是 Redis 基础设施 | **不改**（N6）。改名要同步 `backend/pom.xml` 的 `dependencyManagement` + 三个工程的 pom + Artifactory 上架，是纯粹的仪式性成本。**已决策：不改** |
 | 包名 `com.sac.platform.realserver.oms.*` | 同上 | **不动** |
 
 > **如果将来要改**，建议一次性做：目录 → `common/oms/`，artifactId → `redis-starter`，
