@@ -4,7 +4,9 @@
 **工作分支**：无 —— 第七~十三轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
 **基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十三轮已推送
-（`521f244..aadcbb9`），bats **199 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0）
+（`521f244..aadcbb9`）；**本次会话又推了一个 `80ad557`**（修 `check-bash-compat.sh`
+的假红 + 4 条回归测试）。当前 bats **203 通过 / 0 失败**，
+E2E `E2E PASSED`（退出码 0）
 
 > **⭐ 2026-10-29 会话开局复核（没有改生产代码，只验证 + 修环境 + 修一个测试脚本）**
 >
@@ -36,6 +38,13 @@
 > | `tests/bash_compat.bats`（**新**） | 4 条回归用例，用 docker stub 真跑内层脚本 |
 > | `tests/helpers/docker_stub.sh`（**新**） | docker stub：把内层 `sh -c` 真跑起来，配一个按需失败的假 `apk` |
 > | `docs/HANDOFF.md` | 本文件 |
+>
+> **本轮还发现了一个「下一轮待办」（未做，只记录）**：
+> **CI 的 `bash -n` 覆盖面有缺口** —— `tests/check_syntax.sh` 已经管了 45 个文件，
+> **但 CI 从来没跑它**，而是在 workflow 里手抄了一份更短的列表（6 个文件），
+> 两份必然漂移。已实测出 14 个脚本**没有任何 CI 语法检查**。
+> 修法只要一行（见「第十一轮遗留的待办」第 10 条）。
+> ⚠️ 改 workflow 要走 **SSH** 推送（PAT 没有 `workflow` scope）。
 >
 > **环境复原过程（下次会话注意）**：Docker Desktop 当时是**停的**，
 > 容器全在 `Exited` 状态。`docker start` 之后集群是 **`cluster_state:fail`**
@@ -2264,6 +2273,42 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
    它是**唯一能看见 bash 4.0-4.3 那类 bug 的地方**（CI 跑的是 bash 5.1）。
    CI 的 `container:` 作业需要容器里有 node 才能跑 `actions/checkout`，
    这条路要自己验一下，不是加一行就完事。
+   > ⚠️ **接进去之前先修掉它的「假红」** —— 已经修了（2026-10-29，
+   > 见「当前测试基线」一节）：它依赖 alpine CDN 下载 bats，而那个 CDN
+   > **间歇性失败**，失败时旧版只打印一句 `BASH_COMPAT: FAIL (exit 1)`，
+   > 看起来像「代码在 bash 4.3 上不兼容」。**接进 CI 之前不修，
+   > CI 会随机变红，而且红的原因会被指错方向。**
+
+10. **⭐ CI 的 `bash -n` 覆盖面有缺口**（2026-10-29 实测，本轮新发现）：
+    `.github/workflows/ci.yml` 里那条 `bash -n` 列表是**手工维护**的，
+    只列了 6 个文件 + `lib/*.sh`。实测哪些脚本**根本没有任何 CI 检查**：
+
+    | 脚本 | CI 的 `bash -n` | bats 里有 `bash -n`？ |
+    |---|---|---|
+    | `cluster-config.sh` | ❌ | ✅（`tests/cluster_config.bats`） |
+    | `scripts/e2e-cluster-config.sh` | ❌ | ❌ |
+    | `scripts/e2e-kafka-cluster.sh` | ❌ | ❌ |
+    | `scripts/bench-consumer-write.sh` | ❌ | ❌ |
+    | `scripts/check-bash-compat.sh` | ❌ | ❌ |
+    | `tests/check_syntax.sh` 本身 | ❌ | ❌ |
+    | `tests/validate_libs.sh` | ❌ | ❌ |
+    | `tests/helpers/*.sh`、`tests/probes/*.sh` | ❌ | ❌ |
+
+    **根因**：`tests/check_syntax.sh` **已经**把这一切都管了
+    （`TOTAL=45 FAIL=0`，覆盖上面每一个文件），**但 CI 从来没跑它** ——
+    CI 是在 workflow 里**手抄**了一份更短的列表，两份必然漂移。
+
+    **修法（很便宜）**：把 CI 那条手抄的 `for f in ...` 换成
+    ```yaml
+      - name: Bash syntax check
+        run: bash tests/check_syntax.sh
+    ```
+    一行改动，覆盖面从 6 个文件变成 45 个，而且**不再会漂移**
+    （新增脚本只要被 `check_syntax.sh` 收进去就自动被 CI 检查）。
+    `tests/validate_libs.sh` 同理（`PASS=54 FAIL=0`，纯 bash，不需要 docker）。
+
+    ⚠️ **改 `.github/workflows/ci.yml` 必须走 SSH 推送**（HTTPS 的 PAT
+    没有 `workflow` scope），命令见文末「推送方式」一节。
 
 ### 给下一个执行者的提醒
 
