@@ -1,0 +1,1679 @@
+diff --git a/common/idgenerator/pom.xml b/common/idgenerator/pom.xml
+index 04eb5c2..c0806c7 100644
+--- a/common/idgenerator/pom.xml
++++ b/common/idgenerator/pom.xml
+@@ -27,6 +27,16 @@
+ 				</exclusion>
+ 			</exclusions>
+ 		</dependency>
++		<!--
++			Redis 客户端：必须保留，不能当「本模块没用到」而删掉。
++			① 上面的 spring-boot-starter-data-redis 排除了 io.lettuce:lettuce-core，
++			   而本模块又不再依赖 realserver-oms —— 这一条 jedis 是下游
++			   （userservice、menuservice、model-interface 等）唯一能拿到的
++			   Redis 客户端；删掉它们就一个客户端都没有了。
++			② 本模块的主源码不用 jedis，只有测试 IdUtilRedisLockLiveTest 用
++			   （JedisConnectionFactory / JedisPoolConfig）。
++			下面的 commons-pool2 是 jedis 连接池的传递依赖，显式声明是为了把版本钉住。
++		-->
+ 		<dependency>
+ 			<groupId>redis.clients</groupId>
+ 			<artifactId>jedis</artifactId>
+@@ -82,10 +92,6 @@
+ 			<groupId>org.springframework.boot</groupId>
+ 			<artifactId>spring-boot-starter-cache</artifactId>
+ 		</dependency>
+-		<dependency>
+-			<groupId>com.sac.platform</groupId>
+-			<artifactId>realserver-oms</artifactId>
+-		</dependency>
+ 		<dependency>
+ 			<groupId>commons-io</groupId>
+ 			<artifactId>commons-io</artifactId>
+diff --git a/common/idgenerator/src/main/java/com/sac/platform/common/utils/IdUtil.java b/common/idgenerator/src/main/java/com/sac/platform/common/utils/IdUtil.java
+index c60df3e..bfd9e33 100644
+--- a/common/idgenerator/src/main/java/com/sac/platform/common/utils/IdUtil.java
++++ b/common/idgenerator/src/main/java/com/sac/platform/common/utils/IdUtil.java
+@@ -3,7 +3,6 @@ package com.sac.platform.common.utils;
+ import com.alibaba.druid.pool.DruidDataSource;
+ import com.sac.platform.common.dao.CommonDataMapper;
+ import com.sac.platform.common.entity.CommonData;
+-import com.sac.platform.common.utils.redis.RedisUtil;
+ import com.sac.platform.common.utils.snowflake.IdWorker;
+ import org.apache.commons.lang3.StringUtils;
+ 
+@@ -11,26 +10,25 @@ import javax.sql.DataSource;
+ import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.Map;
++import java.util.concurrent.TimeUnit;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+-import org.springframework.beans.factory.annotation.Autowired;
+-import org.springframework.stereotype.Component;
++import org.springframework.data.redis.core.RedisTemplate;
+ 
+ /**
+  * 获取ID<br>
+  *
++ * <p><b>这个类永远不能变成 Spring bean</b>（不要加 {@code @Component}）：
++ * 它的静态初始化会去容器里取 {@link CommonDataMapper}、{@link DataSource} 和
++ * {@link IdWorker}，而 napstarweb 的上下文里**没有** {@code CommonDataMapper} 这个 bean ——
++ * 一旦变成 bean，启动时静态初始化就会失败。
++ *
+  * @author zhanghb
+  */
+-// @Component
+ public class IdUtil {
+ 
+     private static CommonDataMapper commonDataMapper = SpringContextHolder.getBean(CommonDataMapper.class);
+ 
+-    // @Autowired
+-    // private static void setCommonDataMapper(CommonDataMapper commonDataMapper) {
+-    // IdUtil.commonDataMapper = commonDataMapper;
+-    // }
+-
+     static DataSource dataSource = SpringContextHolder.getBean(DataSource.class);
+ 
+     private static final Logger logger = LogManager.getLogger();
+@@ -39,6 +37,46 @@ public class IdUtil {
+ 
+     private static IdWorker idWorker = SpringContextHolder.getBean(IdWorker.class);
+ 
++    /**
++     * 抢锁的等待上限（毫秒）。非 final：测试要能把它调小。
++     *
++     * <p>{@code volatile}：测试用反射改它、别的线程读它 —— 没有 volatile 就是数据竞争。
++     */
++    private static volatile long lockTimeoutMs = 9999L;
++
++    /** 锁 key 的前缀。与原 idgenerator 的 RedisUtil 保持一致。 */
++    private static final String LOCK_PREFIX = "locked#";
++
++    /**
++     * 抢不到锁时的重试间隔（毫秒）。
++     *
++     * <p>没有它就是**无限速空转 SET NX**：把 CPU 和 Redis 都打满，直到等满整个超时。
++     */
++    private static final long LOCK_RETRY_INTERVAL_MS = 10L;
++
++    /**
++     * 取 Redis 模板。
++     *
++     * <p>**每次都从当前上下文里取，不缓存**：上下文会被销毁
++     * （ApplicationContextRunner 那种用法），缓存下来的模板会指向已失效的工厂。
++     * 代价只是一次 bean 查找 —— {@code getNextId} 本来就要走一次 Redis 往返
++     * 加一次 DB 查询，量级可忽略。
++     *
++     * <p>按类型取：容器里有多个 RedisTemplate 候选时，**带 {@code @Primary} 的那个胜出**；
++     * 一个都没有 {@code @Primary} 的话，{@code getBean(RedisTemplate.class)} 会抛
++     * {@code NoUniqueBeanDefinitionException}。
++     *
++     * <p>失败时机变了：以前是**启动时**失败（按类型 {@code @Autowired} 注入，
++     * 容器在 refresh 阶段就报错）；现在是**第一次用的时候**失败 —— 异常被
++     * {@code getNextSeqFromRedis} 兜住，最后以一条**带表名**的
++     * {@code IllegalStateException} 冒出来（见 {@link #getNextId(String)}），
++     * 排障时能直接看出是哪张表取不到序列号。
++     */
++    @SuppressWarnings("unchecked")
++    private static RedisTemplate<String, Object> redisTemplate() {
++        return (RedisTemplate<String, Object>) SpringContextHolder.getBean(RedisTemplate.class);
++    }
++
+     /*
+      * args: 传入参数，第一个参数为table，第二个参数为database
+      */
+@@ -108,6 +146,62 @@ public class IdUtil {
+         }
+     }
+ 
++    /**
++     * 抢锁（非阻塞，但有等待上限）。
++     *
++     * @param key           原始 key（前缀由本方法加）
++     * @param value         锁的持有者标记
++     * @param expireSeconds 锁的存活时间（秒）
++     * @return 是否拿到锁
++     */
++    private static boolean tryLock(String key, String value, long expireSeconds) {
++        String lockKey = LOCK_PREFIX + key;
++        // 用 nanoTime（单调钟）算截止时间：currentTimeMillis 会被 NTP 校时
++        // 往回拨，一旦拨动，等待上限就形同虚设。
++        // nanoTime 本身可能是负数，所以只比较**差值**，不与绝对值比大小。
++        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lockTimeoutMs);
++        try {
++            while (true) {
++                Boolean acquired = redisTemplate().opsForValue()
++                        .setIfAbsent(lockKey, value, expireSeconds, TimeUnit.SECONDS);
++                if (Boolean.TRUE.equals(acquired)) {
++                    return true;
++                }
++                if (System.nanoTime() - deadline >= 0) {
++                    return false;
++                }
++                try {
++                    // 等一下再重试。没有这个 sleep 的话这里会无限速空转 SET NX。
++                    Thread.sleep(LOCK_RETRY_INTERVAL_MS);
++                } catch (InterruptedException e) {
++                    Thread.currentThread().interrupt();
++                    return false;
++                }
++            }
++        } catch (Exception ex) {
++            // 带上堆栈：锁失败时，堆栈就是唯一能定位问题的线索。
++            logger.error("failed to acquire the redis lock " + lockKey, ex);
++            // 释放的是**这把锁本身**：delete(lockKey)，不能再经过 unLock ——
++            // unLock 会再加一次前缀，删掉的是 "locked#locked#xxx"。
++            // （历史：双前缀那个写法是**更早一轮**修掉的；这里写的是当前的规则。）
++            try {
++                redisTemplate().delete(lockKey);
++            } catch (Exception releaseError) {
++                logger.error("failed to release the redis lock " + lockKey, releaseError);
++            }
++            return false;
++        }
++    }
++
++    /**
++     * 释放锁。
++     *
++     * @param key 原始 key（前缀由本方法加）
++     */
++    private static void unLock(String key) {
++        redisTemplate().delete(LOCK_PREFIX + key);
++    }
++
+     /*
+      * 从redis获取表的自增序号
+      * 
+@@ -123,10 +217,9 @@ public class IdUtil {
+         // 这把锁是别人的，删掉它会放走另一个持有者。
+         boolean locked = false;
+         try {
+-            locked = Boolean.TRUE.equals(RedisUtil.tryLock(key, "1", 5));
++            locked = tryLock(key, "1", 5);
+             if (locked) {
+-                RedisUtil redisUtil = new RedisUtil();
+-                Object ret = redisUtil.getValue(key);
++                Object ret = redisTemplate().opsForValue().get(key);
+                 // 如果ret为空，有两种情况，一种情况是 第一次初始化，ret 尚未赋值，另外一种情况是错误导致 redis 中无数据，无论哪一种，都需要去DB确认
+                 if (ret == null) {
+                     id = IdUtil.getNextSeqFromDB(database, tableName);
+@@ -140,20 +233,26 @@ public class IdUtil {
+                     id = Long.parseLong(ret.toString()) + 1;
+                 }
+ 
+-                redisUtil.setValue(key, id);
++                // 用 Object 重载的 set：值的序列化结果与改造前**完全一致**
++                // （原来走的是 opsForValue().set(key, Object)）。
++                redisTemplate().opsForValue().set(key, id);
+                 return id;
+             }
+         } catch (Exception ex) {
+-            logger.error(ex);
++            // 同上：带上堆栈，排障时要的就是它。
++            logger.error("failed to obtain the redis sequence for " + key, ex);
+         } finally {
+-            // 锁必须在 finally 里释放。
+-            // 原来的写法是在成功路径上直接 return —— 没有人释放这把锁，
+-            // 只能等它自己过期（TTL 是 5 秒）。这 5 秒里每一次取号都拿不到锁：
+-            // 要么白等到锁过期（每次调用多等 5 秒），要么在等待超过 tryLock
+-            // 的超时（10 秒）时彻底拿不到序列号。
++            // 锁必须在 finally 里释放：临界区里有 return，也有异常。
++            //
++            // 而且**只有真的拿到锁才允许释放它**：如果异常发生在 tryLock 成功之前，
++            // 这把锁就是别人的 —— 删掉它会放走另一个持有者，让两个持有者同时
++            // 进入临界区（序列号就可能重复）。
++            //
++            // （历史：「锁不释放」的缺陷是更早一轮修掉的；那之后的写法就已经是
++            //  finally 里按 `if (locked)` 释放。本段注释只描述**当前的约定**。）
+             if (locked) {
+                 try {
+-                    RedisUtil.unLock(key);
++                    unLock(key);
+                 } catch (Exception releaseError) {
+                     // 序列号已经分配并写回了，释放失败不应该把这次取号变成失败
+                     // （调用方会重试，白白再消耗一个序列号）。
+diff --git a/common/idgenerator/src/main/java/com/sac/platform/common/utils/redis/RedisUtil.java b/common/idgenerator/src/main/java/com/sac/platform/common/utils/redis/RedisUtil.java
+deleted file mode 100644
+index 8342ca6..0000000
+--- a/common/idgenerator/src/main/java/com/sac/platform/common/utils/redis/RedisUtil.java
++++ /dev/null
+@@ -1,179 +0,0 @@
+-package com.sac.platform.common.utils.redis;
+-
+-import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+-import com.sac.platform.realserver.oms.utils.RedisScanUtils;
+-import org.springframework.beans.factory.annotation.Autowired;
+-import org.springframework.dao.DataAccessException;
+-import org.springframework.data.redis.core.RedisOperations;
+-import org.springframework.data.redis.core.RedisTemplate;
+-import org.springframework.data.redis.core.SessionCallback;
+-import org.springframework.stereotype.Component;
+-
+-import java.util.ArrayList;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.concurrent.TimeUnit;
+-
+-import org.apache.logging.log4j.LogManager;
+-import org.apache.logging.log4j.Logger;
+-
+-@Component
+-public class RedisUtil {
+-
+-    private static final Logger logger = LogManager.getLogger();
+-
+-    private static RedisTemplate<String, Object> redisTemplate;
+-
+-    private static RedisClusterHelper redisClusterHelper;
+-
+-    @Autowired
+-    public void setRedisTemplate(RedisTemplate<String, Object> redisTemplate) {
+-        RedisUtil.redisTemplate = redisTemplate;
+-    }
+-
+-    @Autowired
+-    public void setRedisClusterHelper(RedisClusterHelper redisClusterHelper) {
+-        RedisUtil.redisClusterHelper = redisClusterHelper;
+-    }
+-
+-    /**
+-     * 判断当前是否为集群模式（统一通过 RedisClusterHelper 判断）
+-     */
+-    private static boolean isCluster() {
+-        return redisClusterHelper != null && redisClusterHelper.isCluster();
+-    }
+-
+-    public void setHash(String key, Map<String, String> data) {
+-        // 单 key putAll：集群模式自动分片路由
+-        redisTemplate.opsForHash().putAll(key, data);
+-    }
+-
+-    public List<Object> getHashList(List<String> keys, List<String> childrenKeys) {
+-        if (keys == null || keys.isEmpty()) {
+-            return new ArrayList<>();
+-        }
+-        if (isCluster()) {
+-            // 集群模式：跨 key 的 multiGet 不支持 pipeline，逐个调用（自动分片路由）
+-            List<Object> result = new ArrayList<>(keys.size() * childrenKeys.size());
+-            java.util.Collection<Object> fieldCollection = new java.util.ArrayList<>();
+-            for (String ck : childrenKeys) {
+-                fieldCollection.add(ck);
+-            }
+-            for (String key : keys) {
+-                List<Object> sub = redisTemplate.opsForHash().multiGet(key, fieldCollection);
+-                if (sub != null) {
+-                    result.addAll(sub);
+-                }
+-            }
+-            return result;
+-        } else {
+-            // 单机模式：使用 pipeline 一次 RTT 获取
+-            return redisTemplate.executePipelined(new SessionCallback<Object>() {
+-                @Override
+-                public Object execute(RedisOperations operations) throws DataAccessException {
+-                    for (String key : keys) {
+-                        operations.opsForHash().multiGet(key, childrenKeys);
+-                    }
+-                    return null;
+-                }
+-            });
+-        }
+-    }
+-
+-    public void setValue(Object key, Object value) {
+-        // 单 key：集群自动分片
+-        String stringKey = key.toString();
+-        redisTemplate.opsForValue().set(stringKey, value);
+-    }
+-
+-    public void getPushList(String key, String value) {
+-        // 单 key：集群自动分片
+-        redisTemplate.opsForList().leftPush(key, value);
+-    }
+-
+-    public Object getValue(Object key) {
+-        // 单 key：集群自动分片
+-        return redisTemplate.opsForValue().get(key);
+-    }
+-
+-    private static final Long SUCCESS = 1L;
+-
+-    private static long timeout = 9999; // 获取锁的超时时间
+-
+-    /**
+-     * 加锁，无阻塞
+-     *
+-     * @param
+-     * @param
+-     * @return
+-     */
+-    public static Boolean tryLock(String key, String value, long expireTime) {
+-        Long start = System.currentTimeMillis();
+-        String lockKey = "locked#" + key;
+-        try {
+-            for (;;) {
+-                // SET命令返回OK ，则证明获取锁成功
+-                Boolean ret = redisTemplate.opsForValue().setIfAbsent(lockKey, value, expireTime, TimeUnit.SECONDS);
+-                if (ret) {
+-                    return true;
+-                }
+-                // 否则循环等待，在timeout时间内仍未获取到锁，则获取失败
+-                long end = System.currentTimeMillis() - start;
+-                if (end >= timeout) {
+-                    return false;
+-                }
+-            }
+-        } catch (Exception ex) {
+-            logger.error(ex);
+-            // 释放的是**这把锁本身**。原来的写法是 unLock(lockKey)，而 unLock 内部
+-            // 还会再拼一次 "locked#" 前缀，于是删掉的是 "locked#locked#xxx" ——
+-            // 既没释放自己那把锁，又可能删掉别人的键。
+-            // 这里必须吞掉异常：tryLock 的契约是"返回布尔值"，
+-            // 释放失败不该把异常抛给调用方。
+-            try {
+-                delete(lockKey);
+-            } catch (Exception releaseError) {
+-                logger.error("failed to release the redis lock " + lockKey, releaseError);
+-            }
+-            return false;
+-        }
+-    }
+-
+-    public static void unLock(String key) {
+-        String lockKey = "locked#" + key;
+-        delete(lockKey);
+-    }
+-
+-    public static void delete(String key) {
+-        redisTemplate.delete(key);
+-    }
+-
+-    /**
+-     * scan 实现（集群/单机自适应）
+-     *
+-     * @param pattern 表达式，如：abc*，找出所有以abc开始的键
+-     */
+-    public List<String> scan(String pattern) {
+-        return RedisScanUtils.scan(redisTemplate, pattern);
+-    }
+-
+-    /**
+-     * 扫描指定模式并删除（集群/单机自适应）
+-     *
+-     * @param pattern 表达式，如：abc*，删除所有以abc开始的键
+-     */
+-    public void deleteNamespace(String pattern) {
+-        if (isCluster()) {
+-            // 集群模式：流式扫描、逐 key 删除，避免全量加载与跨槽批量删除
+-            RedisScanUtils.forEachKey(redisTemplate, pattern, 500, key -> redisTemplate.delete(key));
+-            return;
+-        }
+-        List<String> keys = scan(pattern);
+-        if (keys == null || keys.isEmpty()) {
+-            return;
+-        }
+-        // 单机模式：一次性删除
+-        redisTemplate.delete(keys);
+-    }
+-
+-}
+diff --git a/common/idgenerator/src/test/java/com/sac/platform/common/utils/IdUtilRedisLockLiveTest.java b/common/idgenerator/src/test/java/com/sac/platform/common/utils/IdUtilRedisLockLiveTest.java
+index 24b4f49..e2c1fae 100644
+--- a/common/idgenerator/src/test/java/com/sac/platform/common/utils/IdUtilRedisLockLiveTest.java
++++ b/common/idgenerator/src/test/java/com/sac/platform/common/utils/IdUtilRedisLockLiveTest.java
+@@ -1,5 +1,6 @@
+ package com.sac.platform.common.utils;
+ 
++import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertFalse;
+ import static org.junit.jupiter.api.Assertions.assertNotEquals;
+ import static org.junit.jupiter.api.Assertions.assertNotNull;
+@@ -7,11 +8,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.anyLong;
+ import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.Mockito.atMost;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+ import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.nio.charset.StandardCharsets;
+ import java.time.Duration;
+ import java.util.Collections;
+ import java.util.Map;
+@@ -28,6 +32,7 @@ import org.springframework.data.redis.RedisConnectionFailureException;
+ import org.springframework.data.redis.connection.RedisClusterConfiguration;
+ import org.springframework.data.redis.connection.jedis.JedisClientConfiguration;
+ import org.springframework.data.redis.connection.jedis.JedisConnectionFactory;
++import org.springframework.data.redis.core.RedisCallback;
+ import org.springframework.data.redis.core.RedisTemplate;
+ import org.springframework.data.redis.core.ValueOperations;
+ import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
+@@ -36,39 +41,28 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
+ import com.alibaba.druid.pool.DruidDataSource;
+ import com.sac.platform.common.dao.CommonDataMapper;
+ import com.sac.platform.common.entity.CommonData;
+-import com.sac.platform.common.utils.redis.RedisUtil;
+ import com.sac.platform.common.utils.snowflake.IdWorker;
+-import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+ 
+ /**
+- * 真集群验证：{@code IdUtil} 的 Redis 序列号**锁**的生命周期。
+- *
+- * <p>为什么需要这一层：这条路径此前**一次都没有被真 Redis 检验过**。
+- * {@code IdUtil.getNextSeqFromRedis} 用一把 Redis 锁（{@code SET NX EX}）把
+- * 「读计数器 → 加一 → 写回」包起来，而缺陷恰恰在**锁的生命周期**上：
++ * {@code IdUtil} 的 Redis 序列号**锁**的行为。
+  *
++ * <p>这个类里有两种用例：
+  * <ul>
+- *   <li>拿到锁之后直接 {@code return}，**没有释放** —— 锁会一直留到 TTL（5 秒）过期。
+- *       这 5 秒内每一次 {@code tryLock} 都失败，于是序列号取不到，
+- *       {@code getNextId} 里 {@code Long.toBinaryString(null)} → **NullPointerException**。</li>
+- *   <li>异常路径上 {@code tryLock} 删的是 {@code locked#locked#xxx}（前缀被拼了两次），
+- *       而不是它自己持有的那把锁。</li>
++ *   <li><b>真集群</b>（{@code releasesTheRedisLockSoTheNextAcquisitionSucceeds}、
++ *       {@code aHeldLockProducesADiagnosableErrorInsteadOfANullPointerException}、
++ *       {@code doesNotReleaseALockItNeverAcquired}、
++ *       {@code storesTheSequenceAsANumberNotAsAString}）：
++ *       锁必须被释放、拿不到锁时必须失败得清楚、别人的锁不能被释放、
++ *       计数器的存储格式不能变。集群不可达时**跳过**而不是变红。</li>
++ *   <li><b>替身</b>（{@code tryLockReleasesOnlyTheLockItTookWhenTheAcquireCallFails}、
++ *       {@code doesNotSpinOnSetIfAbsentWhileWaitingForTheLock}）：
++ *       释放的必须是自己那把锁；抢不到锁时不能无限速空转。不需要集群。</li>
+  * </ul>
+  *
+- * <p>这类缺陷**mock 测不出来**：锁的语义（SET NX + TTL + 释放）全都发生在
+- * 真 Redis 上。所以这里用真的集群。
+- *
+- * <p><b>为什么不复用 oms 的 {@code RedisUtilConfig}</b>：装到本地仓库里的
+- * {@code realserver-oms} jar 是 **proguard 处理过的**，其中
+- * {@code RedisPropertiesConfig} / {@code RedisUtilConfig} 已经被改名
+- * （本文件写作时它们在 jar 里叫 {@code a} / {@code b}），
+- * 从 idgenerator 的测试类路径上**根本引用不到**。
+- * 所以这里照着生产代码把连接工厂与模板**逐行搭一遍**（序列化器必须一致，
+- * 否则值读回来会变形，测的就不是生产行为了）。
+- *
+- * <p>默认连本机 127.0.0.1:16379（Docker 集群转发到宿主机的端口）；
+- * 可用 {@code -Dtest.clusters} / {@code -Dtest.password} 覆盖。
+- * 集群不可达时**跳过**而不是变红（CI 的 runner 上没有 Redis）。
++ * <p>替身为什么是**上下文里的那个 bean**而不是一个静态字段：
++ * {@code IdUtil} 的模板是**每次使用时从当前上下文里取**的（不缓存 ——
++ * 上下文会被销毁，缓存下来会拿到已失效的工厂）。
++ * 所以想让 {@code IdUtil} 用上替身，就得把替身放进上下文。
+  */
+ class IdUtilRedisLockLiveTest {
+ 
+@@ -90,30 +84,51 @@ class IdUtilRedisLockLiveTest {
+      */
+     private static final String HELD_LOCK_TABLE = "LOCK_HELD_TEST";
+ 
++    /**
++     * 「没拿到的锁不能被释放」那条用例用的**又一张表**。
++     *
++     * <p>同样不能与 {@link #HELD_LOCK_TABLE} 共用：两条用例都会在集群里放一把
++     * **别人持有的锁**（键名一样的话，其中一条的清理会删掉另一条刚放进去的锁），
++     * 而清理是尽力而为的。每条用例一张表，就互不干扰了。
++     */
++    private static final String NEVER_ACQUIRED_TABLE = "LOCK_NEVER_ACQUIRED_TEST";
++
+     /**
+      * {@code IdUtil} 的 database 取自数据源 URL；测试里的数据源没有 URL，
+      * 解析会失败并退回默认值 {@code info}。
+      */
+     private static final String COUNTER_KEY = "info_" + TABLE;
+ 
+-    /** {@code RedisUtil.tryLock} 给 key 加的前缀。 */
++    /** {@code IdUtil} 给锁 key 加的前缀。 */
+     private static final String LOCK_KEY = "locked#" + COUNTER_KEY;
+ 
+     /** {@code IdUtil} 申请锁时用的 TTL（秒）。 */
+     private static final int LOCK_TTL_SECONDS = 5;
+ 
+-    private final ApplicationContextRunner runner = new ApplicationContextRunner()
++    /** 真集群的上下文。 */
++    private final ApplicationContextRunner liveRunner = new ApplicationContextRunner()
++            .withUserConfiguration(
++                    SharedBeans.class, LiveTemplateConfig.class, SpringContextHolder.class);
++
++    /** 替身的上下文：{@code setIfAbsent} 直接抛异常。 */
++    private final ApplicationContextRunner throwingRunner = new ApplicationContextRunner()
++            .withUserConfiguration(
++                    SharedBeans.class, ThrowingTemplateConfig.class, SpringContextHolder.class);
++
++    /** 替身的上下文：{@code setIfAbsent} 永远返回 false（永远抢不到锁）。 */
++    private final ApplicationContextRunner contendedRunner = new ApplicationContextRunner()
+             .withUserConfiguration(
+-                    TestBeans.class,
+-                    SpringContextHolder.class,
+-                    RedisUtil.class);
++                    SharedBeans.class, ContendedTemplateConfig.class, SpringContextHolder.class);
+ 
+     /**
+      * 核心契约：取一次 ID 之后，锁**必须已经被释放**。
+      *
+-     * <p>这条断言直接对着缺陷：锁没释放时，它会一直留到 TTL（5 秒）过期，
+-     * 这期间每一次取号都拿不到锁 —— 要么干等到锁过期（**每次调用白等 5 秒**），
+-     * 要么在等待超过 {@code tryLock} 的超时（10 秒）时直接拿不到序列号。
++     * <p>这条钉住的是「取号结束时锁不再被持有」这个约定：锁如果还留着，
++     * 下一个调用者就得等它过期（TTL 是 {@value #LOCK_TTL_SECONDS} 秒）才能拿到锁 ——
++     * 要么每次调用白等，要么在等待超过 {@code tryLock} 的超时（10 秒）时彻底拿不到序列号。
++     *
++     * <p>（历史：「锁不释放」的缺陷是更早一轮修掉的。本用例描述的是**当前的约定**，
++     * 不声称它自己修的就是那个缺陷。）
+      */
+     @Test
+     void releasesTheRedisLockSoTheNextAcquisitionSucceeds() {
+@@ -174,7 +189,8 @@ class IdUtilRedisLockLiveTest {
+                         "the acquisition must fail with a diagnosable error; instead it threw "
+                                 + (npe == null ? "nothing" : "a NullPointerException: " + npe));
+ 
+-                assertTrue(reported.getMessage() != null && reported.getMessage().contains(HELD_LOCK_TABLE),
++                assertTrue(reported.getMessage() != null
++                                && reported.getMessage().contains(HELD_LOCK_TABLE),
+                         "the error must name the table it was about; message was: "
+                                 + reported.getMessage());
+             } finally {
+@@ -194,65 +210,205 @@ class IdUtilRedisLockLiveTest {
+     /**
+      * {@code tryLock} 在**申请失败**时释放的必须是它自己那把锁。
+      *
+-     * <p>原来的写法是 {@code unLock(lockKey)}，而 {@code unLock} 内部还会再拼一次
+-     * {@code "locked#"} 前缀，于是删掉的是 {@code locked#locked#xxx} ——
++     * <p>规则：释放的 key 是 {@code "locked#" + key} 本身，不能再经过 {@code unLock} ——
++     * {@code unLock} 内部还会再拼一次前缀，那样删掉的是 {@code locked#locked#xxx}，
+      * 既没释放自己那把锁，又可能删掉别人的键。
+      *
++     * <p>（历史：{@code unLock(lockKey)} 那个双前缀写法是**更早一轮**修掉的；
++     * 本用例钉住的是当前的规则，不声称自己修的就是那个缺陷。）
++     *
+      * <p>这条用例不需要真集群：一个「{@code setIfAbsent} 直接抛异常」的替身就够。
+      */
+     @Test
+     void tryLockReleasesOnlyTheLockItTookWhenTheAcquireCallFails() {
+-        @SuppressWarnings("unchecked")
+-        ValueOperations<String, Object> valueOps = mock(ValueOperations.class);
+-        @SuppressWarnings("unchecked")
+-        RedisTemplate<String, Object> broken = mock(RedisTemplate.class);
+-        when(broken.opsForValue()).thenReturn(valueOps);
+-        when(valueOps.setIfAbsent(anyString(), any(), anyLong(), any(TimeUnit.class)))
+-                .thenThrow(new RedisConnectionFailureException("simulated connection loss"));
+-
+-        RedisTemplate<String, Object> original = currentTemplate();
+-        try {
+-            new RedisUtil().setRedisTemplate(broken);
++        throwingRunner.run(context -> {
++            @SuppressWarnings("unchecked")
++            RedisTemplate<String, Object> broken =
++                    (RedisTemplate<String, Object>) context.getBean("redisTemplate");
++            assertNotNull(broken);
+ 
+-            assertFalse(RedisUtil.tryLock("contract", "1", 5),
++            assertFalse(tryLockDirectly("contract"),
+                     "tryLock must report the failure, not throw it at the caller");
+ 
+             verify(broken).delete("locked#contract");
+-        } finally {
+-            new RedisUtil().setRedisTemplate(original);
+-        }
++        });
+     }
+ 
+-    /** 读出 {@code RedisUtil} 持有的静态模板，好让用例能把它还原回去。 */
+-    @SuppressWarnings("unchecked")
+-    private RedisTemplate<String, Object> currentTemplate() {
++    /**
++     * 抢不到锁时不能无限速空转 {@code SET NX}。
++     *
++     * <p>替身让 {@code setIfAbsent} 永远返回 false，把等待上限调到 300 ms，
++     * 然后数它被调了多少次：加了 sleep 之后应该是几十次，没加就是成千上万次。
++     */
++    @Test
++    void doesNotSpinOnSetIfAbsentWhileWaitingForTheLock() {
++        contendedRunner.run(context -> {
++            @SuppressWarnings("unchecked")
++            RedisTemplate<String, Object> busy =
++                    (RedisTemplate<String, Object>) context.getBean("redisTemplate");
++            assertNotNull(busy);
++
++            long originalTimeout = currentLockTimeout();
++            try {
++                setLockTimeout(300L);
++
++                // 用 nanoTime（单调钟）计时，和生产代码一致：currentTimeMillis
++                // 会被 NTP 校时拨动，测出来的「等了多久」就不可信了。
++                long start = System.nanoTime();
++                try {
++                    IdUtil.getNextId("RETRY_TEST");
++                } catch (RuntimeException expected) {
++                    // 抢不到锁 -> 取不到序列号 -> 明确失败。这正是期望的路径。
++                }
++                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
++
++                assertTrue(elapsedMs >= 250L,
++                        "the wait must actually have happened; elapsed=" + elapsedMs + "ms");
++                // setIfAbsent 是 ValueOperations 上的方法，不是 RedisTemplate 上的：
++                // 验的是「真正发出去的那条 SET NX」的次数。
++                //
++                // 60 这个上限是**故意放宽**的，它由两个数字共同决定：
++                //   期望次数 ≈ 等待上限 / 重试间隔 + 1 = 300ms / 10ms + 1 ≈ 31 次；
++                //   机器越忙，次数只会**更少**（sleep 睡得更久），所以放宽到 60
++                //   之后，负载再高也不会误报红。
++                // 如果生产代码里的 LOCK_RETRY_INTERVAL_MS 被调小到 1ms，
++                // 期望次数会变成 ~300，这个上限必须同步调大 —— 否则用例会把
++                // 「实现没坏」报成「实现坏了」。
++                verify(busy.opsForValue(), atMost(60)).setIfAbsent(anyString(), any(), anyLong(),
++                        any(TimeUnit.class));
++            } finally {
++                setLockTimeout(originalTimeout);
++            }
++        });
++    }
++
++    /**
++     * 拿不到锁时，**不能**释放那把锁 —— 它是别人的。
++     *
++     * <p>这条对着 {@code getNextSeqFromRedis} 里 {@code if (locked)} 那个判断：
++     * 去掉它，本用例就会变红。
++     */
++    @Test
++    void doesNotReleaseALockItNeverAcquired() {
++        withLiveCluster(template -> {
++            String counterKey = "info_" + NEVER_ACQUIRED_TABLE;
++            String lockKey = "locked#" + counterKey;
++            template.opsForValue().set(lockKey, "someone-else", 30, TimeUnit.SECONDS);
++
++            long originalTimeout = currentLockTimeout();
++            try {
++                setLockTimeout(300L);
++
++                try {
++                    IdUtil.getNextId(NEVER_ACQUIRED_TABLE);
++                } catch (RuntimeException expected) {
++                    // 拿不到锁 -> 取不到序列号 -> 明确失败。这正是期望的路径。
++                }
++
++                assertTrue(Boolean.TRUE.equals(template.hasKey(lockKey)),
++                        "the lock " + lockKey + " was released although it was never acquired; "
++                                + "that lock belongs to somebody else");
++            } finally {
++                setLockTimeout(originalTimeout);
++                try {
++                    template.delete(lockKey);
++                    template.delete(counterKey);
++                } catch (Exception ignored) {
++                    // 清理失败只记日志
++                }
++            }
++        });
++    }
++
++    /**
++     * 计数器里存的必须是**数字**，不是字符串。
++     *
++     * <p>改造前存的是 Long（JSON {@code 100}），读回来是 Integer。
++     * 如果有人改成 {@code String.valueOf(id)}，Redis 里就变成 JSON {@code "100"}，
++     * **格式变了** —— 而这个格式是被生产代码依赖的。
++     *
++     * <p>两条断言，各管一半：
++     * <ul>
++     *   <li>{@code instanceof Number} —— 管「**读回来**是什么」。</li>
++     *   <li>原始字节 —— 管「**真正存进去**的是什么」。反序列化的类型只能证明读回来
++     *       的东西；序列化器一旦改成带多态类型信息（{@code ["java.lang.Long",100]}），
++     *       读回来仍然是数字，但**存储格式已经变了** —— 而「存储格式不能变」是本任务
++     *       最硬的要求，所以必须直接看 redis 里的字节。</li>
++     * </ul>
++     */
++    @Test
++    void storesTheSequenceAsANumberNotAsAString() {
++        withLiveCluster(template -> {
++            template.delete(COUNTER_KEY);
++
++            Long id = IdUtil.getNextId(TABLE);
++            assertNotNull(id, "the acquisition must succeed");
++
++            Object stored = template.opsForValue().get(COUNTER_KEY);
++            assertNotNull(stored, "the counter was not written");
++            assertFalse(stored instanceof String,
++                    "the counter must be stored as a number, but it was stored as a String: "
++                            + stored);
++            assertTrue(stored instanceof Number,
++                    "the counter must be stored as a number, but it was: " + stored
++                            + " (" + stored.getClass().getName() + ")");
++
++            // 真正存在 redis 里的字节。key 用模板自己的 key 序列化器
++            // （StringRedisSerializer → UTF-8）编码，取的是**原始值**，不经过
++            // 任何 value 序列化器/反序列化器。
++            byte[] rawKeyBytes = COUNTER_KEY.getBytes(StandardCharsets.UTF_8);
++            byte[] raw = template.execute(
++                    (RedisCallback<byte[]>) connection -> connection.get(rawKeyBytes));
++            assertNotNull(raw, "the counter was not written (the raw bytes are null)");
++
++            String rawText = new String(raw, StandardCharsets.UTF_8);
++            assertFalse(rawText.startsWith("\""),
++                    "the counter must be stored as a number, but the raw bytes are a quoted "
++                            + "string: " + rawText);
++            assertTrue(rawText.matches("\\d+"),
++                    "the raw stored bytes must be exactly the decimal digits of the id, "
++                            + "but they were: " + rawText);
++            assertEquals(String.valueOf(stored), rawText,
++                    "the raw stored bytes must match the value that was read back; raw="
++                            + rawText);
++        });
++    }
++
++    /**
++     * 直接调用 {@code IdUtil} 的私有锁方法（用反射），只为验证「释放的是哪把锁」。
++     *
++     * <p>不这么做的话，就得让整条 {@code getNextId} 路径跑一遍才能碰到锁 ——
++     * 而那条路径会先读计数器，把断言搅浑。
++     */
++    private boolean tryLockDirectly(String key) {
+         try {
+-            Field field = RedisUtil.class.getDeclaredField("redisTemplate");
+-            field.setAccessible(true);
+-            return (RedisTemplate<String, Object>) field.get(null);
++            Method method = IdUtil.class.getDeclaredMethod(
++                    "tryLock", String.class, String.class, long.class);
++            method.setAccessible(true);
++            return (Boolean) method.invoke(null, key, "1", 5L);
+         } catch (Exception e) {
+-            throw new IllegalStateException("cannot read RedisUtil.redisTemplate", e);
++            throw new IllegalStateException("cannot invoke IdUtil.tryLock", e);
+         }
+     }
+ 
+-    /** {@code tryLock} 抢锁的等待上限（毫秒）。 */
++    /** {@code IdUtil} 抢锁的等待上限（毫秒）。 */
+     private long currentLockTimeout() {
+         try {
+-            Field field = RedisUtil.class.getDeclaredField("timeout");
++            Field field = IdUtil.class.getDeclaredField("lockTimeoutMs");
+             field.setAccessible(true);
+             return field.getLong(null);
+         } catch (Exception e) {
+-            throw new IllegalStateException("cannot read RedisUtil.timeout", e);
++            throw new IllegalStateException("cannot read IdUtil.lockTimeoutMs", e);
+         }
+     }
+ 
+     private void setLockTimeout(long millis) {
+         try {
+-            Field field = RedisUtil.class.getDeclaredField("timeout");
++            Field field = IdUtil.class.getDeclaredField("lockTimeoutMs");
+             field.setAccessible(true);
+             field.setLong(null, millis);
+         } catch (Exception e) {
+-            throw new IllegalStateException("cannot set RedisUtil.timeout", e);
++            throw new IllegalStateException("cannot set IdUtil.lockTimeoutMs", e);
+         }
+     }
+ 
+@@ -262,7 +418,7 @@ class IdUtilRedisLockLiveTest {
+      * <p>body 必须写在回调内部 —— 回调返回后上下文会被销毁。
+      */
+     private void withLiveCluster(java.util.function.Consumer<RedisTemplate<String, Object>> body) {
+-        runner.run(context -> {
++        liveRunner.run(context -> {
+             @SuppressWarnings("unchecked")
+             RedisTemplate<String, Object> template =
+                     (RedisTemplate<String, Object>) context.getBean("redisTemplate");
+@@ -301,51 +457,11 @@ class IdUtilRedisLockLiveTest {
+     }
+ 
+     /**
+-     * 照着生产代码（oms 的 {@code RedisUtilConfig}）把连接工厂与模板搭一遍。
+-     *
+-     * <p>序列化器必须与生产一致：值是用 {@code GenericJackson2JsonRedisSerializer}
+-     * 存的，读回来会变成 {@code Integer}；换成别的序列化器，测的就不是生产行为了。
++     * {@code IdUtil} 的静态初始化需要三样东西：mapper、数据源、雪花 ID。
++     * 这里给的都是**替身** —— 本用例要验的是锁的生命周期，不是数据库。
+      */
+     @Configuration
+-    static class TestBeans {
+-
+-        @Bean
+-        JedisConnectionFactory jedisConnectionFactory() {
+-            RedisClusterConfiguration clusterConfig =
+-                    new RedisClusterConfiguration(Collections.singletonList(CLUSTERS));
+-            clusterConfig.setPassword(PASSWORD);
+-            clusterConfig.setMaxRedirects(3);
+-
+-            JedisPoolConfigFactory pool = new JedisPoolConfigFactory();
+-            JedisClientConfiguration clientConfig = JedisClientConfiguration.builder()
+-                    .connectTimeout(Duration.ofMillis(2000))
+-                    .readTimeout(Duration.ofMillis(5000))
+-                    .usePooling()
+-                    .poolConfig(pool.build())
+-                    .build();
+-
+-            JedisConnectionFactory factory =
+-                    new JedisConnectionFactory(clusterConfig, clientConfig);
+-            factory.afterPropertiesSet();
+-            return factory;
+-        }
+-
+-        @Bean
+-        RedisTemplate<String, Object> redisTemplate(JedisConnectionFactory factory) {
+-            RedisTemplate<String, Object> template = new RedisTemplate<>();
+-            template.setConnectionFactory(factory);
+-            template.setKeySerializer(new StringRedisSerializer());
+-            template.setHashKeySerializer(new StringRedisSerializer());
+-            template.setHashValueSerializer(new GenericJackson2JsonRedisSerializer());
+-            template.setValueSerializer(new GenericJackson2JsonRedisSerializer());
+-            template.afterPropertiesSet();
+-            return template;
+-        }
+-
+-        @Bean
+-        RedisClusterHelper redisClusterHelper(JedisConnectionFactory factory) {
+-            return new RedisClusterHelper(factory);
+-        }
++    static class SharedBeans {
+ 
+         @Bean
+         CommonDataMapper commonDataMapper() {
+@@ -363,18 +479,6 @@ class IdUtilRedisLockLiveTest {
+         }
+     }
+ 
+-    /** 连接池参数（生产默认值 200/50/10，这里调小一点）。 */
+-    static class JedisPoolConfigFactory {
+-        redis.clients.jedis.JedisPoolConfig build() {
+-            redis.clients.jedis.JedisPoolConfig config = new redis.clients.jedis.JedisPoolConfig();
+-            config.setMaxTotal(16);
+-            config.setMaxIdle(4);
+-            config.setMinIdle(1);
+-            config.setMaxWait(Duration.ofMillis(3000));
+-            return config;
+-        }
+-    }
+-
+     /**
+      * mapper 的替身。
+      *
+@@ -397,4 +501,81 @@ class IdUtilRedisLockLiveTest {
+             return data;
+         }
+     }
++
++    /**
++     * 真集群的模板。
++     *
++     * <p>照着生产代码（oms 的 RedisUtilConfig）搭一遍：序列化器必须一致，
++     * 否则值读回来会变形，测的就不是生产行为了。
++     */
++    @Configuration
++    static class LiveTemplateConfig {
++
++        @Bean
++        RedisTemplate<String, Object> redisTemplate() {
++            RedisClusterConfiguration clusterConfig =
++                    new RedisClusterConfiguration(Collections.singletonList(CLUSTERS));
++            clusterConfig.setPassword(PASSWORD);
++            clusterConfig.setMaxRedirects(3);
++
++            redis.clients.jedis.JedisPoolConfig pool =
++                    new redis.clients.jedis.JedisPoolConfig();
++            pool.setMaxTotal(16);
++            pool.setMaxIdle(4);
++            pool.setMinIdle(1);
++            pool.setMaxWait(Duration.ofMillis(3000));
++
++            JedisClientConfiguration clientConfig = JedisClientConfiguration.builder()
++                    .connectTimeout(Duration.ofMillis(2000))
++                    .readTimeout(Duration.ofMillis(5000))
++                    .usePooling()
++                    .poolConfig(pool)
++                    .build();
++
++            JedisConnectionFactory factory =
++                    new JedisConnectionFactory(clusterConfig, clientConfig);
++            factory.afterPropertiesSet();
++
++            RedisTemplate<String, Object> template = new RedisTemplate<String, Object>();
++            template.setConnectionFactory(factory);
++            template.setKeySerializer(new StringRedisSerializer());
++            template.setHashKeySerializer(new StringRedisSerializer());
++            template.setHashValueSerializer(new GenericJackson2JsonRedisSerializer());
++            template.setValueSerializer(new GenericJackson2JsonRedisSerializer());
++            template.afterPropertiesSet();
++            return template;
++        }
++    }
++
++    /** 替身：{@code setIfAbsent} 直接抛异常（模拟连接断了）。 */
++    @Configuration
++    static class ThrowingTemplateConfig {
++
++        @Bean
++        @SuppressWarnings("unchecked")
++        RedisTemplate<String, Object> redisTemplate() {
++            RedisTemplate<String, Object> broken = mock(RedisTemplate.class);
++            ValueOperations<String, Object> valueOps = mock(ValueOperations.class);
++            when(broken.opsForValue()).thenReturn(valueOps);
++            when(valueOps.setIfAbsent(anyString(), any(), anyLong(), any(TimeUnit.class)))
++                    .thenThrow(new RedisConnectionFailureException("simulated connection loss"));
++            return broken;
++        }
++    }
++
++    /** 替身：{@code setIfAbsent} 永远返回 false（永远抢不到锁）。 */
++    @Configuration
++    static class ContendedTemplateConfig {
++
++        @Bean
++        @SuppressWarnings("unchecked")
++        RedisTemplate<String, Object> redisTemplate() {
++            RedisTemplate<String, Object> busy = mock(RedisTemplate.class);
++            ValueOperations<String, Object> valueOps = mock(ValueOperations.class);
++            when(busy.opsForValue()).thenReturn(valueOps);
++            when(valueOps.setIfAbsent(anyString(), any(), anyLong(), any(TimeUnit.class)))
++                    .thenReturn(false);
++            return busy;
++        }
++    }
+ }
+diff --git a/modelserver/services/pom.xml b/modelserver/services/pom.xml
+index 56339af..0771873 100644
+--- a/modelserver/services/pom.xml
++++ b/modelserver/services/pom.xml
+@@ -44,6 +44,10 @@
+ 			<artifactId>idgenerator</artifactId>
+ 			<!--<optional>true</optional>-->
+ 		</dependency>
++		<dependency>
++			<groupId>com.sac.platform</groupId>
++			<artifactId>realserver-oms</artifactId>
++		</dependency>
+ 		<dependency>
+ 			<groupId>com.sac.platform</groupId>
+ 			<artifactId>model-interface</artifactId>
+diff --git a/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/NapstarOaTransformerServiceImpl.java b/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/NapstarOaTransformerServiceImpl.java
+index dbf5ad3..8a41b72 100644
+--- a/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/NapstarOaTransformerServiceImpl.java
++++ b/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/NapstarOaTransformerServiceImpl.java
+@@ -37,7 +37,6 @@ import com.sac.platform.common.enumdict.OperateStatusCode;
+ import com.sac.platform.common.utils.ExceptionUtil;
+ import com.sac.platform.common.utils.IdUtil;
+ import com.sac.platform.common.utils.SystemIDUtil;
+-import com.sac.platform.common.utils.redis.RedisUtil;
+ import com.sac.platform.modelserver.commitdataincreproducer.entity.CommitList;
+ import com.sac.platform.modelserver.commitdataincreproducer.service.CommitListService;
+ import com.sac.platform.modelserver.commitdataincreproducer.service.SyncModelService;
+@@ -70,6 +69,7 @@ import com.sac.platform.modelserver.service.ModelObjectTypeService;
+ import com.sac.platform.modelserver.service.ModelWiringPossibilityService;
+ import com.sac.platform.modelserver.service.NapstarModelService;
+ import com.sac.platform.modelserver.service.NapstarOaTransformerService;
++import com.sac.platform.realserver.oms.utils.RedisUtil;
+ 
+ import lombok.extern.slf4j.Slf4j;
+ 
+diff --git a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisUtil.java b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisUtil.java
+index ab22298..44f7609 100644
+--- a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisUtil.java
++++ b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisUtil.java
+@@ -1696,4 +1696,31 @@ public class RedisUtil {
+         return RedisScanUtils.scan(redisTemplate, pattern);
+     }
+ 
++    /**
++     * 按模式删除 key（集群/单机自适应）。
++     *
++     * <p>用 SCAN 流式扫描并逐个删除：不把全部 key 一次性读进内存，
++     * 集群下逐 key 删除也不会触发跨槽问题。
++     *
++     * <p><b>非原子</b>：中途失败（例如某个 master 变得不可达）时，命名空间会停在
++     * <b>部分删除</b>的状态，异常原样抛给调用方。重新执行是安全的 ——
++     * 删掉一个已经不存在的 key 是空操作。
++     *
++     * <p><b>代价</b>：每个 key 一次 {@code DEL} 往返，每个 master 一次
++     * {@code SCAN} 往返（SCAN 的 COUNT 提示值是 500）。几百个 key 没问题；
++     * 几万个就不合适了。另外，它需要**同时**占用至少两个池化连接：
++     * 一个给 SCAN 游标持有，一个给逐个 {@code DEL} 用（删除动作会从池里
++     * 另借一个连接）。把连接池配成 {@code maxTotal: 1} 会被它耗尽 ——
++     * 线上配置是 {@code oms.maxTotal: 200}，没有这个问题。
++     *
++     * <p><b>模式语义</b>：{@code pattern} 是 Redis 的 glob 式 {@code MATCH} 模式
++     * （如 {@code abc*}），**不是**正则表达式。SCAN 可能把同一个 key 返回多次，
++     * 删两次无害。
++     *
++     * @param pattern 表达式，如：abc*，删除所有以abc开始的键
++     */
++    public void deleteNamespace(String pattern) {
++        RedisScanUtils.forEachKey(redisTemplate, pattern, 500, key -> redisTemplate.delete(key));
++    }
++
+ }
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java
+index f1be330..2096275 100644
+--- a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java
+@@ -8,13 +8,10 @@ import java.util.ArrayList;
+ import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
+-import java.util.Set;
+ 
+ import org.junit.jupiter.api.Test;
+ import org.springframework.boot.autoconfigure.AutoConfigurations;
+ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+-import org.springframework.data.redis.connection.jedis.JedisClusterConnection;
+-import org.springframework.data.redis.connection.jedis.JedisConnectionFactory;
+ import org.springframework.data.redis.core.RedisTemplate;
+ 
+ import com.sac.platform.realserver.oms.config.RedisConfigProperties;
+@@ -22,9 +19,6 @@ import com.sac.platform.realserver.oms.config.RedisPropertiesConfig;
+ import com.sac.platform.realserver.oms.config.RedisUtilConfig;
+ 
+ import redis.clients.jedis.Jedis;
+-import redis.clients.jedis.JedisCluster;
+-import redis.clients.jedis.JedisPool;
+-import redis.clients.jedis.util.JedisClusterCRC16;
+ 
+ /**
+  * L4 真集群验证：**生产写路径** {@link RedisClusterHashPipeline#putAllHashes}
+@@ -177,7 +171,8 @@ class RedisClusterHashPipelineLiveTest {
+      * 分组正确时，每个 key 都直接发给它的属主 master，MOVED 应为 0；
+      * 分组坏掉时，所有 key 挤到第一个 master，其中约 2/3 会被回 MOVED。
+      *
+-     * <p>用 {@code errorstat_MOVED} 计数（Redis 6.2+），逐 master 累加。
++     * <p>用 {@code errorstat_MOVED} 计数（Redis 7.0 起 {@code INFO} 默认带
++     * {@code errorstat_*} 段），逐 master 累加。
+      */
+     @Test
+     void spreadsTheBatchAcrossSeveralMastersWithoutAnyMovedRedirect() {
+@@ -205,7 +200,8 @@ class RedisClusterHashPipelineLiveTest {
+                             + " detail=[" + lastMovedDiag + "]");
+ 
+             // 并且它确实落到了多个 master 上。
+-            Map<String, Integer> perMaster = countKeysPerMaster(template, batch.keySet());
++            Map<String, Integer> perMaster =
++                    RedisClusterTestSupport.countKeysPerMaster(template, batch.keySet());
+             assertTrue(perMaster.size() >= 2,
+                     "the batch was expected to span several masters, but only saw: " + perMaster);
+             int total = 0;
+@@ -224,8 +220,13 @@ class RedisClusterHashPipelineLiveTest {
+      */
+     private long totalMovedErrors(RedisTemplate<String, Object> template) {
+         long moved = 0L;
++        List<String> masters = RedisClusterTestSupport.masterAddresses(template);
++        // 有几个 master 的 INFO 真的读到了 —— 只有读到了，它的 MOVED 数才算实测
++        int infosRead = 0;
++        // 有几个 master 的 INFO 里带着 errorstat 段（Redis 7.0 起默认才有）
++        int infosWithErrorstats = 0;
+         StringBuilder diag = new StringBuilder();
+-        for (String hostPort : masterAddresses(template)) {
++        for (String hostPort : masters) {
+             String[] parts = hostPort.split(":");
+             Jedis seed = null;
+             try {
+@@ -235,15 +236,27 @@ class RedisClusterHashPipelineLiveTest {
+                 seed.auth(PASSWORD);
+                 seed.ping();
+                 String info = seed.info();
++                infosRead++;
+                 long nodeMoved = 0L;
++                boolean sawErrorstats = false;
+                 for (String line : info.split("\r?\n")) {
++                    if (line.startsWith("# Errorstats")) {
++                        sawErrorstats = true;
++                    }
+                     if (line.startsWith("errorstat_MOVED:")) {
+                         // 格式是 errorstat_MOVED:count=201 —— 冒号后面直接是
+                         // count=N，中间**没有逗号**。
++                        //
++                        // 注意：Redis 只在**真的发生过**该错误时才打印这一行，
++                        // 一个一次 MOVED 都没见过的 master 压根不会有这行 ——
++                        // 所以「有没有这行」不能用来判断「测没测到」。
+                         nodeMoved += Long.parseLong(
+                                 line.substring("errorstat_MOVED:count=".length()).trim());
+                     }
+                 }
++                if (sawErrorstats) {
++                    infosWithErrorstats++;
++                }
+                 moved += nodeMoved;
+                 diag.append(hostPort).append(" moved=").append(nodeMoved).append("; ");
+             } catch (Exception e) {
+@@ -256,47 +269,24 @@ class RedisClusterHashPipelineLiveTest {
+             }
+         }
+         lastMovedDiag = diag.toString();
++        // 每个 master 的 INFO 都读到了吗？读不到的 master 贡献的是「没测到」的 0，
++        // 那「一次 MOVED 都没有」就变成了空转：什么都没测到也通过。
++        assertEquals(masters.size(), infosRead,
++                "could not read INFO from every master, so the MOVED count was never measured"
++                        + " -- the 'zero redirects' assertion would pass vacuously"
++                        + "; diag=[" + lastMovedDiag + "]");
++        // 计数器本身在不在：Redis 7.0 起 INFO 默认带 errorstat 段；
++        // 没有这一段就说明这台 Redis 根本不暴露计数器，MOVED 数也就无从读起。
++        assertEquals(infosRead, infosWithErrorstats,
++                "the INFO output has no '# Errorstats' section, so the MOVED counter cannot be"
++                        + " read at all (Redis 7.0+ exposes it by default)"
++                        + "; diag=[" + lastMovedDiag + "]");
+         return moved;
+     }
+ 
+     /** 上一次 totalMovedErrors 的逐节点明细，失败时带进断言消息。 */
+     private String lastMovedDiag = "";
+ 
+-    /**
+-     * 集群里所有 master 的 host:port（来自 CLUSTER SLOTS 的 master 段）。
+-     *
+-     * <p>不依赖 JedisCluster 的连接池：那里面也包含副本，而副本广播的地址
+-     * （172.21.0.3:638x）在宿主机上**不可达**，借连接会超时。
+-     */
+-    private java.util.List<String> masterAddresses(RedisTemplate<String, Object> template) {
+-        JedisConnectionFactory factory = (JedisConnectionFactory) template.getConnectionFactory();
+-        JedisCluster nativeCluster = ((JedisClusterConnection) factory.getConnection())
+-                .getNativeConnection();
+-
+-        java.util.LinkedHashSet<String> masters = new java.util.LinkedHashSet<String>();
+-        for (JedisPool pool : nativeCluster.getClusterNodes().values()) {
+-            Jedis seed = null;
+-            try {
+-                seed = pool.getResource();
+-                for (Object range : seed.clusterSlots()) {
+-                    List<?> r = (List<?>) range;
+-                    List<?> master = (List<?>) r.get(2);
+-                    String host = new String((byte[]) master.get(0), "UTF-8");
+-                    int port = ((Number) master.get(1)).intValue();
+-                    masters.add(host + ":" + port);
+-                }
+-                break;
+-            } catch (Exception e) {
+-                // 试下一个节点
+-            } finally {
+-                if (seed != null) {
+-                    seed.close();
+-                }
+-            }
+-        }
+-        return new java.util.ArrayList<String>(masters);
+-    }
+-
+     /**
+      * 读路径（{@code opsHashGetALLPipe}）在集群下是**逐 key** 的
+      * —— 这是第十三轮记录下来的已知缺口（读侧还没做 pipeline）。
+@@ -363,77 +353,14 @@ class RedisClusterHashPipelineLiveTest {
+         });
+     }
+ 
+-    /**
+-     * 统计每个 master 各自持有本次批次的多少个 key。
+-     *
+-     * <p>用 CLUSTER SLOTS 拿到 slot -&gt; master 的映射，再用 KEYSLOT 算出每个 key
+-     * 的槽位，然后按属主计数。
+-     */
+-    private Map<String, Integer> countKeysPerMaster(RedisTemplate<String, Object> template,
+-            Set<String> keys) {
+-        JedisConnectionFactory factory = (JedisConnectionFactory) template.getConnectionFactory();
+-        JedisCluster nativeCluster = ((JedisClusterConnection) factory.getConnection())
+-                .getNativeConnection();
+-
+-        Map<String, Integer> counts = new LinkedHashMap<>();
+-        try {
+-            // CLUSTER SLOTS 只能从某个节点上问（JedisCluster 本身没有这个命令），
+-            // 这与生产代码 refreshSlotSnapshot 的做法一致。
+-            Map<Integer, String> slotOwner = new LinkedHashMap<>();
+-            boolean topologyRead = false;
+-            String lastError = null;
+-            for (JedisPool pool : nativeCluster.getClusterNodes().values()) {
+-                Jedis seed = null;
+-                try {
+-                    seed = pool.getResource();
+-                    for (Object range : seed.clusterSlots()) {
+-                        List<?> r = (List<?>) range;
+-                        // 槽位号与端口的 Java 类型随 Jedis 版本而变（Integer 或 Long），
+-                        // 生产代码 parseSlotSnapshot 也是用 Number.intValue() 取的。
+-                        int start = ((Number) r.get(0)).intValue();
+-                        int end = ((Number) r.get(1)).intValue();
+-                        List<?> master = (List<?>) r.get(2);
+-                        String host = new String((byte[]) master.get(0), "UTF-8");
+-                        int port = ((Number) master.get(1)).intValue();
+-                        String hostPort = host + ":" + port;
+-                        for (int slot = start; slot <= end; slot++) {
+-                            slotOwner.put(slot, hostPort);
+-                        }
+-                    }
+-                    topologyRead = true;
+-                    break;
+-                } catch (Exception e) {
+-                    // 试下一个节点：集群里可能有宿主机不可达的地址
+-                    lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
+-                } finally {
+-                    if (seed != null) {
+-                        seed.close();
+-                    }
+-                }
+-            }
+-            assertTrue(topologyRead,
+-                    "could not read CLUSTER SLOTS from any node; last error was " + lastError
+-                            + "; nodes=" + nativeCluster.getClusterNodes().keySet());
+-
+-            for (String key : keys) {
+-                int slot = JedisClusterCRC16.getSlot(key.getBytes("UTF-8"));
+-                String owner = slotOwner.get(slot);
+-                assertNotNull(owner, "no slot owner for slot " + slot + " (key " + key + ")");
+-                Integer count = counts.get(owner);
+-                counts.put(owner, count == null ? 1 : count + 1);
+-            }
+-        } catch (Exception e) {
+-            throw new IllegalStateException("could not read the cluster topology", e);
+-        }
+-        return counts;
+-    }
+-
+     /** 删掉本次测试写入的所有 key，保持集群干净。 */
+     private void cleanUp(RedisTemplate<String, Object> template) {
+         try {
+-            Set<String> found = template.keys(KEY_PREFIX + "*");
+-            if (found != null && !found.isEmpty()) {
+-                template.delete(new ArrayList<>(found));
++            // 用 SCAN 而不是 KEYS：集群下 KEYS 会阻塞并扫遍每个 master，
++            // 大键空间上能把应用拖垮 —— 生产代码的 delete(Collection) 也是这么警告的。
++            List<String> found = RedisScanUtils.scan(template, KEY_PREFIX + "*");
++            if (!found.isEmpty()) {
++                template.delete(found);
+             }
+         } catch (Exception e) {
+             // 清理失败不影响其它断言的结论
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterTestSupport.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterTestSupport.java
+new file mode 100644
+index 0000000..4e9533b
+--- /dev/null
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterTestSupport.java
+@@ -0,0 +1,130 @@
++package com.sac.platform.realserver.oms.utils;
++
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++import org.springframework.data.redis.connection.jedis.JedisClusterConnection;
++import org.springframework.data.redis.connection.jedis.JedisConnectionFactory;
++import org.springframework.data.redis.core.RedisTemplate;
++
++import redis.clients.jedis.Jedis;
++import redis.clients.jedis.JedisCluster;
++import redis.clients.jedis.JedisPool;
++import redis.clients.jedis.util.JedisClusterCRC16;
++
++/**
++ * 真集群测试的共享支撑：读集群拓扑，并据此算出某个 key 落在哪个 master 上。
++ *
++ * <p>两件事：
++ * <ul>
++ *   <li>{@code masterAddresses} —— 集群里有哪些 master（host:port）；</li>
++ *   <li>{@code countKeysPerMaster} —— 这一批 key 各自落在哪个 master 上。</li>
++ * </ul>
++ *
++ * <p>为什么需要它：**「key 落在多个 master 上」这件事必须被断言**，
++ * 否则一个只扫了第一个 master 的实现也能让测试变绿。
++ */
++final class RedisClusterTestSupport {
++
++    private RedisClusterTestSupport() {
++    }
++
++    /**
++     * 集群里所有 master 的 host:port。
++     *
++     * <p>返回的地址**只取 CLUSTER SLOTS 的 master 段**：JedisCluster 的连接池里
++     * 也包含副本，而副本广播的地址（172.21.0.3:638x）在宿主机上**不可达**，
++     * 拿它们建连会超时。所以这里是借一个 master 的连接去问拓扑，再从回复里
++     * 取 master 段，而不是把连接池里的地址直接返回。
++     *
++     * <p>读不到拓扑就抛异常，**不**返回空列表：空列表会让调用方把
++     * 「一个错误都没测到」当成「一个错误都没有」。
++     */
++    static List<String> masterAddresses(RedisTemplate<String, Object> template) {
++        LinkedHashSet<String> masters = new LinkedHashSet<String>();
++        for (Object range : readClusterSlots(template)) {
++            List<?> r = (List<?>) range;
++            List<?> master = (List<?>) r.get(2);
++            String host = new String((byte[]) master.get(0), StandardCharsets.UTF_8);
++            int port = ((Number) master.get(1)).intValue();
++            masters.add(host + ":" + port);
++        }
++        return new ArrayList<String>(masters);
++    }
++
++    /**
++     * 统计每个 master 各自持有本次这批 key 的多少个。
++     *
++     * <p>用 CLUSTER SLOTS 拿到 slot -&gt; master 的映射，再用 KEYSLOT 算出每个 key
++     * 的槽位，然后按属主计数。
++     */
++    static Map<String, Integer> countKeysPerMaster(RedisTemplate<String, Object> template,
++            Set<String> keys) {
++        Map<Integer, String> slotOwner = new LinkedHashMap<Integer, String>();
++        for (Object range : readClusterSlots(template)) {
++            List<?> r = (List<?>) range;
++            List<?> master = (List<?>) r.get(2);
++            String host = new String((byte[]) master.get(0), StandardCharsets.UTF_8);
++            int port = ((Number) master.get(1)).intValue();
++            String hostPort = host + ":" + port;
++            for (int slot = toNumber(r.get(0)); slot <= toNumber(r.get(1)); slot++) {
++                slotOwner.put(slot, hostPort);
++            }
++        }
++
++        Map<String, Integer> counts = new LinkedHashMap<String, Integer>();
++        for (String key : keys) {
++            int slot = JedisClusterCRC16.getSlot(key.getBytes(StandardCharsets.UTF_8));
++            String owner = slotOwner.get(slot);
++            if (owner == null) {
++                throw new IllegalStateException("no slot owner for slot " + slot + " (key " + key + ")");
++            }
++            Integer count = counts.get(owner);
++            counts.put(owner, count == null ? 1 : count + 1);
++        }
++        return counts;
++    }
++
++    /**
++     * 从第一个连得上的节点读 CLUSTER SLOTS。
++     *
++     * <p>一个都读不到就抛异常，并带上最后那个错误和试过的节点 ——
++     * 静默返回空结果会让上层的断言变成空转（「没测到」和「测了没问题」
++     * 长得一模一样）。
++     */
++    private static List<Object> readClusterSlots(RedisTemplate<String, Object> template) {
++        JedisConnectionFactory factory = (JedisConnectionFactory) template.getConnectionFactory();
++        JedisCluster nativeCluster = ((JedisClusterConnection) factory.getConnection())
++                .getNativeConnection();
++
++        String lastError = null;
++        for (JedisPool pool : nativeCluster.getClusterNodes().values()) {
++            Jedis seed = null;
++            try {
++                seed = pool.getResource();
++                return seed.clusterSlots();
++            } catch (Exception e) {
++                // 试下一个节点：集群里可能有宿主机不可达的地址
++                lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
++            } finally {
++                if (seed != null) {
++                    seed.close();
++                }
++            }
++        }
++        throw new IllegalStateException("could not read CLUSTER SLOTS from any node"
++                + (lastError == null
++                        ? "; no node could be probed (the cluster client knows no node)"
++                        : "; last error was " + lastError)
++                + "; nodes=" + nativeCluster.getClusterNodes().keySet());
++    }
++
++    private static int toNumber(Object value) {
++        return ((Number) value).intValue();
++    }
++}
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisUtilDeleteNamespaceLiveTest.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisUtilDeleteNamespaceLiveTest.java
+new file mode 100644
+index 0000000..7b448e3
+--- /dev/null
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisUtilDeleteNamespaceLiveTest.java
+@@ -0,0 +1,252 @@
++package com.sac.platform.realserver.oms.utils;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++import org.junit.jupiter.api.Assumptions;
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.autoconfigure.AutoConfigurations;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++import org.springframework.data.redis.core.RedisTemplate;
++
++import com.sac.platform.realserver.oms.config.RedisPropertiesConfig;
++import com.sac.platform.realserver.oms.config.RedisUtilConfig;
++
++/**
++ * 真集群验证：{@code RedisUtil.deleteNamespace(pattern)} —— 按模式删除 key。
++ *
++ * <p>三个用例各自锁住一件事：
++ * <ul>
++ *   <li><b>只删匹配的</b> —— 不匹配的 key 必须还在。删多了是数据丢失。</li>
++ *   <li><b>跨多个 master 都能删</b> —— 一个只扫了第一个 master 的实现
++ *       也能让「删得掉」变绿，所以必须显式断言这批 key 落在多个 master 上。</li>
++ *   <li><b>匹配不到就是空操作</b> —— 不报错，也不碰别人的 key。</li>
++ * </ul>
++ *
++ * <p>默认连本机 127.0.0.1:16379（Docker 集群转发到宿主机的端口）；
++ * 可用 {@code -Dtest.clusters} / {@code -Dtest.password} 覆盖。
++ * 集群不可达时**跳过**而不是变红（CI 的 runner 上没有 Redis）。
++ */
++class RedisUtilDeleteNamespaceLiveTest {
++
++    private static final String CLUSTERS =
++            System.getProperty("test.clusters", "127.0.0.1:16379");
++
++    private static final String PASSWORD =
++            System.getProperty("test.password", "CpsE2eClusterPw");
++
++    /** 本次运行用的 key 前缀：便于结束时精确删除，不碰集群里的其它数据。 */
++    private static final String KEY_PREFIX = "delete_namespace_test:";
++
++    private final ApplicationContextRunner runner = new ApplicationContextRunner()
++            .withConfiguration(AutoConfigurations.of(
++                    RedisPropertiesConfig.class, RedisUtilConfig.class))
++            .withUserConfiguration(UtilsPackageScan.class)
++            .withPropertyValues(
++                    "oms.redisMode=cluster",
++                    "oms.clusters[0]=" + CLUSTERS,
++                    "oms.password=" + PASSWORD,
++                    "oms.database=0",
++                    "oms.timeout=5000",
++                    "oms.connectTimeout=2000",
++                    "oms.readTimeout=5000",
++                    "oms.maxWait=3000",
++                    "oms.maxTotal=16",
++                    "oms.maxIdle=4",
++                    "oms.minIdle=1")
++            .withInitializer(ctx -> org.springframework.boot.context.properties
++                    .ConfigurationPropertiesBindingPostProcessor.register(
++                            (org.springframework.beans.factory.support.BeanDefinitionRegistry) ctx
++                                    .getBeanFactory()));
++
++    /**
++     * 只删匹配的 key，不匹配的必须还在。
++     */
++    @Test
++    void deletesOnlyTheKeysThatMatchThePattern() {
++        withLiveCluster((template, util) -> {
++            Set<String> matching = new LinkedHashSet<String>();
++            Set<String> keep = new LinkedHashSet<String>();
++            for (int i = 0; i < 20; i++) {
++                matching.add(KEY_PREFIX + "match:" + i);
++                keep.add(KEY_PREFIX + "keep:" + i);
++            }
++            writeAll(template, matching);
++            writeAll(template, keep);
++
++            util.deleteNamespace(KEY_PREFIX + "match:*");
++
++            for (String key : matching) {
++                assertFalse(Boolean.TRUE.equals(template.hasKey(key)),
++                        "the matching key was not deleted: " + key);
++            }
++            for (String key : keep) {
++                assertTrue(Boolean.TRUE.equals(template.hasKey(key)),
++                        "deleteNamespace deleted a key that does NOT match the pattern: " + key);
++            }
++        });
++    }
++
++    /**
++     * 落在**多个 master** 上的 key 都要删掉。
++     *
++     * <p>如果只删了第一个 master 上的那部分，这条断言会红 —— 所以先断言这批 key
++     * 确实落在多个 master 上（否则这条断言就是空转的）。
++     */
++    @Test
++    void deletesKeysThatLiveOnSeveralMasters() {
++        withLiveCluster((template, util) -> {
++            Set<String> keys = new LinkedHashSet<String>();
++            for (int i = 0; i < 60; i++) {
++                keys.add(KEY_PREFIX + "spread:" + i);
++            }
++            writeAll(template, keys);
++
++            Map<String, Integer> perMaster =
++                    RedisClusterTestSupport.countKeysPerMaster(template, keys);
++            assertTrue(perMaster.size() >= 2,
++                    "the batch was expected to span several masters, but only saw: " + perMaster);
++
++            util.deleteNamespace(KEY_PREFIX + "spread:*");
++
++            for (String key : keys) {
++                assertFalse(Boolean.TRUE.equals(template.hasKey(key)),
++                        "the key was not deleted: " + key
++                                + " (it lived on " + perMaster + ")");
++            }
++        });
++    }
++
++    /**
++     * 匹配不到任何 key 的 pattern 必须是**空操作**，不是错误。
++     *
++     * <p>调用方（model-service 初始化模型时）会**无条件**调用本方法，
++     * 所以「匹配不到任何 key」必须是廉价的空操作，而不是错误 ——
++     * 否则每初始化一次模型就得先自己 SCAN 一遍才知道该不该调。
++     */
++    @Test
++    void aPatternThatMatchesNothingDeletesNothing() {
++        withLiveCluster((template, util) -> {
++            Set<String> existing = new LinkedHashSet<String>();
++            for (int i = 0; i < 5; i++) {
++                existing.add(KEY_PREFIX + "untouched:" + i);
++            }
++            writeAll(template, existing);
++
++            // 匹配不到任何 key 的 pattern：既不能抛异常，也不能删掉别人的 key。
++            util.deleteNamespace(KEY_PREFIX + "no-such-namespace:*");
++
++            for (String key : existing) {
++                assertTrue(Boolean.TRUE.equals(template.hasKey(key)),
++                        "a pattern that matches nothing must not delete anything,"
++                                + " but it removed: " + key);
++            }
++        });
++    }
++
++    private void writeAll(RedisTemplate<String, Object> template, Set<String> keys) {
++        Map<String, Object> batch = new LinkedHashMap<String, Object>();
++        for (String key : keys) {
++            batch.put(key, "value-of-" + key);
++        }
++        // SDR 2.7.18 的 multiSet 返回 **void**（只有 multiSetIfAbsent 返回 Boolean），
++        // 拿不到「写成功没有」的返回值 —— 只能事后读回来核对，
++        // 否则一次失败的写会拖到后面变成一句莫名其妙的「key 没被删掉」。
++        //
++        // 顺带记一笔，免得下一个人以为 multiSet 省往返：集群下 SDR 的 mSet
++        // 只有在**所有 key 落在同一个 slot** 时才真的发一条 MSET，否则退回逐 key
++        // 的 SET 循环 —— 所以这里仍然是 N 次往返。用它是因为它是集群下安全的
++        // 批量写法，不是因为它更快。
++        template.opsForValue().multiSet(batch);
++
++        List<String> keyList = new ArrayList<String>(keys);
++        List<Object> written = template.opsForValue().multiGet(keyList);
++        assertEquals(keyList.size(), written.size(),
++                "multiGet returned a different number of values than keys");
++        for (int i = 0; i < keyList.size(); i++) {
++            assertNotNull(written.get(i), "multiSet did not write the key: " + keyList.get(i));
++        }
++    }
++
++    /**
++     * 在一个活着的集群上下文里跑 body；集群不可达就跳过。
++     *
++     * <p>body 必须写在回调内部 —— 回调返回后上下文会被销毁。
++     */
++    private void withLiveCluster(java.util.function.BiConsumer<RedisTemplate<String, Object>,
++            RedisUtil> body) {
++        runner.run(context -> {
++            assertNotNull(context.getBean("omsRedisConfigProperties"));
++            @SuppressWarnings("unchecked")
++            RedisTemplate<String, Object> template =
++                    (RedisTemplate<String, Object>) context.getBean("redisTemplate");
++            assertNotNull(template);
++            RedisUtil util = context.getBean(RedisUtil.class);
++            assertNotNull(util);
++
++            if (!isReachable(template)) {
++                Assumptions.assumeTrue(false,
++                        "Redis cluster not reachable at " + CLUSTERS + " (skipping)");
++                return;
++            }
++            try {
++                body.accept(template, util);
++            } finally {
++                cleanUp(template);
++            }
++        });
++    }
++
++    private boolean isReachable(RedisTemplate<String, Object> template) {
++        try {
++            template.opsForValue().get("__live_probe__");
++            return true;
++        } catch (Exception e) {
++            return false;
++        }
++    }
++
++    /** 删掉本次测试写入的所有 key，保持集群干净。 */
++    private void cleanUp(RedisTemplate<String, Object> template) {
++        try {
++            // 用 SCAN 而不是 KEYS：集群下 KEYS 会阻塞并扫遍每个 master，
++            // 大键空间上能把应用拖垮 —— 生产代码的 delete(Collection) 也是这么警告的。
++            List<String> found = RedisScanUtils.scan(template, KEY_PREFIX + "*");
++            if (!found.isEmpty()) {
++                template.delete(found);
++            }
++        } catch (Exception e) {
++            // 清理失败不影响其它断言的结论
++        }
++    }
++
++    /**
++     * {@code RedisUtilConfig} 里的 pipeline 相关 bean 依赖 {@code RedisClusterHelper}
++     * （生产代码里它是 {@code @Component}，靠包扫描注册）。
++     *
++     * <p>{@code ApplicationContextRunner} 默认不扫描包，所以这里显式扫 utils 包把它带上 ——
++     * 与 {@code RedisClusterOmsContractTest} / {@code RedisModeCaseSensitivityTest} 同一套做法。
++     *
++     * <p>注意：这里**不能**自己再定义一个 {@code redisClusterHelper} bean ——
++     * 同包下的其它测试也会扫这个包，两份定义会撞车。撞车的后果取决于上下文：
++     * {@code ApplicationContextRunner} 明确把 {@code allowBeanDefinitionOverriding}
++     * 置成 false（Spring Boot 的 {@code AbstractApplicationContextRunner} 干的），
++     * 于是直接抛 {@code BeanDefinitionOverrideException}；而一个普通的
++     * {@code AnnotationConfigApplicationContext} 默认允许覆盖，会**静默**地用后一份
++     * 顶掉前一份 —— 那更糟，因为看不出哪里错了。
++     */
++    @org.springframework.context.annotation.Configuration
++    @org.springframework.context.annotation.ComponentScan(
++            basePackageClasses = RedisClusterHelper.class)
++    static class UtilsPackageScan {
++    }
++}

@@ -555,7 +555,7 @@ cd D:\work\rediscluterproject
 - Modify: `$BE\common\idgenerator\src\main\java\com\sac\platform\common\utils\IdUtil.java`
 - Modify: `$BE\common\idgenerator\src\test\java\com\sac\platform\common\utils\IdUtilRedisLockLiveTest.java`
 
-- [ ] **Step 1: 改测试：去掉「要删掉的 bean」，加两个用替身的用例**
+- [x] **Step 1: 改测试：去掉「要删掉的 bean」，加两个用替身的用例**
 
 `$BE\common\idgenerator\src\test\java\com\sac\platform\common\utils\IdUtilRedisLockLiveTest.java`
 整体替换为下面这份（**两个 runner**：一个真集群、一个替身）：
@@ -937,7 +937,7 @@ class IdUtilRedisLockLiveTest {
 > 三个类在 Step 5 里补齐（它们各自提供一个名为 `redisTemplate` 的 bean）。
 > **在它们补齐之前这个测试文件编译不过 —— 那正是这一步期望的「红」。**
 
-- [ ] **Step 2: 确认它变红**
+- [x] **Step 2: 确认它变红**
 
 ```powershell
 cd $BE\common\idgenerator
@@ -947,7 +947,7 @@ mvn -o clean test
 期望：**编译失败**，错误指向缺失的 `LiveTemplateConfig` / `ThrowingTemplateConfig` /
 `ContendedTemplateConfig`（以及 `IdUtil.tryLock` / `IdUtil.lockTimeoutMs` 还不存在）。
 
-- [ ] **Step 3: 实现 `IdUtil` 的改造**
+- [x] **Step 3: 实现 `IdUtil` 的改造**
 
 `$BE\common\idgenerator\src\main\java\com\sac\platform\common\utils\IdUtil.java`：
 
@@ -1104,7 +1104,7 @@ import java.util.concurrent.TimeUnit;
     }
 ```
 
-- [ ] **Step 4: 确认「变红」的原因被消除了（还差三个配置类）**
+- [x] **Step 4: 确认「变红」的原因被消除了（还差三个配置类）**
 
 ```powershell
 cd $BE\common\idgenerator
@@ -1113,7 +1113,7 @@ mvn -o clean test
 
 期望：编译错误只剩 `LiveTemplateConfig` / `ThrowingTemplateConfig` / `ContendedTemplateConfig` 三个类缺失。
 
-- [ ] **Step 5: 补上三个配置类（放到测试文件里）**
+- [x] **Step 5: 补上三个配置类（放到测试文件里）**
 
 在 `IdUtilRedisLockLiveTest` 的**内部**（与 `SharedBeans` 同级）加：
 
@@ -1209,7 +1209,7 @@ import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSeriali
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 ```
 
-- [ ] **Step 6: 运行测试，确认它通过**
+- [x] **Step 6: 运行测试，确认它通过**
 
 ```powershell
 cd $BE\common\idgenerator
@@ -1218,7 +1218,7 @@ mvn -o clean test
 
 期望：`Tests run: 4, Failures: 0, Errors: 0, Skipped: 0`（3 条原有的 + 1 条新增的忙等用例）。
 
-- [ ] **Step 7: 变异检验 —— 三个变异各自让一条用例变红**
+- [x] **Step 7: 变异检验 —— 三个变异各自让一条用例变红**
 
 | 变异 | 做法 | 期望变红的用例 |
 |---|---|---|
@@ -1228,7 +1228,7 @@ mvn -o clean test
 
 每次改完跑一次 `mvn -o clean test`，确认**恰好**对应的用例变红，然后改回来。
 
-- [ ] **Step 8: 确认改回来之后仍然全绿**
+- [x] **Step 8: 确认改回来之后仍然全绿**
 
 ```powershell
 cd $BE\common\idgenerator
@@ -1239,6 +1239,46 @@ mvn -o clean test
 
 ---
 
+**鎵ц璁板綍锛堝疄闄呬笌璁″垝鐨勫嚭鍏ワ級**锛歚n
+**计划里的测试代码有 3 处编译不过**（都不是实现问题，是 Spring 5.3 的 API 形状）：
+① `BeanFactory.getBean(String)` 在 Spring 5.3 返回 `Object`（`<T> T getBean(String)` 是
+Spring 6 才有的）→ 要显式转型；② **`RedisTemplate` 上没有 `setIfAbsent`**，
+它在 `ValueOperations` 上 → `verify(busy.opsForValue(), atMost(60)).setIfAbsent(...)`。
+③ 同 ①。
+（评审员一开始判断 ① 只在 Spring 6 有那个泛型重载 —— 不对，Spring 6 里 `getBean(String)`
+也返回 `Object`；**结论一样**：必须转型。）
+
+**用例数是 4 不是 5**（计划正文自己写的是 4，「5」是计划里的一处笔误）。
+
+**代码审查追加的 6 条用例**（计划里没有，但都是「设计明确决定过、却没有被钉住」的东西）：
+- `doesNotReleaseALockItNeverAcquired` —— 钉住 `if (locked)`：**没拿到锁就不能释放**
+  （那把锁是别人的）。去掉 `if (locked)` → 用例变红。
+- `storesTheSequenceAsANumberNotAsAString` —— 钉住**值格式不变**：计数器里存的必须是
+  **数字**不是字符串。改成 `String.valueOf(id)` → 用例变红。
+  （还额外断言了**原始字节**：健康状态下 Redis 里就是 3 个 ASCII 数字 `100`，
+  首字节 49=`'1'`，没有引号也没有类型前缀 —— 与改造前逐字节一致。）
+- `doesNotSpinOnSetIfAbsentWhileWaitingForTheLock` —— 钉住**忙等自旋有 sleep**：
+  300 ms 窗口里 `setIfAbsent` 至多 60 次（期望 ≈31，负载只会让它更少 → 不会误报红）。
+  去掉 sleep → 实测 4766 次 → 变红。
+
+**⭐ 一条「注释说错历史」的坑（本项目第三次犯）**：我写的注释
+「原来的写法是在成功路径上直接 return —— 没有人释放这把锁」**在第十五轮是对的**
+（那时确实要修），但 Task 2 把代码搬过来之后，这句话就**贴在已经做对了的代码旁边**
+→ 读 diff 的人会以为这次改的就是那个缺陷。已改成只描述**当前的约定**，
+历史明确标注为「更早一轮修掉的」。**同一处有三份注释，三份都要改 —— 漏一份就还在骗人。**
+
+**本轮发现但**没有**修的（留作待办，见 HANDOFF）**：
+① `tryLock` 的 catch 会**删掉一把自己从没拿到的锁**（`setIfAbsent` 抛异常时我们并不持有它）
+→ 可能放走另一个持有者 → 临界区里两个线程 → **重复 id**。这是**既有**缺陷
+（第十五轮修好的 `delete(lockKey)` 就是这个语义），设计明确要求保持，**不单方面改**。
+② 锁的 TTL 是 5 秒，而临界区里**含一次 DB 往返** → DB 慢于 5 秒时锁会在我们还持有它
+的时候过期 → 我们的 `finally` 会删掉**新持有者**的锁。锁值是常量 `"1"`，
+**无法校验归属**。正确的修法是「每次获取一个唯一 token + Lua compare-and-delete」+
+TTL 大于 DB 超时。
+
+**结果**：`idgenerator` **6 通过 / 0 失败 / 0 跳过**（连续多轮稳定），
+两个文件 CRLF 无 BOM，集群无残留 key。
+变异检验 5 条，各自只让**恰好一条**用例变红（评审员独立复现过一遍）。
 ### Task 3: 删掉 idgenerator 的 `RedisUtil` 壳，改 `model-service` 的 import 与两个 pom
 
 **Files:**
@@ -1247,7 +1287,7 @@ mvn -o clean test
 - Modify: `$BE\common\idgenerator\pom.xml:85-89`
 - Modify: `$BE\modelserver\services\pom.xml`
 
-- [ ] **Step 1: 改 `model-service` 的 import**
+- [x] **Step 1: 改 `model-service` 的 import**
 
 `$BE\modelserver\services\src\main\java\com\sac\platform\modelserver\service\impl\NapstarOaTransformerServiceImpl.java`：
 
@@ -1268,7 +1308,7 @@ import com.sac.platform.realserver.oms.utils.RedisUtil;
 > ⚠️ 构造器按**类型**注入。容器里 `com.sac.platform.realserver.oms.utils.RedisUtil`
 > 只有一个候选 bean（`realRedisUtil`）→ 注入得到的就是它 ✓。
 
-- [ ] **Step 2: 删掉 idgenerator 的 `RedisUtil`**
+- [x] **Step 2: 删掉 idgenerator 的 `RedisUtil`**
 
 ```powershell
 Remove-Item "$BE\common\idgenerator\src\main\java\com\sac\platform\common\utils\redis\RedisUtil.java" -Force
@@ -1276,7 +1316,7 @@ Remove-Item "$BE\common\idgenerator\src\main\java\com\sac\platform\common\utils\
 
 （包里还剩 `RedisConfig.java` 和 `RedisLock.java` —— **不要动它们**，本轮不碰。）
 
-- [ ] **Step 3: 改两个 pom**
+- [x] **Step 3: 改两个 pom**
 
 **3a.** `$BE\common\idgenerator\pom.xml`：删掉这一段
 
@@ -1302,7 +1342,7 @@ Remove-Item "$BE\common\idgenerator\src\main\java\com\sac\platform\common\utils\
 > idgenerator 删掉这个依赖之后，它就看不到了。
 > 显式声明比传递依赖**更稳**（用了就该直接声明）。
 
-- [ ] **Step 4: 编译整个 backend reactor**
+- [x] **Step 4: 编译整个 backend reactor**
 
 ```powershell
 cd $BE
@@ -1314,7 +1354,7 @@ mvn -o clean install -DskipTests
 > 如果报「找不到 `com.sac.platform.realserver.oms.utils.RedisUtil`」，
 > 说明 3b 的 pom 没加对（或者加在了错误的模块）。
 
-- [ ] **Step 5: 跑三套单测**
+- [x] **Step 5: 跑三套单测**
 
 ```powershell
 cd $BE\common\idgenerator;            mvn -o clean test   # 期望 4 / 0 / 0 跳过
@@ -1324,7 +1364,7 @@ cd $BE\realserver\plugins\rtdata-module; mvn -o test      # 期望 14 / 0
 
 > `model-service` **没有 `src/test`** → 只能靠编译验证。
 
-- [ ] **Step 6: 核对依赖树**
+- [x] **Step 6: 核对依赖树**
 
 ```powershell
 cd $BE\common\idgenerator
@@ -1340,7 +1380,7 @@ mvn -o dependency:tree | Select-String "realserver-oms"
 
 期望：能看到 `com.sac.platform:realserver-oms:jar:1.0.14:compile`。
 
-- [ ] **Step 7: 编译 napstarweb**
+- [x] **Step 7: 编译 napstarweb**
 
 ```powershell
 cd $AB
@@ -1351,6 +1391,39 @@ mvn -o clean install -DskipTests
 
 ---
 
+**鎵ц璁板綍锛堝疄闄呬笌璁″垝鐨勫嚭鍏ワ級**锛歚n
+**实测到的一个「发布契约」变化（代码审查提出，必须写进发布说明）**：
+删掉 idgenerator 的 `realserver-oms` 依赖之后，**4 个模块的对外传递闭包变小了**：
+`idgenerator`、`userservice`、`model-interface`、`menuservice`。
+独立复算（静态 POM 图 + 与 Maven 真实的 `dependency:tree` 交叉验证）：
+改前 **20** 个模块能到 `realserver-oms`，改后 **16** 个 —— 少的正好是那 4 个，
+而且**经由 idgenerator 的边从 4 条变成 0 条**。
+仓库内**无影响**（这 4 个模块自己的源码里一个 oms 引用都没有；所有真正用 oms 类的模块
+都还有别的路径）。**仓库外有影响**：这 4 个是发布到 Artifactory 的库，
+外部消费者若依赖 `model-interface` 并**编译时**引用 `com.sac.platform.realserver.oms.*`，
+现在会编译不过 → **需要一条发布说明**。
+**顺带**：`lettuce-core` 也随之从这 4 个模块的闭包里消失了
+（它们以前经 idgenerator→oms 继承到 lettuce）→ 同样要写进发布说明。
+
+**一个反直觉的发现**：`model-service` 自己的闭包里**现在同时有两个 redis 客户端**
+（`jedis` 经 idgenerator、`lettuce-core` 经 oms）—— 但这不是本轮造成的：
+oms 本来就能从 `model-service` 经 idgenerator 到达，oms 一直带 lettuce。
+本轮只是把「经由 idgenerator」换成「直接声明」。
+
+**代码审查追加的三处**：
+① `NapstarOaTransformerServiceImpl` 的 import **位置**要在排序上挪一下
+（那个文件用的是 **Eclipse 的「类型先于子包」**排序规则，不是纯 ASCII 序）；
+② `common/idgenerator/pom.xml` 的 `jedis` **必须留着** —— 它的
+`spring-boot-starter-data-redis` **排除了 lettuce**，而 oms 又被删了，
+所以这个显式的 `jedis` 是 `userservice`/`menuservice`/`model-interface`
+**唯一**能拿到的 redis 客户端；已在 pom 里写下原因，防止将来被「清理无用依赖」误删。
+③ oms `deleteNamespace` 的 javadoc 补一句：它需要**同时占用至少两个池化连接**
+（一个给 SCAN 游标持有，一个给逐个 DEL 用）→ 把池配成 `maxTotal: 1` 会被耗尽。
+
+**结果**：backend reactor **44 个模块全 SUCCESS**、napstarweb **13 个模块全 SUCCESS**；
+`idgenerator` **6 / 0**、`oms` **66 / 0**、`rtdata-module` **14 / 0**；
+`idgenerator` 的依赖树里**再也看不到 `realserver-oms`**，`model-service` 的是**直接** `compile` 依赖。
+安装后的 jar 全部干净（433 个 jar，0 个被 ECJ 污染）。
 ### Task 4: 生成 patch、更新文档、提交推送
 
 **Files:**
@@ -1359,7 +1432,7 @@ mvn -o clean install -DskipTests
 - Modify: `docs/HANDOFF.md`
 - Create: `docs/superpowers/plans/2026-10-29-unify-redis-util.md`（本文件，已存在）
 
-- [ ] **Step 1: 生成 patch**
+- [x] **Step 1: 生成 patch**
 
 Java 树不是 git 仓库 → 用**合成 repo** 的办法（和第十五轮一样）：
 基线文件先提交，再覆盖成改完的版本，最后让 git 自己出 diff。
@@ -1441,7 +1514,7 @@ Pop-Location
 > 这样 diff 里才会出现 `deleted file mode` 条目。
 > 只复制还存在的文件 → `git add -A` 认为没变 → **删除会静默丢失**。
 
-- [ ] **Step 2: 校验 patch**
+- [x] **Step 2: 校验 patch**
 
 ```powershell
 cd $BE
@@ -1453,14 +1526,14 @@ git -c core.autocrlf=false apply --reverse --check "D:\work\rediscluterproject\d
 往返校验（从纯净基线重建 → 与现网逐文件 SHA-256 比对）：
 期望 `checked=N mismatches=0`。
 
-- [ ] **Step 3: 更新 `docs/superpowers/patches/README.md`**
+- [x] **Step 3: 更新 `docs/superpowers/patches/README.md`**
 
 加一节「2026-10-29 — idgenerator 的 RedisUtil 壳被删掉」，
 写明：改了什么、为什么（两段实质代码 + 三个死方法 + 一个壳）、
 patch 的目标根与文件数、以及**验证 performed**（反向校验 exit 0 / 往返校验 mismatches=0 /
 三个变异各自让一条用例变红）。
 
-- [ ] **Step 4: 更新 `docs/HANDOFF.md`**
+- [x] **Step 4: 更新 `docs/HANDOFF.md`**
 
 要改的地方：
 
@@ -1477,7 +1550,7 @@ patch 的目标根与文件数、以及**验证 performed**（反向校验 exit 
    ① **上下文会被销毁，模板不能缓存**（第十四轮的教训在这里再咬一次）；
    ② **napstarweb 的上下文里没有 `CommonDataMapper`** → `IdUtil` 绝不能变成 `@Component`。
 
-- [ ] **Step 5: 提交并推送**
+- [x] **Step 5: 提交并推送**
 
 ```powershell
 cd D:\work\rediscluterproject
@@ -1491,14 +1564,31 @@ git -c remote.origin.pushurl=git@github.com:leiming-cai/redis-cluster-install.gi
 
 ---
 
+**鎵ц璁板綍锛堝疄闄呬笌璁″垝鐨勫嚭鍏ワ級**锛歚n
+**patch 的往返校验脚本要注意「被删掉的文件」**：它既不在磁盘上、也不在重建结果里，
+所以第一版脚本把它当成「mismatch」。已改成**单独检查**（两处都必须没有它）。
+
+**留痕**：`docs/superpowers/patches/2026-10-29-unify-redis-util.patch`
+（10 个文件：7 改 / 1 删 / 2 增，81,478 B）。
+反向校验 exit 0；往返校验 `checked=9 mismatches=0`。
+⚠️ **被删的那个文件必须在合成 repo 里显式删掉** —— 只复制还存在的文件，
+`git add -A` 会认为没变，**删除就会从 patch 里静默消失**（坑 8）。
+
+**文档更新**：`docs/superpowers/patches/README.md` 加了一节（含**发布契约变化**）；
+`docs/HANDOFF.md` 加了「第十六轮」整节、更新了基线表与环境现状、
+新增了 5 条坑（ECJ 污染 / Redis 不打印 0 计数的 errorstat / 行尾要跟邻居一致 /
+注释里的历史会过期 / 变异检验本身也可能造成破坏）。
+
+**结果**：backend reactor 44 个模块、napstarweb 13 个模块，全 SUCCESS；
+`oms` 66 / `idgenerator` 6 / `rtdata-module` 14，全 0 失败 0 跳过。
 ## 完成标准
 
-- [ ] `cd $BE\common\idgenerator; mvn -o clean test` → **4 通过 / 0 失败 / 0 跳过**
-- [ ] `cd $BE\realserver\common\oms; mvn -o clean test` → **65 通过 / 0 失败 / 0 跳过**
-- [ ] `cd $BE\realserver\plugins\rtdata-module; mvn -o test` → **14 通过 / 0 失败**
-- [ ] `cd $BE; mvn -o clean install -DskipTests` → **44 个模块**全 SUCCESS
-- [ ] `cd $AB; mvn -o clean install -DskipTests` → **13 个模块**全 SUCCESS
-- [ ] `cd $BE\common\idgenerator; mvn -o dependency:tree` → **不含 `realserver-oms`**
-- [ ] 三个变异**各自**让**恰好一条**用例变红
-- [ ] patch 反向校验 exit 0；往返校验 `mismatches=0`
-- [ ] `git status -sb` → `main...origin/main`（0 ahead / 0 behind）
+- [x] `cd $BE\common\idgenerator; mvn -o clean test` → **6 通过 / 0 失败 / 0 跳过**
+- [x] `cd $BE\realserver\common\oms; mvn -o clean test` → **66 通过 / 0 失败 / 0 跳过**
+- [x] `cd $BE\realserver\plugins\rtdata-module; mvn -o test` → **14 通过 / 0 失败**
+- [x] `cd $BE; mvn -o clean install -DskipTests` → **44 个模块**全 SUCCESS
+- [x] `cd $AB; mvn -o clean install -DskipTests` → **13 个模块**全 SUCCESS
+- [x] `cd $BE\common\idgenerator; mvn -o dependency:tree` → **不含 `realserver-oms`**
+- [x] **六条**变异**各自**让**恰好一条**用例变红
+- [x] patch 反向校验 exit 0；往返校验 `mismatches=0`
+- [x] `git status -sb` → `main...origin/main`（0 ahead / 0 behind）

@@ -2,6 +2,98 @@
 
 Unified-diff patches for the Java source trees that live **outside** this git repo.
 
+## 2026-10-29 — the two RedisUtil copies are now one
+
+There were **two** `RedisUtil` classes (the handoff said three — there is no
+third: `modelserver` consumed idgenerator's through the dependency chain). This
+patch deletes the thin one and moves what was in it to where it belongs.
+
+### What was actually in the 170-line class
+
+| Kind | Members |
+|---|---|
+| real content | the `SET NX EX` lock (`tryLock`/`unLock`) and the pattern delete (`deleteNamespace`) |
+| dead code | `setHash`, `getHashList`, `getPushList` — zero call sites |
+| one-line wrappers | `getValue`, `setValue`, `delete`, `scan` |
+| injection setters | `setRedisTemplate`, `setRedisClusterHelper` |
+
+So it was a thin shell around two things. Both have moved:
+
+- **`deleteNamespace`** (generic) → oms' `RedisUtil`, now the only implementation
+  of it anywhere, with a live-cluster test.
+- **the lock** (only `IdUtil` ever used it, and its `locked#` prefix is that
+  caller's own convention) → `IdUtil` itself, as private methods.
+
+`IdUtil` now talks to `RedisTemplate` directly and owns its lock.
+
+### The dependency direction is fixed
+
+`common/idgenerator` (a common library) depended on `realserver/oms` (a business
+module) — the wrong way. That dependency existed **only** because the deleted
+class was a `@Component` that `@Autowired` an oms `RedisClusterHelper`.
+
+- `common/idgenerator/pom.xml` no longer declares `realserver-oms`.
+- `modelserver/services/pom.xml` (artifactId `model-service`) now declares it
+  **explicitly** — it was relying on an accidental transitive path through
+  idgenerator.
+
+### ⚠️ Published-contract change (needs a release note)
+
+The published transitive closure of **four** modules shrank:
+`idgenerator`, `userservice`, `model-interface`, `menuservice`. Before, 20
+modules could reach `realserver-oms`; now 16 — the four that lost it never used
+an oms class themselves, and **zero** edges now route through idgenerator.
+
+**`lettuce-core` disappeared from those four as well** (they inherited it via
+idgenerator → oms; idgenerator's starter excludes lettuce). An out-of-repo
+consumer that relied on `model-interface` → `realserver-oms`, or that expected
+`lettuce-core` on that classpath, will notice.
+
+### Which patch to use
+
+| Patch | Target root | Files |
+|---|---|---|
+| `2026-10-29-unify-redis-util.patch` | `D:\javawork\1.2\cpscloud1.0\code\platform\backend` | 10 (7 modified, 1 deleted, 2 added) |
+
+### Applying
+
+```powershell
+cd D:\javawork\1.2\cpscloud1.0\code\platform\backend
+git apply --reverse --check ..\..\..\..\work\rediscluterproject\docs\superpowers\patches\2026-10-29-unify-redis-util.patch
+git apply ..\..\..\..\work\rediscluterproject\docs\superpowers\patches\2026-10-29-unify-redis-util.patch
+```
+
+### Verification performed
+
+- Reverse-apply check against the live root: exit `0`.
+- Round-trip: forward-apply onto a pristine baseline → `apply_exit=0`, 9 files
+  checked, **0 mismatches**; the deleted file is absent from both the rebuild
+  and the live tree.
+- `oms` **66 tests** (3 new live-cluster cases), `idgenerator` **6 tests**
+  (3 new), `rtdata-module` **14 tests**; backend reactor **44 modules**
+  SUCCESS, napstarweb reactor **13 modules** SUCCESS.
+- `mvn -o dependency:tree` on idgenerator → **no `realserver-oms`** at all;
+  on `model-service` → a direct `compile` dependency.
+- Six mutation checks, each turning **exactly one** test red: drop the
+  `finally` release; release the doubled-prefix key; drop the retry sleep;
+  release a lock that was never acquired; store the counter as a string; scan
+  only the first master.
+
+### Known issues left in place (deliberately)
+
+The lock has two **ownership** hazards that predate this work and that the
+approved design pins, so they were not changed here:
+
+1. `tryLock`'s catch deletes the lock even though a throwing `SET NX` means we
+   never held it — it could free another holder's lock.
+2. The 5 s TTL is shorter than the critical section (which contains a DB round
+   trip), and the lock value is the constant `"1"`, so the release cannot check
+   ownership. If the DB call exceeds the TTL, the lock expires while we still
+   hold it, and our `finally` then deletes the *new* holder's lock.
+
+The proper fix for both is a unique token per acquisition plus a Lua
+compare-and-delete on release, and a TTL longer than the DB timeout.
+
 ## 2026-10-29 — idgenerator: the redis lock was never released
 
 `IdUtil.getNextSeqFromRedis` takes a redis lock (`SET NX EX`) around
