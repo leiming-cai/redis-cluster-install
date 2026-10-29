@@ -2,6 +2,87 @@
 
 Unified-diff patches for the Java source trees that live **outside** this git repo.
 
+## 2026-10-29 — idgenerator: the redis lock was never released
+
+`IdUtil.getNextSeqFromRedis` takes a redis lock (`SET NX EX`) around
+"read the counter → increment → write it back", and then **returned without
+releasing it**. The lock only went away when its TTL (5 s) expired, so:
+
+- every acquisition in the next 5 s had to wait for the lock to expire
+  (the second call blocked for ~5 s), and
+- once the wait exceeded `tryLock`'s own timeout (10 s) the sequence could not
+  be obtained at all — and `getNextId` then dereferenced the `null` sequence,
+  throwing a bare `NullPointerException` that named neither the table nor the
+  cause.
+
+Two smaller defects in the same code path:
+
+- `tryLock`'s catch block released the wrong key: it called `unLock(lockKey)`,
+  and `unLock` prepends `"locked#"` **again**, so it deleted
+  `locked#locked#xxx` instead of the lock it actually held.
+- `IdUtil`'s catch block released the lock **unconditionally**, even when the
+  exception happened before the lock was acquired — which frees *another*
+  holder's lock.
+
+The fix releases the lock in a `finally` (only when it was really taken),
+releases the right key, and replaces the bare `NullPointerException` with an
+`IllegalStateException` that names the table. It deliberately does **not** fall
+back to the snowflake id: the `obj_type` is encoded in the high bits of the id,
+so a made-up id would be read back as a different type — a silent data error.
+
+### Which patch to use
+
+| Patch | Target root | Files |
+|---|---|---|
+| `2026-10-29-idutil-redis-lock-fix.patch` | `D:\javawork\1.2\cpscloud1.0\code\platform\backend` | 4 (2 modified `.java`, 1 modified `pom.xml`, 1 added test) |
+
+### Applying
+
+```powershell
+cd D:\javawork\1.2\cpscloud1.0\code\platform\backend
+git apply --reverse --check ..\..\..\..\work\rediscluterproject\docs\superpowers\patches\2026-10-29-idutil-redis-lock-fix.patch
+git apply ..\..\..\..\work\rediscluterproject\docs\superpowers\patches\2026-10-29-idutil-redis-lock-fix.patch
+```
+
+### The new test
+
+`common/idgenerator/src/test/java/com/sac/platform/common/utils/IdUtilRedisLockLiveTest.java`
+(3 cases). `idgenerator` had **no `src/test` at all** before this, so its `pom`
+gained `spring-boot-starter-test` (test scope) — the same dependency the `oms`
+module already uses.
+
+The test builds its own `JedisConnectionFactory`/`RedisTemplate` instead of
+reusing oms's `RedisUtilConfig`, because **the `realserver-oms` jar in the local
+maven repository is proguarded**: `RedisPropertiesConfig` and `RedisUtilConfig`
+have been renamed (to `a` and `b`), so they cannot be referenced from
+idgenerator's test classpath at all.
+
+### Verification performed
+
+- The 3 cases were run **before** the fix: all 3 failed. The lock assertion
+  reported `the redis lock locked#info_LOCK_TEST is still held after the id
+  was taken`, and the held-lock case reported
+  `instead it threw a NullPointerException`.
+- Mutation check, one defect at a time — each part of the fix is load-bearing:
+  | Mutation | Case that turns red |
+  |---|---|
+  | drop the `finally` release | `releasesTheRedisLockSoTheNextAcquisitionSucceeds` |
+  | `unLock(lockKey)` instead of `delete(lockKey)` | `tryLockReleasesOnlyTheLockItTookWhenTheAcquireCallFails` |
+  | drop the null-sequence guard | `aHeldLockProducesADiagnosableErrorInsteadOfANullPointerException` |
+- After the fix: 3/3 green, and **5 consecutive runs** were stable
+  (no flakes). The two live cases use **different** table names on purpose, so
+  a failed cleanup in one cannot poison the other.
+- Reverse-apply check against the live root: exit `0`.
+- Round-trip: forward-apply onto a pristine baseline → `apply_exit=0`,
+  4 files checked, **0 mismatches** (SHA-256 against the live tree).
+
+### Known issue left in place (deliberately)
+
+`tryLock` busy-waits **without sleeping** while the lock is held (up to its
+10 s timeout), so it hammers `SET NX` in a tight loop. After the fix above,
+contention is rare, so the practical impact is much smaller — but it is still
+there and is not addressed by this patch.
+
 ## 2026-10-29 — jedis version ceiling + live-cluster test
 
 Two things changed in the Java trees during the fourteenth round:

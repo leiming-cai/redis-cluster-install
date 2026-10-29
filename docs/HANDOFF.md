@@ -1,14 +1,51 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-29
-**工作分支**：无 —— 第七~十四轮都在 `main` 上，**全部已推送**
+**工作分支**：无 —— 第七~十五轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
 **基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十三轮已推送
-（`521f244..aadcbb9`）；**本次会话又推了 `80ad557`**（修 `check-bash-compat.sh`
+（`521f244..aadcbb9`）；**第十四轮又推了 `80ad557`**（修 `check-bash-compat.sh`
 的假红 + 4 条回归测试）、**`9b4f040`**（CI 覆盖面缺口）、
-**`fdd3193`**（第十四轮：真集群测试 + jedis 版本上限）。
+**`fdd3193`**（真集群测试 + jedis 版本上限）、**`6e86496`**、
+**`09e080a`**（会话存档）。
 当前 bats **203 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0），
-`oms` **63 通过 / 0 失败 / 0 跳过**（含 4 条真集群测试）
+`oms` **63 通过 / 0 失败 / 0 跳过**（含 4 条真集群测试），
+`idgenerator` **3 通过 / 0 失败**（**第十五轮新增的真集群锁测试**）
+
+> **⭐ 2026-10-29 会话复核（第十五轮：修 `IdUtil` 的 Redis 锁缺陷）**
+>
+> 这一轮**没有碰 `cluster-config.sh`**，而是修了一个**读代码读出来的生产缺陷**：
+> `IdUtil.getNextSeqFromRedis` 拿到 Redis 锁之后**直接 return，从不释放**。
+>
+> **后果**：锁只能等 TTL（5 秒）过期 → 这 5 秒内每次取号都要**白等锁过期**
+> （实测第二次调用被拖住约 5 秒）；一旦等待超过 `tryLock` 自己的超时（10 秒），
+> 序列号就彻底取不到 → `getNextId` 里 `Long.toBinaryString(null)` →
+> **裸的 NullPointerException**（既不说是哪张表，也不说是因为锁）。
+>
+> **同一段代码里还有两个锁缺陷**：`tryLock` 的 catch 释放的是
+> `locked#locked#xxx`（前缀被拼了两次）；`IdUtil` 的 catch **无条件**释放锁 ——
+> 哪怕异常发生在拿到锁之前，那把锁其实是**别人的**。
+>
+> | 项 | 结果 |
+> |---|---|
+> | 修复前的 3 条新用例 | **全部变红**（含 NPE 的现场复现） |
+> | 修复后 | **3 通过 / 0 失败 / 0 跳过**，**连续 5 轮稳定** |
+> | 变异检验 | 3 个变异**各自**让对应的一条用例变红（每处修复都是承重的） |
+> | `oms` / `rtdata-module` | **63 / 0 / 0 跳过**、**14 / 0**（未受影响） |
+> | backend reactor | **44 个模块全 SUCCESS**（⚠️ 交接文档原来写「29 个」，实际是 44） |
+> | patch | `docs/superpowers/patches/2026-10-29-idutil-redis-lock-fix.patch`（4 个文件）<br>反向校验 exit 0；往返校验 `checked=4 mismatches=0` |
+>
+> **本轮还发现三件交接文档里与实际不符的事**（都已更正，见下文）：
+> ① 「**三套** `RedisUtil`」→ 实际只有 **2 套**（modelserver 没有第三套，
+> 它经 idgenerator 传递依赖复用 idgenerator 那套）；
+> ② CI 的 `bash -n` 覆盖面「6 → **45** 个文件」→ 实际是 **15 → 28**
+> （45 里有 17 条是 `.bats` 的 SKIP 占位，不是真正的语法检查）；
+> ③ backend reactor 是 **44** 个模块，不是 29 个。
+>
+> **用户已定的两个决定**：
+> - **生产必须留在 JDK 8** → 交接待办第 7 项（jedis 要不要继续升）
+>   以「**不升级，固定 3.10.0**」结案。
+> - **直接在 `main` 上改，走 SSH 推送**（与前 14 轮一致）。
 
 > **⭐ 2026-10-29 会话复核（第十四轮：验证 + 修环境 + 修一个测试脚本 + 加真集群测试）**
 >
@@ -114,14 +151,19 @@ SDR 2.7.18 大多**不抛**，而是**静默降级**成非原子的客户端实�
 （命令行可以完全不传配置），并修掉脚本里三个会「让正确的运行变红」的缺陷。
 详见下文「第十一轮」。
 
-**下一步**（第十三轮结束后，详见「会话存档（2026-10-29）」）：
+**下一步**（第十五轮结束后，详见「会话存档（2026-10-29）」）：
 ① **填生产真值** —— 三个 `application.yml` 的 `oms.clusters` 现在是**占位符
 `127.0.0.1:6379`**、`password` 是空串，必须换真值并同步 Nacos；
 ② 设 `cluster_require_full_coverage=no`（2 机部署必须，否则任一 master 挂 = 全集群停写）；
 ③ **读侧 pipeline**（`findByOtype` 集群下仍是 N 次串行 `HGETALL`）；
-④ 合并三套 `RedisUtil`；
-⑤ （旧的）**别再在这台机器上加并发**（已换出 1.77 GB）；换干净集群重测倍率；
+④ 合并**两套** `RedisUtil`（不是三套 —— modelserver 没有第三套，第十五轮查实）；
+⑤ **CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`**（真实覆盖面 15 → 28 个文件）；
+⑥ （旧的）**别再在这台机器上加并发**（已换出 1.77 GB）；换干净集群重测倍率；
 验证生产值 `max-poll-records=100000`（测试里生效的是 Boot 默认 **500**）。
+
+> **✅ 已结案**：jedis 升不升 —— 用户确认**生产必须留在 JDK 8** →
+> jedis **固定 `3.10.0`，不升级**（第十四轮已实测出这个上限）。
+> **✅ 已修（第十五轮）**：`IdUtil` 的 Redis 锁「成功路径从不释放」。
 
 ---
 
@@ -392,6 +434,148 @@ Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 
 > 键数比第九轮涨了 6 倍，是这轮每轮 20 万新 obid 累积出来的。
 > 要恢复干净基线，要么删掉 benchmark 数据，要么让脚本复用固定 obid 段（会牺牲抽样检测能力）。
+
+---
+
+## 第十五轮（2026-10-29）：修 `IdUtil` 的 Redis 锁缺陷（成功路径从不释放锁）
+
+**这一轮不动 `cluster-config.sh`，也不动 Redis 集群。** 它修的是**读代码读出来的
+生产缺陷**，位置在 `common/idgenerator`（Java 树，不在本仓库）。
+
+### 一、结论先行
+
+`IdUtil.getNextSeqFromRedis` 用一把 Redis 锁（`SET NX EX`）把
+「读计数器 → 加一 → 写回」包起来，然后**直接 `return`，从不释放锁**。
+
+```java
+boolean locked = RedisUtil.tryLock(key, "1", 5);
+if (locked) {
+    ...
+    redisUtil.setValue(key, id);
+    return id;          // <-- 没有 unLock
+}
+```
+
+**后果**（分两层，第二层才致命）：
+
+| 层 | 现象 | 实测 |
+|---|---|---|
+| 1 | 锁只能等 TTL（5 秒）过期 → **这 5 秒内每次取号都要白等锁过期** | 第二次调用被拖住约 **5 秒** |
+| 2 | 等待超过 `tryLock` 自己的超时（**10 秒**）→ 序列号彻底取不到 → `getNextId` 里 `Long.toBinaryString(null)` → **裸的 NullPointerException** | 锁被别人占着时**稳定复现** |
+
+> **⚠️ 一开始我把第 1 层当成了第 2 层**，写下的第一条断言因此**是绿的**。
+> 真正的原因是：**锁的 TTL（5 s）比 `tryLock` 的超时（10 s）短**，
+> 所以第二次调用会**等到锁过期然后成功** —— 只有等到「等不到」那条路径
+> 才会拿到 null。
+> **教训与本文件里其它教训同源**：「读代码得出的结论」必须**跑一遍**才算数。
+
+活调用方 6 处（`base_dataversion` / `ENUM_DICT` / 业务表）：
+`ModelEnumDictController`、`CommitListController`、`CommitDataRunner`、
+`CommitListServiceImpl`、`SyncModelServiceImpl`、`BaseEntityDataServiceImpl`、
+`SyncModelEntityDataServiceImpl`。
+
+### 二、同一段代码里的另外两个锁缺陷
+
+| # | 缺陷 | 后果 |
+|---|---|---|
+| D2 | `tryLock` 的 catch 里 `unLock(lockKey)`，而 `unLock` 内部**又拼一次** `"locked#"` | 删的是 `locked#locked#xxx`，**不是**它持有的那把锁 |
+| D3 | `IdUtil` 的 catch 里**无条件** `unLock(key)` | 异常发生在拿到锁**之前**时，那把锁是**别人的** —— 删掉它会**放走另一个持有者** |
+
+### 三、改了什么（3 处）
+
+| # | 文件 | 改动 |
+|---|---|---|
+| F1 | `IdUtil.getNextSeqFromRedis` | 锁在 `finally` 里释放，且**只在真的拿到锁时**释放（`locked` 标志）；catch 里不再无条件 `unLock` |
+| F2 | `RedisUtil.tryLock` | catch 里改成 `delete(lockKey)`（不再二次加前缀），并吞掉释放本身的异常 —— `tryLock` 的契约是「返回布尔值」 |
+| F3 | `IdUtil.getNextId` | 序列号取不到时抛**带表名**的 `IllegalStateException`，不再是一个裸 NPE |
+
+**F3 刻意不做的事**：**不回退到雪花算法**。
+`obj_type` 已经编进了 id 的高位，造一个不对的 id 会被 `extractOType`
+读成**别的类型** —— 那是**静默的数据错误**，比明确失败糟糕得多。
+
+### 四、测试（`idgenerator` 此前**没有 `src/test`**）
+
+新增 `common/idgenerator/src/test/java/com/sac/platform/common/utils/IdUtilRedisLockLiveTest.java`
+（3 条），沿用第十四轮 `oms` 的真集群模式（`ApplicationContextRunner` → 真的
+`JedisConnectionFactory` → 真的集群）。
+
+| 用例 | 锁住什么 |
+|---|---|
+| `releasesTheRedisLockSoTheNextAcquisitionSucceeds` | 取号之后**锁必须已经不存在**；第二次取号必须成功且序列号更大 |
+| `aHeldLockProducesADiagnosableErrorInsteadOfANullPointerException` | 锁被别人占着时，必须抛**带表名**的错误，而不是裸 NPE |
+| `tryLockReleasesOnlyTheLockItTookWhenTheAcquireCallFails` | `tryLock` 抛异常时删的必须是**它自己那把锁** |
+
+**两个必须记下来的实现约束**：
+
+1. **装到本地仓库的 `realserver-oms` jar 是 proguard 处理过的** ——
+   `RedisPropertiesConfig` / `RedisUtilConfig` **已经被改名**（本轮写作时它们在
+   jar 里叫 `a` / `b`），从 idgenerator 的测试类路径上**根本引用不到**。
+   所以这条用例**自己**照着生产代码搭 `JedisConnectionFactory` + `RedisTemplate`
+   （序列化器必须一致，否则值读回来会变形，测的就不是生产行为了）。
+2. **`idgenerator` 的 pom 因此加了 `spring-boot-starter-test`（test scope）** ——
+   与 `oms` 模块一致。`spring-boot-test` 单独用**不够**：
+   `ApplicationContextRunner` 返回的 `AssertableApplicationContext` 继承自
+   `AssertProvider`，没有 AssertJ **编译都过不了**。
+
+### 五、⭐ 变异检验（每一处修复都是承重的）
+
+| 变异 | 变红的用例 |
+|---|---|
+| 去掉 `finally` 里的释放 | `releasesTheRedisLockSoTheNextAcquisitionSucceeds` |
+| `unLock(lockKey)` 换回 `delete(lockKey)` 之前 | `tryLockReleasesOnlyTheLockItTookWhenTheAcquireCallFails` |
+| 去掉序列号为 null 的判断 | `aHeldLockProducesADiagnosableErrorInsteadOfANullPointerException` |
+
+**修复前的 3 条用例全部变红**（含 NPE 的现场复现：
+`instead it threw a NullPointerException`）；
+**修复后 3/3 绿，连续 5 轮稳定**。
+
+> 过程中我自己的测试出过一次**不稳定**：两条真集群用例**共用一把锁**，
+> 而清理是尽力而为的（清理失败只记日志）—— 一次清理失败就会让另一条
+> 用例白等锁过期。已改成**两条用例各用各的表**，
+> 并且「锁被别人占着」那条用例**自己**收掉它放进去的锁。
+
+### 六、⭐ 本轮顺手更正的三处「交接文档与实际不符」
+
+| # | 文档写的 | 实际 | 怎么查出来的 |
+|---|---|---|---|
+| 1 | 合并「**三套** `RedisUtil`」（oms / idgenerator / modelserver 各一份） | 只有 **2 套**；**modelserver 没有第三套**，它经 idgenerator 传递依赖复用 idgenerator 那套 | 全树扫 `RedisUtil*.java` |
+| 2 | CI 的 `bash -n` 覆盖面「**6 → 45** 个文件」 | 实际 **15 → 28**；`check_syntax.sh` 的 `TOTAL=45` 里有 **17 条是 `.bats` 的 SKIP 占位** | 数 CI 那条手抄列表（6 具名 + `lib/*.sh` 展开 9 个）与 `check_syntax.sh` 的 `OK:` 行数 |
+| 3 | backend reactor「**29 个**模块」 | 实际 **44 个** | 数 reactor summary 的 `SUCCESS [` 行 |
+
+> 第 2 条尤其要小心：照文档写会以为「CI 现在检查 45 个文件」，
+> 实际上 CI 检查 15 个、而 `check_syntax.sh` 检查 28 个 ——
+> **换成 `bash tests/check_syntax.sh` 之后的真实覆盖面是 28，不是 45**。
+
+### 七、留痕与验证
+
+| 东西 | 位置 |
+|---|---|
+| 新增真集群测试（3 条） | `realserver/common/idgenerator/src/test/java/com/sac/platform/common/utils/IdUtilRedisLockLiveTest.java` |
+| pom 的测试依赖 | `common/idgenerator/pom.xml`（`spring-boot-starter-test`，test scope） |
+| patch | `docs/superpowers/patches/2026-10-29-idutil-redis-lock-fix.patch`（4 个文件，23,551 B） |
+
+**验证**：`idgenerator` **3 通过 / 0 失败 / 0 跳过**（连续 5 轮稳定）、
+`oms` **63 / 0 / 0 跳过**、`rtdata-module` **14 / 0**、
+backend reactor **44 个模块全 SUCCESS**、napstarweb reactor 全 SUCCESS。
+patch 反向校验 **exit 0**；**往返校验**（从纯净基线重建 → 与现网逐文件 SHA-256 比对）
+**`checked=4 mismatches=0`**。
+
+### 八、这一轮**刻意没做**的（记录待办）
+
+| # | 待办 | 为什么没做 |
+|---|---|---|
+| 1 | `tryLock` **忙等自旋没有 sleep**（锁被占用时以无限速的 `SET NX` 空转，最长 10 秒） | 修好 F1 之后争用变得罕见，实际影响大幅下降；用户选的是「只修 NPE」。**仍是个真问题** |
+| 2 | **合并两套 `RedisUtil`** | 跨模块公共 API 重构，用户没选 |
+| 3 | **读侧 pipeline** | 同上 |
+| 4 | `idgenerator` 那套 `RedisUtil` 的 3 个**死方法**（`setHash` / `getHashList` / `getPushList`，零调用方） | 删它们属于「合并」那件事；**但 `getHashList` 的集群分支就是 N 次串行 `multiGet`** —— 形态与读侧 pipeline 的待办一模一样 |
+
+> **第 4 条值得单独记一笔**：`getHashList` 的**单机分支与集群分支返回形状不同**
+> ——集群分支 `addAll` 压平成一维；单机分支
+> `executePipelined(SessionCallback)` 返回的是「每次 `multiGet` 一个元素」的
+> **二维列表**（这一点是从 spring-data-redis 2.7.18 的源码
+> `RedisTemplate.executePipelined(SessionCallback, …)` L271-301 确认的：
+> 回调必须返回 `null`，结果由 `closePipeline()` 给出）。
+> 好在它**零调用方**，删掉即可。
 
 ---
 
@@ -1538,15 +1722,29 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 | `bash scripts/e2e-cpsweb-nodes.sh` | `E2E PASSED`，退出码 0（需 Docker + `cpsweb-env:1.0`） |
 
-### Java 侧的基线（第十四轮更新）
+> ⚠️ **`check_syntax.sh` 的 `TOTAL=45` 里有 17 条是 `.bats` 的 SKIP 占位**
+> （`.bats` 用的是 bats 的 DSL，`bash -n` 查不了，要靠 bats 自己跑）。
+> 真正被 `bash -n` 查过的是 **28** 个文件。
+> **CI 现在查的是 15 个**（6 个具名 + `lib/*.sh` 展开 9 个）——
+> 所以「把 CI 那条手抄列表换成 `bash tests/check_syntax.sh`」的真实覆盖面是
+> **15 → 28**，**不是** 6 → 45。
+
+### Java 侧的基线（第十五轮更新）
 
 | 命令 | 期望 |
 |---|---|
-| `cd $BE\realserver\common\oms; mvn -o clean test` | **63 通过 / 0 失败 / 0 跳过**（基线 59 → 新增 4 条真集群测试） |
+| `cd $BE\common\idgenerator; mvn -o clean test` | **3 通过 / 0 失败 / 0 跳过**（第十五轮新增的真集群锁测试） |
+| `cd $BE\realserver\common\oms; mvn -o clean test` | **63 通过 / 0 失败 / 0 跳过**（基线 59 → 第十四轮新增 4 条真集群测试） |
 | `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 通过 / 0 失败** |
-| `cd $BE; mvn -o clean install -DskipTests` | **29 个模块全 SUCCESS**（含 proguard） |
+| `cd $BE; mvn -o clean install -DskipTests` | **44 个模块全 SUCCESS**（含 proguard）—— ⚠️ 原文档写「29 个」，实际是 44 |
 | `cd $BE\realserver\common\oms; mvn -o dependency:tree` | 只剩自己，**零 `com.sac.platform` 依赖** |
 | `cd $BE\common\idgenerator; mvn -o dependency:tree` | **不含 `realserver-entity`** |
+
+> ⚠️ **`idgenerator` 的 3 条新用例需要集群在跑**（`127.0.0.1:16379`）。
+> 集群不在时它们**跳过**（不是变红）。
+> ⚠️ **本地仓库里的 `realserver-oms` jar 是 proguard 处理过的** ——
+> `RedisPropertiesConfig` / `RedisUtilConfig` **已被改名**（写作时叫 `a` / `b`），
+> **从 idgenerator 的测试类路径上引用不到**。详见「第十五轮」第四节。
 
 > ⚠️ **构建必须用 JDK 8**（`D:\java\java-se-8u42-ri`）：
 > `oms` 的 proguard 配了 `${JAVA_HOME}/jre/lib/rt.jar`，**只有 JDK 8 有这个路径**。
@@ -2150,13 +2348,13 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ---
 
-## 会话存档（2026-10-29）：第十四轮结束时的完整状态
+## 会话存档（2026-10-29）：第十五轮结束时的完整状态
 
 **这一节是给「下一个会话」看的** —— 打开仓库先读这一节，能立刻知道现在是什么状态、
 东西在哪、哪些坑踩过了。
 
-> ⚠️ **本节已更新到第十四轮**（下面第十三轮的内容仍然有效，
-> 但「验证基线」和「下一次该做什么」两节以第十四轮的为准）。
+> ⚠️ **本节已更新到第十五轮**（下面第十四轮、第十三轮的内容仍然有效，
+> 但「验证基线」和「下一次该做什么」两节以第十五轮的为准）。
 
 ### 一、代码在哪、改了什么
 
@@ -2165,6 +2363,15 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 | `D:\javawork\1.2\cpscloud1.0\code\platform\backend` | `realserver` + `modelserver` 的 Java 源码（**不是 git 仓库**） |
 | `D:\javawork\1.2\cpscloud1.0\code\application\backend` | `napstarweb` 的 Java 源码（**不是 git 仓库**） |
 | `D:\work\rediscluterproject` | **本仓库**（唯一的 git 仓库）—— 放 spec / plan / patch / 文档 |
+
+**第十五轮改了 2 个源文件 + 1 个 pom + 新增 1 个测试**：
+
+```
+改  common/idgenerator/…/utils/IdUtil.java            (锁在 finally 里释放 + 序列号取不到时抛可诊断的错误)
+改  common/idgenerator/…/utils/redis/RedisUtil.java   (tryLock 的 catch 释放正确的键，且不抛)
+改  common/idgenerator/pom.xml                          (加 spring-boot-starter-test，test scope)
+新增 common/idgenerator/src/test/…/utils/IdUtilRedisLockLiveTest.java   (3 条真集群测试)
+```
 
 **第十四轮改了 2 个 pom + 新增 1 个测试**：
 
@@ -2206,10 +2413,11 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 新增 realserver/common/oms/src/test/…/utils/RedisPipelineUtilNoEntityDependencyTest.java
 ```
 
-**留痕**：五份 patch 在 `docs/superpowers/patches/`（Java 树不是 git 仓库，只能这样留痕）：
+**留痕**：六份 patch 在 `docs/superpowers/patches/`（Java 树不是 git 仓库，只能这样留痕）：
 
 | 文件 | 大小 | 校验结果 |
 |---|---|---|
+| `2026-10-29-idutil-redis-lock-fix.patch` | 23,551 B | 反向校验 exit 0；往返校验 `checked=4 mismatches=0` |
 | `2026-10-29-jedis-ceiling-platform-backend.patch` | 22,571 B | 反向校验 exit 0；往返校验 `checked=2 mismatches=0` |
 | `2026-10-29-jedis-ceiling-application-backend.patch` | 596 B | 反向校验 exit 0；往返校验 `checked=1 mismatches=0` |
 | `2026-10-28-unified-redis-connection-platform-backend.patch` | 107,604 B | 反向校验 exit 0；正向重建 `checked=19 mismatches=0` |
@@ -2221,20 +2429,26 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 | 命令 | 期望 |
 |---|---|
 | `docker run --rm --user 1000:1000 -v "D:/work/rediscluterproject:/repo" -w /repo rc-control:bats bash -c "find tests -name '*.bats' -print0 \| xargs -0 bats"` | **203 通过 / 0 失败** |
-| `bash tests/check_syntax.sh` | `TOTAL=45 FAIL=0` |
+| `bash tests/check_syntax.sh` | `TOTAL=45 FAIL=0`（其中 28 个是真做的 `bash -n`，17 个是 `.bats` 的 SKIP 占位） |
 | `bash tests/validate_libs.sh` | `PASS=54 FAIL=0` |
+| `cd $BE\common\idgenerator; mvn -o clean test` | **3 通过 / 0 失败 / 0 跳过**（第十五轮新增的真集群锁测试） |
 | `cd $BE\realserver\common\oms; mvn -o clean test` | **63 通过 / 0 失败 / 0 跳过**（基线 59 → 真集群 4 条） |
 | `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 通过 / 0 失败** |
-| `cd $BE; mvn -o clean install -DskipTests` | **29 个模块全 SUCCESS**（含 proguard） |
+| `cd $BE; mvn -o clean install -DskipTests` | **44 个模块全 SUCCESS**（含 proguard）—— ⚠️ 原文档写「29 个」，实际 44 |
 | `cd $BE\realserver\common\oms; mvn -o dependency:tree` | 只剩自己，**零 `com.sac.platform` 依赖** |
 | `cd $BE\common\idgenerator; mvn -o dependency:tree` | **不含 `realserver-entity`** |
 
 > ⚠️ **`oms` 的那 4 条真集群测试需要集群在跑**（`127.0.0.1:16379`）。
 > 集群不在时它们**跳过**（不是变红）—— 已实测
 > `-Dtest.clusters=127.0.0.1:19999` → `Skipped: 4`，`BUILD SUCCESS`。
+> **`idgenerator` 的 3 条同理**（集群不在时 `Skipped: 3`）。
 >
 > ⚠️ **构建必须用 JDK 8**（`D:\java\java-se-8u42-ri`）：
 > `oms` 的 proguard 配了 `${JAVA_HOME}/jre/lib/rt.jar`，**只有 JDK 8 有这个路径**。
+>
+> ⚠️ **本地仓库里的 `realserver-oms` jar 是 proguard 处理过的** ——
+> `RedisPropertiesConfig` / `RedisUtilConfig` **已被改名**（写作时叫 `a` / `b`），
+> 从 idgenerator 的测试类路径上**引用不到**。详见「第十五轮」第四节。
 
 ### 三、环境现状（2026-10-29 实测）
 
@@ -2286,8 +2500,18 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
    > 第十四轮已经在真集群上锁住了读路径的**顺序正确性**
    > （`readPathReturnsEntriesInTheSameOrderAsTheKeys`），
    > 所以做读侧 pipeline 时**别把这条断言改坏**。
-4. **合并三套 `RedisUtil`** —— `oms` / `idgenerator` / `modelserver` 各一份
-   （第十三轮 spec 的 N8 明确推迟了）。
+4. **合并两套 `RedisUtil`** —— 实际只有 **2 套**（第十五轮查实）：
+   `oms` 的 1699 行 / 102 个方法，与 `idgenerator` 的 170 行 / 13 个方法。
+   **modelserver 没有第三套**，它经 idgenerator 传递依赖复用 idgenerator 那套。
+   idgenerator 那 13 个方法里 **3 个零调用方**（`setHash` / `getHashList` /
+   `getPushList`，纯死代码），活的只有 `tryLock`/`unLock`（`IdUtil` 用）、
+   `deleteNamespace`（`NapstarOaTransformerServiceImpl` 用 2 处）、
+   `getValue`/`setValue`/`delete`/`scan`（`IdUtil` 用）。
+   ⚠️ **合并时别把 `deleteNamespace` 映射到 oms 的 `keys()`** ——
+   oms 的 `keys()` 已被标 `@Deprecated`（集群下返回**整个集群的 keyspace**）。
+   ⚠️ `idgenerator` 已经依赖 `realserver-oms`（pom 里有），依赖方向是通的；
+   但 `common/idgenerator → realserver/oms` 是**公共库依赖业务层模块**的反向依赖，
+   合并会让它**更深**，与第十三轮「解耦」的方向相反 —— 需要权衡。
 5. **（可选）`sche-viewer-server`** —— 第四个部署物，有同样的 P0 缺陷
    （`oms:` 块全注释）+ 第四份墓碑。但**它的模块在 aggregator 里是注释掉的**
    （不参与构建），且用 jedis 3.6.1（更老）。本轮**没动它**。
@@ -2295,12 +2519,16 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
    但装的是 Redis 基础设施。本轮**刻意没动**（spec §5.2）：
    改 artifactId 要同步 `backend/pom.xml` 的 `dependencyManagement` + 三个工程的 pom
    + Artifactory 上架，是仪式性成本。
-7. **（新，第十四轮）决定 jedis 要不要继续升** —— 现在是 `3.10.0`（JDK 8 下的上限）。
-   要升到 jedis 4+ 必须连带升 SDR 到 4.x，而那需要**编译目标升到 JDK 17**
-   + 重做 proguard + 改生产写路径。**前提是确认生产服务器能不能脱离 JDK 8。**
-   升级路径本身已实测可行（SDR 4.0.4 + jedis 8.1.0-beta2 在真集群上 write+read 都 OK）。
-8. **（新，第十四轮）把 CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`** ——
-   一行改动，覆盖面 6 → 45 个文件。⚠️ 改 workflow 要走 **SSH** 推送。
+7. ~~**（第十四轮）决定 jedis 要不要继续升**~~ —— **已结案（第十五轮）**：
+   用户确认**生产必须留在 JDK 8** → jedis **固定 `3.10.0`，不升级**。
+   （理由与实测数据见「第十四轮」的结论先行表。）
+8. **（第十四轮）把 CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`** ——
+   一行改动，**真实覆盖面 15 → 28 个文件**（⚠️ **不是** 6 → 45：
+   `check_syntax.sh` 的 `TOTAL=45` 里有 17 条是 `.bats` 的 SKIP 占位）。
+   ⚠️ 改 workflow 要走 **SSH** 推送。
+9. **（新，第十五轮）`tryLock` 的忙等自旋没有 sleep** —— 锁被占用时以无限速的
+   `SET NX` 空转，最长 10 秒。修好 F1 之后争用罕见，影响变小，但**问题还在**。
+   修法很小（循环里 sleep 几毫秒），但它属于「行为改动」，本轮刻意没做。
 
 ### 五、这一轮踩过的坑（**别再踩**）
 
@@ -2323,19 +2551,59 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
 | 15 | **（第十四轮）借连接忘了 AUTH** | 集群开了 `requirepass`，`INFO` 回 NOAUTH，异常被吞掉 → **计数恒为 0** |
 | 16 | **（第十四轮）`JedisPool` 在 jedis 8 里仍然存在，但这不代表 API 没变** | jedis 8 的 `JedisPool extends Pool<Jedis>`，可 `getClusterNodes()` 给的是 `ConnectionPool`。**必须看返回类型，不能只看类还在不在** |
 | 17 | **（第十四轮）外部编辑器会改你的工作树** | 会话期间 `backend/pom.xml` 与 `application/backend/pom.xml` 被改成 jedis 8.1.0-beta2（09:59:47 / 10:03:22，VS Code + Java 插件在跑），**整个工程编译失败**。**动手前先看文件 mtime**，发现异常改动先查清楚是谁改的 |
+| 18 | **（第十五轮）本地仓库里的 `realserver-oms` jar 是 proguard 处理过的** | `RedisPropertiesConfig` / `RedisUtilConfig` **已被改名**（写作时叫 `a` / `b`）→ 从 idgenerator 的测试类路径上**根本引用不到**，编译直接失败。**跨模块写测试时，先 `jar tf` 看一眼 jar 里到底有什么** |
+| 19 | **（第十五轮）PowerShell 5.1 把无 BOM 的 UTF-8 `.ps1` 当 ANSI 读** | 脚本里**字面写死**含中文的路径（本机用户名 `蔡雷鸣`）会被读坏 → `New-Item` 报**误导性的**「访问被拒绝」。**脚本里用 `$env:TEMP`，不要写字面路径** —— 这是本机第三次被非 ASCII 用户名绊倒 |
+| 20 | **（第十五轮）`if (false) {…}` 是编译错误** | javac 报「unreachable statement」。做变异检验时用一个**运行期**为假的条件（如 `System.currentTimeMillis() < 0`），不要用常量 |
 
 ---
 
 ## 下一步具体动作
 
-**第七~十四轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
-第十三轮已推送：`521f244..aadcbb9`；第十四轮：`80ad557` / `9b4f040` / `fdd3193` / `6e86496`。
+**第七~十五轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
+第十三轮已推送：`521f244..aadcbb9`；第十四轮：`80ad557` / `9b4f040` / `fdd3193` / `6e86496`；
+第十五轮：`09e080a` 之后的一条（修 `IdUtil` 的 Redis 锁 + 新增 3 条真集群测试）。
 
 > **⭐ 当前状态、代码位置、环境、待办、踩过的坑，全部在上面的
 > 「会话存档（2026-10-29）」一节里 —— 下一次会话先读那一节。**
 > 下面的内容是**历史记录**，保留供对照。
 
-### 下一次会话从这里开始（第十四轮结束时）
+### 下一次会话从这里开始（第十五轮结束时）
+
+```powershell
+cd D:\work\rediscluterproject
+git status -sb            # main...origin/main，工作区干净
+git log --oneline -5
+```
+
+环境（2026-10-29 实测，与上面的「会话存档」一致）：
+
+```
+rc-redis-publish    socat 转发器，把集群暴露到宿主机 127.0.0.1:16379-16384
+rc-cpsweb-node-a/b Redis 集群，cluster_state:ok / 16384 slots / 6 nodes / size 3
+                    ⚠️ 3 个 master 的 announce 地址被改成了 127.0.0.1:1637x（运行期改动）
+                    ⚠️ 容器一重启这个改动就丢，集群会变 cluster_state:fail
+rc-cpsweb-app       上一轮留下的 consumer，未改动
+```
+
+验证基线（**改代码前先跑一遍**）：
+
+| 命令 | 期望 |
+|---|---|
+| `docker run --rm --user 1000:1000 -v "D:/work/rediscluterproject:/repo" -w /repo rc-control:bats bash -c "find tests -name '*.bats' -print0 \| xargs -0 bats"` | **203 / 0** |
+| `bash tests/check_syntax.sh` | `TOTAL=45 FAIL=0` |
+| `bash tests/validate_libs.sh` | `PASS=54 FAIL=0` |
+| `cd $BE\common\idgenerator; mvn -o clean test` | **3 / 0 / 0 跳过** |
+| `cd $BE\realserver\common\oms; mvn -o clean test` | **63 / 0 / 0 跳过** |
+| `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 / 0** |
+
+> ⚠️ **构建必须用 JDK 8**（`D:\java\java-se-8u42-ri`）——
+> `oms` 的 proguard 要 `${JAVA_HOME}/jre/lib/rt.jar`，只有 JDK 8 有这个路径。
+>
+> ⚠️ **本地仓库里的 `realserver-oms` jar 是 proguard 处理过的** ——
+> `RedisPropertiesConfig` / `RedisUtilConfig` 已被改名，
+> 从 idgenerator 的测试类路径上引用不到（见「第十五轮」第四节）。
+
+### 下一次会话从这里开始（第十四轮结束时，历史记录）
 
 ```powershell
 cd D:\work\rediscluterproject
