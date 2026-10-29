@@ -1,10 +1,10 @@
 # cluster-config.sh 实施进度交接
 
-**更新时间**：2026-10-28
+**更新时间**：2026-10-29
 **工作分支**：无 —— 第七~十三轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
-**基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十二轮已推送
-（`525d07a..856d1b8`），bats **199 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0）
+**基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十三轮已推送
+（`521f244..aadcbb9`），bats **199 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0）
 **第十三轮（2026-10-28）**：**统一三个工程的 Redis 连接基础设施**
 （`realserver` / `modelserver` / `napstarweb`）。两步：① 修配置契约
 （`oms:` 块补全、bean 改名、删三个墓碑）；② 给 `realserver-oms` **瘦身**
@@ -36,9 +36,14 @@ SDR 2.7.18 大多**不抛**，而是**静默降级**成非原子的客户端实�
 （命令行可以完全不传配置），并修掉脚本里三个会「让正确的运行变红」的缺陷。
 详见下文「第十一轮」。
 
-**下一步**：① **别再在这台机器上加并发**（已换出 1.77 GB）；② 换干净集群重测倍率；
-③ 验证生产值 `max-poll-records=100000`（测试里生效的是 Boot 默认 **500**）——
-**这很可能是当前吞吐的真实上限**。
+**下一步**（第十三轮结束后，详见「会话存档（2026-10-29）」）：
+① **填生产真值** —— 三个 `application.yml` 的 `oms.clusters` 现在是**占位符
+`127.0.0.1:6379`**、`password` 是空串，必须换真值并同步 Nacos；
+② 设 `cluster_require_full_coverage=no`（2 机部署必须，否则任一 master 挂 = 全集群停写）；
+③ **读侧 pipeline**（`findByOtype` 集群下仍是 N 次串行 `HGETALL`）；
+④ 合并三套 `RedisUtil`；
+⑤ （旧的）**别再在这台机器上加并发**（已换出 1.77 GB）；换干净集群重测倍率；
+验证生产值 `max-poll-records=100000`（测试里生效的是 Boot 默认 **500**）。
 
 ---
 
@@ -1868,12 +1873,173 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ---
 
+## 会话存档（2026-10-29）：第十三轮结束时的完整状态
+
+**这一节是给「下一个会话」看的** —— 打开仓库先读这一节，能立刻知道现在是什么状态、
+东西在哪、哪些坑踩过了。
+
+### 一、代码在哪、改了什么
+
+| 位置 | 说明 |
+|---|---|
+| `D:\javawork\1.2\cpscloud1.0\code\platform\backend` | `realserver` + `modelserver` 的 Java 源码（**不是 git 仓库**） |
+| `D:\javawork\1.2\cpscloud1.0\code\application\backend\napstarweb` | `napstarweb` 的 Java 源码（**不是 git 仓库**） |
+| `D:\work\rediscluterproject` | **本仓库**（唯一的 git 仓库）—— 放 spec / plan / patch / 文档 |
+
+**第十三轮改了 11 个 + 删了 5 个 + 新增 4 个测试**：
+
+```
+改  realserver/common/oms/…/oms/utils/RedisUtil.java              (27 个方法加 @Deprecated)
+改  realserver/common/oms/…/oms/utils/RedisPipelineUtil.java       (删 opsHashSetPipeByHashData)
+改  realserver/common/oms/…/oms/config/RedisPropertiesConfig.java  (bean 改名)
+改  realserver/common/oms/…/oms/config/RedisUtilConfig.java        (模式大小写不敏感)
+改  realserver/common/oms/pom.xml                                   (解耦 + 显式 jackson-databind)
+改  realserver/dao/…/impl/OmsWriteDaoImpl.java                     (分组逻辑挪到业务侧)
+改  realserver/plugins/rtdata-module/…/OmsWriteByKafkaServiceImpl.java
+改  realserver/controller/src/main/resources/application.yml         (oms: 块补全)
+改  modelserver/controller/src/main/resources/application.yml        (oms: 块补全)
+改  modelserver/services/…/CacheServiceImpl.java                     (修正错误注释)
+改  napstarweb/web-controller/src/main/resources/application.yml      (oms: 块补全)
+
+删  realserver/common/oms/…/oms/utils/JedisUtils.java               (~700 行死代码)
+删  realserver/common/oms/…/oms/utils/JedisPoolUtils.java           (~50 行死代码)
+删  realserver/plugins/rtdata-module/…/config/RedisPropertiesConfig.java   (墓碑)
+删  modelserver/controller/…/config/RedisPropertiesConfig.java             (墓碑)
+删  napstarweb/web-controller/…/config/RedisPropertiesConfig.java           (墓碑)
+
+新增 realserver/common/oms/src/test/…/config/RedisClusterOmsContractTest.java
+新增 realserver/common/oms/src/test/…/config/RedisModeCaseSensitivityTest.java
+新增 realserver/common/oms/src/test/…/config/RedisPropertiesConfigBeanNameTest.java
+新增 realserver/common/oms/src/test/…/utils/RedisPipelineUtilNoEntityDependencyTest.java
+```
+
+**留痕**：三份 patch 在 `docs/superpowers/patches/`（Java 树不是 git 仓库，只能这样留痕）：
+
+| 文件 | 大小 | 校验结果 |
+|---|---|---|
+| `2026-10-28-unified-redis-connection-platform-backend.patch` | 107,604 B | 反向校验 exit 0；正向重建 `checked=19 mismatches=0` |
+| `2026-10-28-unified-redis-connection-napstarweb.patch` | 3,138 B | 反向校验 exit 0；正向重建 `checked=2 mismatches=0` |
+| `2026-10-28-unified-redis-connection.patch`（合并，仅供合成仓库） | 110,742 B | 20 个 `diff --git`（4 新增 / 5 删除） |
+
+### 二、验证基线（下一次会话先跑这个，别改代码先跑一遍）
+
+| 命令 | 期望 |
+|---|---|
+| `docker run --rm --user 1000:1000 -v "D:/work/rediscluterproject:/repo" -w /repo rc-control:bats bash -c "find tests -name '*.bats' -print0 \| xargs -0 bats"` | **199 通过 / 0 失败** |
+| `cd $BE\realserver\common\oms; mvn -o clean test` | **59 通过 / 0 失败**（基线 50 → 新增 9） |
+| `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 通过 / 0 失败** |
+| `cd $BE\realserver\common\oms; mvn -o dependency:tree` | 只剩自己，**零 `com.sac.platform` 依赖** |
+| `cd $BE\common\idgenerator; mvn -o dependency:tree` | **不含 `realserver-entity`** |
+
+### 三、环境现状（2026-10-29 实测）
+
+```
+rc-redis-publish    Up 19 hours      socat 转发器，把集群暴露到宿主机 127.0.0.1:16379-16384
+rc-cpsweb-app       Up 24 hours      上一轮留下的 consumer（跑的是 10/28 的新 jar）
+rc-cpsweb-node-a    Up 47 hours      Redis 集群 node-a（3 个 master）
+rc-cpsweb-node-b    Up 47 hours      Redis 集群 node-b（3 个 replica）
+```
+
+**集群健康**：`cluster_state:ok` / `cluster_slots_assigned:16384` /
+`cluster_known_nodes:6` / `cluster_size:3`，密码 `CpsE2eClusterPw`。
+
+**⚠️ 集群的 announce 地址被改过（运行期改动，只针对这套一次性 E2E 集群）**：
+
+```
+127.0.0.1:16379@16379  master   ← 已改
+127.0.0.1:16380@16380  master   ← 已改
+127.0.0.1:16381@16381  master   ← 已改
+172.21.0.3:6382@16382   slave    ← 仍是旧地址
+127.0.0.1:16384@16384  slave    ← 已改
+172.21.0.3:6383@16383   slave    ← 仍是旧地址
+```
+
+3 个 master 的地址是 `127.0.0.1:1637x`，**所以宿主机上的 Java 能连上**；
+两个 replica 仍是 `172.21.0.3:638x`（宿主机不可达），但**客户端只路由到 master，
+所以不影响 L3 测试**（实测 `RedisClusterOmsContractTest` 仍然 `2/2 绿、Skipped: 0`）。
+
+**重建转发器**（如果 `rc-redis-publish` 没了）：
+```powershell
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
+  -v "C:/Users/蔡雷鸣/AppData/Local/Temp/opencode:/v" -w /v `
+  rc-e2e-runner:local bash /v/start-publish.sh
+```
+说明见 `%TEMP%\opencode\REDIS-CLUSTER-ACCESS.md`。
+
+### 四、下一次会话该做什么（按优先级）
+
+1. **填生产真值（唯一的"欠账"）** —— 三个 `application.yml` 里的
+   `oms.clusters` 现在是**占位符 `127.0.0.1:6379`**，`password` 是空串。
+   必须换成生产地址，并同步 Nacos 上的同名配置。
+   **风险**：如果生产机上恰好有单节点 Redis 跑在 6379，会被静默连上。
+   → 见「下一步具体动作」里建议的 fail-fast 方案。
+2. **`cluster_require_full_coverage=no`**（第十二轮的键）—— 默认 `yes` 时
+   **任一 master 挂掉 = 全集群停写**；2 机部署必须设 `no`。
+3. **读侧 pipeline** —— `RedisClusterHashPipeline.getAllHashes`。
+   `findByOtype` / `findByOtypeIds` 在集群下是 **N 次串行 `HGETALL`**；
+   写侧第十轮已按节点 pipeline 化，**读侧还没做**，是同一根因的另一半。
+4. **合并三套 `RedisUtil`** —— `oms` / `idgenerator` / `modelserver` 各一份
+   （本轮 spec 的 N8 明确推迟了）。
+5. **（可选）`sche-viewer-server`** —— 第四个部署物，有同样的 P0 缺陷
+   （`oms:` 块全注释）+ 第四份墓碑。但**它的模块在 aggregator 里是注释掉的**
+   （不参与构建），且用 jedis 3.6.1（更老）。本轮**没动它**。
+6. **（可选）`realserver-oms` 的命名与位置** —— 现在叫 `oms`、放在 `realserver/` 下，
+   但装的是 Redis 基础设施。本轮**刻意没动**（spec §5.2）：
+   改 artifactId 要同步 `backend/pom.xml` 的 `dependencyManagement` + 三个工程的 pom
+   + Artifactory 上架，是仪式性成本。
+
+### 五、这一轮踩过的坑（**别再踩**）
+
+| # | 坑 | 后果 / 正确做法 |
+|---|---|---|
+| 1 | **`mvn spring-boot:run` 会 fork 新 JVM，不传递 Maven 的 `-D` 系统属性** | `-Doms.clusters[0]=…` **无效**；要写 `"-Dspring-boot.run.jvmArguments=-Doms.clusters[0]=… -Doms.password=…"` |
+| 2 | **`oms` 的 pom 配了 proguard，它要 JDK 8 的 `rt.jar`** | JDK 9+ 没有这个文件 → `Can't read .../rt.jar`。本机有**两个 JDK**：`D:\java\java-se-8u42-ri`（8）与 `D:\java\jdk-21.0.2`（21）。**构建前确认 `JAVA_HOME`** |
+| 3 | **PowerShell 里 `-D` 参数必须加引号** | `"-Dproguard.skip=true"`；不加会被拆成 `.skip=true`，maven 报 `Unknown lifecycle phase` |
+| 4 | **绝不要用 `Set-Content` 改 Java / YAML / 本仓库的 md** | 会加 BOM + 把 LF 换成 CRLF → Java 编译失败、YAML 解析失败。**一律用编辑工具** |
+| 5 | **`Out-File -Encoding ascii` 会把 patch 里的中文全变成 `?`** | patch 直接 `corrupt`。用 `git diff --output=<file>`（原始字节） |
+| 6 | **改 `oms` 之后必须 `mvn install` 重装它** | 下游模块从 `D:\java\apache-maven\mvnRepo` 取 jar，**不是**从源码树。旧 jar 会让下游编译旧代码 |
+| 7 | **生成 patch 时必须 `core.autocrlf=false` / `core.eol=lf`** | 源文件行尾是**混的**（`pom.xml` 是 LF，`.java` 是 CRLF）。默认 `autocrlf=true` 会规范化行尾，patch 的"改动前"侧与磁盘对不上 → **应用失败** |
+| 8 | **生成 patch 时必须显式 `Remove-Item` 已删的文件** | 只复制存在的文件 → `git add -A` 认为没变 → **5 个删除全部静默丢失** |
+| 9 | **`cluster-announce-bus-port` 不能改** | 它是节点**之间**通信用的，改了会让集群内部链路断掉（节点全 `disconnected`）。要改就用**转发端口本身** |
+| 10 | **集群的 announce 地址要 6 个节点全改** | 只改 master 的话，`CLUSTER SLOTS` 会混着 `127.0.0.1:1637x` 与 `172.21.0.x`，客户端按后者去连就超时 |
+
+---
+
 ## 下一步具体动作
 
-**第七~十二轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
-第十二轮已推送：`525d07a..856d1b8`。
+**第七~十三轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
+第十三轮已推送：`521f244..aadcbb9`。
 
-### 下一次会话从这里开始（第十二轮结束时）
+> **⭐ 当前状态、代码位置、环境、待办、踩过的坑，全部在上面的
+> 「会话存档（2026-10-29）」一节里 —— 下一次会话先读那一节。**
+> 下面的内容是**第十二轮结束时**写的历史记录，保留供对照。
+
+### 下一次会话从这里开始（第十三轮结束时）
+
+```powershell
+cd D:\work\rediscluterproject
+git status -sb            # main...origin/main，工作区干净
+git log --oneline -3      # aadcbb9 / 1252437 / bac3398
+```
+
+环境（2026-10-29 实测，与上面的「会话存档」一致）：
+
+```
+rc-redis-publish    socat 转发器，把集群暴露到宿主机 127.0.0.1:16379-16384
+rc-cpsweb-node-a/b Redis 6 节点集群，cluster_state:ok / 16384 slots / 6 nodes / size 3
+                    ⚠️ 3 个 master 的 announce 地址被改成了 127.0.0.1:1637x（运行期改动）
+rc-cpsweb-app       上一轮留下的 consumer，未改动
+```
+
+验证基线（**改代码前先跑一遍**）：
+
+| 命令 | 期望 |
+|---|---|
+| `docker run --rm --user 1000:1000 -v "D:/work/rediscluterproject:/repo" -w /repo rc-control:bats bash -c "find tests -name '*.bats' -print0 \| xargs -0 bats"` | **199 / 0** |
+| `cd $BE\realserver\common\oms; mvn -o clean test` | **59 / 0** |
+| `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 / 0** |
+
+### 下一次会话从这里开始（第十二轮结束时，历史记录）
 
 ```powershell
 cd D:\work\rediscluterproject
