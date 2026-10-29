@@ -26,7 +26,12 @@ echo
 
 docker run --rm -v "${HOST_REPO}:/repo" -w /repo "$BASH_IMAGE" sh -c '
     set -e
-    apk add --no-cache bats >/dev/null 2>&1
+    # Do NOT silence this: the alpine CDN that serves bats fails intermittently
+    # (measured: 3 of 5 attempts failed with "SSL routines::unexpected eof while
+    # reading" or "bats (no such package)"). With the error hidden, that failure
+    # looks exactly like "the code is incompatible with bash 4.3" -- it is not.
+    # A visible apk error tells the reader it is a network problem.
+    apk add --no-cache bats
     echo "bash: $(bash --version | head -1)"
     echo "bats: $(bats --version)"
     echo
@@ -38,6 +43,14 @@ echo
 if [ "$rc" -eq 0 ]; then
     echo "BASH_COMPAT: PASS"
 else
-    echo "BASH_COMPAT: FAIL (exit $rc)"
+    # If the apk step failed, say so: the code may well be fine and the only
+    # thing broken was the package download.
+    if ! grep -q '^bash: GNU bash' /tmp/bash-compat.log; then
+        echo "BASH_COMPAT: FAIL (exit $rc) -- the bats package could not be installed;"
+        echo "               this is a network/CDN problem, NOT a bash 4.3 incompatibility."
+        echo "               Re-run; if it keeps failing, install bats into a local image."
+    else
+        echo "BASH_COMPAT: FAIL (exit $rc)"
+    fi
 fi
 exit "$rc"

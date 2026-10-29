@@ -5,6 +5,52 @@
 **主仓库**：`D:\work\rediscluterproject`
 **基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十三轮已推送
 （`521f244..aadcbb9`），bats **199 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0）
+
+> **⭐ 2026-10-29 会话开局复核（没有改生产代码，只验证 + 修环境 + 修一个测试脚本）**
+>
+> 本次会话把上面每一条基线**重跑了一遍**，结论：**全部与文档相符**。
+> 期间发现**一个新缺陷**（`check-bash-compat.sh` 的假红 + 误报，
+> **已修 + 已加 4 条回归测试**），并把环境恢复到了文档描述的状态。
+>
+> | 检查 | 结果 |
+> |---|---|
+> | `git status -sb` / `git status --porcelain` | `main...origin/main`，工作区**干净**，`rev-list --left-right --count` = `0 0` |
+> | bats（非特权 uid 1000） | **203 通过 / 0 失败**（199 + 本次新增的 4 条） |
+> | `tests/check_syntax.sh` | `TOTAL=45 FAIL=0`（43 + 新增的 2 个文件） |
+> | `tests/validate_libs.sh` | `PASS=54 FAIL=0`（退出码 0） |
+> | `scripts/check-bash-compat.sh`（bash 4.3） | `BASH_COMPAT: PASS`（203/203） |
+> | `scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 **0**，**A0–A6 七条断言全部出现且全绿** |
+> | `oms` 单测 | **59 通过 / 0 失败 / 1 跳过**（跳过的是 L3 真集群那条；把集群拉起来后单独跑 → **2/2，Skipped: 0**） |
+> | `rtdata-module` 单测 | **14 通过 / 0 失败** |
+> | `oms` 依赖树 | **零 `com.sac.platform` 依赖** |
+> | `idgenerator` 依赖树 | **不含 `realserver-entity`** |
+> | 三份 patch 反向校验 | **全部 exit 0**（磁盘上仍是 patch 的后像，源码没漂移） |
+> | `RedisUtil` 的 `@Deprecated` 数量 | **27**（与第十三轮记录一致） |
+> | `RedisClusterHashPipeline` 的公开入口 | 只有 `putAllHashes`，**没有 `getAllHashes`** → 读侧 pipeline **确实还没做** |
+>
+> **本次会话对仓库的改动（3 个文件）**：
+>
+> | 文件 | 改动 |
+> |---|---|
+> | `scripts/check-bash-compat.sh` | 修「假红」：不再吞掉 apk 的错误；失败时区分「包没装上」与「测试真的失败」 |
+> | `tests/bash_compat.bats`（**新**） | 4 条回归用例，用 docker stub 真跑内层脚本 |
+> | `tests/helpers/docker_stub.sh`（**新**） | docker stub：把内层 `sh -c` 真跑起来，配一个按需失败的假 `apk` |
+> | `docs/HANDOFF.md` | 本文件 |
+>
+> **环境复原过程（下次会话注意）**：Docker Desktop 当时是**停的**，
+> 容器全在 `Exited` 状态。`docker start` 之后集群是 **`cluster_state:fail`**
+> （6 个节点全 `disconnected`）—— 因为 announce 地址是**运行期**改动，容器一重启就丢了。
+> 重跑 `%TEMP%\opencode\set-announce.sh` 后恢复 `state=ok` / 6/6 connected；
+> 再重跑 `start-publish.sh` 重建转发器，宿主机 `127.0.0.1:16379-16384` 全部可达。
+>
+> ⚠️ **有两个同名相似的脚本，别用错**：
+> `%TEMP%\opencode\set-announce.sh`（**正确**：bus-port 保持 0）
+> vs `%TEMP%\opencode\restore-cluster.sh`（**错误**：它把 bus-port 也改成转发端口，
+> 那正是「坑 9」说的会让节点链路断掉的改法）。
+>
+> **下一轮动手前先读这一段**。
+
+
 **第十三轮（2026-10-28）**：**统一三个工程的 Redis 连接基础设施**
 （`realserver` / `modelserver` / `napstarweb`）。两步：① 修配置契约
 （`oms:` 块补全、bean 改名、删三个墓碑）；② 给 `realserver-oms` **瘦身**
@@ -1293,15 +1339,41 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 
 | 命令 | 预期结果 |
 |---|---|
-| `bats tests/lib/*.bats tests/*.bats` | **199 通过 / 0 失败** |
-| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **199 通过 / 0 失败**（CI 调用方式） |
-| `bash tests/check_syntax.sh` | `TOTAL=43 FAIL=0` |
+| `bats tests/lib/*.bats tests/*.bats` | **203 通过 / 0 失败** |
+| `find tests -name '*.bats' -print0 \| xargs -0 bats` | **203 通过 / 0 失败**（CI 调用方式） |
+| `bash tests/check_syntax.sh` | `TOTAL=45 FAIL=0` |
 | `bash tests/validate_libs.sh` | `PASS=54 FAIL=0` |
 | `bash scripts/check-bash-compat.sh` | `BASH_COMPAT: PASS`（在 bash 4.3 上跑同一套 bats） |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 | `bash scripts/e2e-cpsweb-nodes.sh` | `E2E PASSED`，退出码 0（需 Docker + `cpsweb-env:1.0`） |
 
-> **199 是第十二轮的数字**（第十一轮结束时是 186，第十轮结束时是 163）。
+> ✅ **`check-bash-compat.sh` 的「假红」已修**（2026-10-29）。
+>
+> **原缺陷**：它在 `bash:4.3` 容器里跑 `apk add --no-cache bats >/dev/null 2>&1`。
+> 这一步依赖 alpine CDN，**会间歇性失败**（实测 5 次里失败 3 次：
+> `SSL routines::unexpected eof while reading` / `bats (no such package)`）。
+> `>/dev/null 2>&1` 把**全部**诊断吞掉，于是只剩一句
+> `BASH_COMPAT: FAIL (exit 1)` —— 看起来像「代码在 bash 4.3 上不兼容」，
+> **实际上代码是好的**（同一条 bats 套件在 bash 4.3 上 203/203 全绿）。
+> **一个会指错方向的诊断，比没有诊断更糟**：它把排查引向一个不存在的兼容性 bug。
+>
+> **修法**（`scripts/check-bash-compat.sh`）：
+> ① 去掉 `>/dev/null 2>&1`，让 apk 的错误露出来；
+> ② 失败时用「有没有打印出 `bash: GNU bash` 这一行」来区分
+> **「包没装上」（网络问题）** 与 **「测试真的失败」（兼容性问题）**，
+> 前者明确打印 `NOT a bash 4.3 incompatibility`。
+>
+> **回归覆盖**（`tests/bash_compat.bats`，4 条）：
+> 用一个 **docker stub**（`tests/helpers/docker_stub.sh`）把内层 `sh -c`
+> 真的跑起来，配一个**按需失败**的假 `apk` —— 于是失败路径是**被观测到的**，
+> 不是推断出来的，也**不依赖网络**。
+> **已验证 RED→GREEN**：对**修复前**的脚本跑这 4 条，第 1、2 条**变红**。
+>
+> ⚠️ **判别方法（老脚本还在用的时候）**：失败时如果**没有**
+> `bash: GNU bash, version 4.3...` 那一行，就是 apk 没装上，重跑即可。
+
+> **203 = 199 + 4**（2026-10-29 新增 `tests/bash_compat.bats` 4 条）。
+> 199 是第十二轮的数字（第十一轮结束时是 186，第十轮结束时是 163）。
 > 第十二轮新增：拓扑算法 15 条 + 配置键 4 条 + 渲染 3 条 + `lib/cluster.sh` 11 条
 > + `cluster-config.sh` 3 条。
 
@@ -2002,6 +2074,7 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
 | 8 | **生成 patch 时必须显式 `Remove-Item` 已删的文件** | 只复制存在的文件 → `git add -A` 认为没变 → **5 个删除全部静默丢失** |
 | 9 | **`cluster-announce-bus-port` 不能改** | 它是节点**之间**通信用的，改了会让集群内部链路断掉（节点全 `disconnected`）。要改就用**转发端口本身** |
 | 10 | **集群的 announce 地址要 6 个节点全改** | 只改 master 的话，`CLUSTER SLOTS` 会混着 `127.0.0.1:1637x` 与 `172.21.0.x`，客户端按后者去连就超时 |
+| 11 | **容器重启后 announce 配置会丢** | `CONFIG SET cluster-announce-*` 是**运行期**改动，容器一重启就回到 `172.21.0.x`，集群变 `cluster_state:fail`（6 个节点全 `disconnected`）。重启后必须重跑 `%TEMP%\opencode\set-announce.sh`（**注意是 `set-announce.sh`，不是 `restore-cluster.sh`** —— 后者会把 bus-port 也改掉，正是坑 9 说的那种改法） |
 
 ---
 
