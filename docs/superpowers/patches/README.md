@@ -8,7 +8,7 @@ There were **two** `RedisUtil` classes (the handoff said three — there is no
 third: `modelserver` consumed idgenerator's through the dependency chain). This
 patch deletes the thin one and moves what was in it to where it belongs.
 
-### What was actually in the 170-line class
+### What was actually in the 179-line class
 
 | Kind | Members |
 |---|---|
@@ -16,6 +16,9 @@ patch deletes the thin one and moves what was in it to where it belongs.
 | dead code | `setHash`, `getHashList`, `getPushList` — zero call sites |
 | one-line wrappers | `getValue`, `setValue`, `delete`, `scan` |
 | injection setters | `setRedisTemplate`, `setRedisClusterHelper` |
+| one more | `execute` — the public method of the anonymous `SessionCallback` inside `getHashList` |
+
+That is 13 public methods in all.
 
 So it was a thin shell around two things. Both have moved:
 
@@ -74,10 +77,10 @@ git apply ..\..\..\..\work\rediscluterproject\docs\superpowers\patches\2026-10-2
   SUCCESS, napstarweb reactor **13 modules** SUCCESS.
 - `mvn -o dependency:tree` on idgenerator → **no `realserver-oms`** at all;
   on `model-service` → a direct `compile` dependency.
-- Six mutation checks, each turning **exactly one** test red: drop the
+- Six mutation checks. Five turn **exactly one** test red; the sixth (scan only
   `finally` release; release the doubled-prefix key; drop the retry sleep;
   release a lock that was never acquired; store the counter as a string; scan
-  only the first master.
+  the first master) turns two red. The list: drop the
 
 ### Known issues left in place (deliberately)
 

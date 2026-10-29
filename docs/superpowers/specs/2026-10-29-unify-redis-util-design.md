@@ -1,7 +1,7 @@
 # 统一 Redis 工具类（合并 idgenerator 与 oms 的两套 RedisUtil）
 
 **日期**：2026-10-29
-**状态**：设计已批准，待实施
+**状态**：**已实施**（第十六轮完成，见 `docs/HANDOFF.md` 的「第十六轮」）
 **Java 源码不在本仓库** → 改动以 patch 留痕在 `docs/superpowers/patches/`
 
 ---
@@ -16,7 +16,7 @@
 | 位置 | 行数 | public 方法 | bean 名 | 状态 |
 |---|---|---|---|---|
 | `oms` `…/realserver/oms/utils/RedisUtil.java` | 1699 | 102（去重后 102 个方法名） | `realRedisUtil`（`@Bean`） | 第十三轮给 27 个集群不安全方法加了 `@Deprecated` |
-| `idgenerator` `…/common/utils/redis/RedisUtil.java` | 170 | 13 | `redisUtil`（`@Component`） | **未标注任何集群风险** |
+| `idgenerator` `…/common/utils/redis/RedisUtil.java` | 179 | 13 | `redisUtil`（`@Component`） | **未标注任何集群风险** |
 | `modelserver` | — | — | — | **没有第三套** —— `CacheServiceImpl` 与 `NapstarOaTransformerServiceImpl` 都经 idgenerator 传递依赖拿到 idgenerator 那套 |
 
 ### 1.2 真正的债不是「102 vs 13」
@@ -67,7 +67,7 @@ common/idgenerator/src/main/java/…/redis/RedisUtil.java:4  import com.sac.plat
 | # | 文件 | 改动 |
 |---|---|---|
 | 1 | `realserver/common/oms/…/oms/utils/RedisUtil.java` | **加** `deleteNamespace(String pattern)` |
-| 2 | `common/idgenerator/…/common/utils/redis/RedisUtil.java` | **删**（整个类，170 行） |
+| 2 | `common/idgenerator/…/common/utils/redis/RedisUtil.java` | **删**（整个类，179 行） |
 | 3 | `common/idgenerator/…/common/utils/IdUtil.java` | 锁搬进来（私有）；改用 `RedisTemplate`；模板**惰性**获取 |
 | 4 | `modelserver/services/…/NapstarOaTransformerServiceImpl.java` | import 换成 oms 的 `RedisUtil`（调用点不变） |
 | 5 | `common/idgenerator/pom.xml` | 删掉 `realserver-oms` 依赖 |

@@ -9,7 +9,7 @@
 **`fdd3193`**（真集群测试 + jedis 版本上限）、**`6e86496`**、
 **`09e080a`**（会话存档）；**第十六轮推了 `9be5aec`**（CI 语法覆盖面 15→28）、
 **`c873d04`/`da93756`**（合并两套 RedisUtil 的设计与计划）、
-**`ba5b0f6`**（计划进度）。
+**`ba5b0f6`**（计划进度）、**`389547b`**（**第十六轮的代码 + patch + 文档**）。
 当前 bats **203 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0），
 `oms` **66 通过 / 0 失败 / 0 跳过**（含 3 条新增的真集群用例），
 `idgenerator` **6 通过 / 0 失败**（第十五轮 3 条 + 第十六轮 3 条），
@@ -23,17 +23,17 @@
 > **先纠正交接文档里的一处说法**：它写的是「合并**三套** `RedisUtil`
 > （oms / idgenerator / modelserver 各一份）」。**实际只有两套** ——
 > modelserver 没有第三份，它经 idgenerator 传递依赖在用 idgenerator 那份。
-> 而 idgenerator 那 170 行的类里，**真正的内容只有两段**：
+> 而 idgenerator 那 179 行的类里，**真正的内容只有两段**：
 > 一把 `SET NX EX` 锁 + 一个按模式删除；其余是 4 个一行包装、2 个注入 setter、
 > **3 个零调用方的死方法**。它是个「装着两段实质代码的薄壳」。
 >
 > | 项 | 结果 |
 > |---|---|
 > | oms 的 `RedisUtil` | **加** `deleteNamespace`（通用能力归位），**+3 条真集群用例** → **66 / 0** |
-> | idgenerator 的 `RedisUtil` | **整个删掉**（170 行）；锁搬进 `IdUtil` 变成私有方法 → **6 / 0** |
+> | idgenerator 的 `RedisUtil` | **整个删掉**（179 行）；锁搬进 `IdUtil` 变成私有方法 → **6 / 0** |
 > | 反向依赖 | idgenerator 的依赖树里**再也看不到 `realserver-oms`**；`model-service` 改成**直接**声明 |
 > | backend / napstarweb reactor | **44 个模块** / **13 个模块**，全 SUCCESS |
-> | 变异检验 | 6 条，**各自**只让**恰好一条**用例变红 |
+> | 变异检验 | 6 条：前五条**各自**只让**恰好一条**用例变红；最后一条（只扫第一个 master）让**两条**同时变红 |
 > | patch | `docs/superpowers/patches/2026-10-29-unify-redis-util.patch`（10 个文件，81,478 B）<br>反向校验 exit 0；往返校验 `checked=9 mismatches=0` |
 >
 > **⚠️ 有一个「发布契约」变化必须写进发布说明**：4 个模块
@@ -196,7 +196,8 @@ SDR 2.7.18 大多**不抛**，而是**静默降级**成非原子的客户端实�
 `127.0.0.1:6379`**、`password` 是空串，必须换真值并同步 Nacos；
 ② 设 `cluster_require_full_coverage=no`（2 机部署必须，否则任一 master 挂 = 全集群停写）；
 ③ **读侧 pipeline**（`findByOtype` 集群下仍是 N 次串行 `HGETALL`）；
-④ 合并**两套** `RedisUtil`（不是三套 —— modelserver 没有第三套，第十五轮查实）；
+④ ~~合并**两套** `RedisUtil`~~ —— **✅ 已做（第十六轮）**（不是三套 ——
+modelserver 没有第三套）；反向依赖 `common/idgenerator → realserver/oms` 已消除；
 ⑤ **CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`**（真实覆盖面 15 → 28 个文件）；
 ⑥ （旧的）**别再在这台机器上加并发**（已换出 1.77 GB）；换干净集群重测倍率；
 验证生产值 `max-poll-records=100000`（测试里生效的是 Boot 默认 **500**）。
@@ -204,6 +205,7 @@ SDR 2.7.18 大多**不抛**，而是**静默降级**成非原子的客户端实�
 > **✅ 已结案**：jedis 升不升 —— 用户确认**生产必须留在 JDK 8** →
 > jedis **固定 `3.10.0`，不升级**（第十四轮已实测出这个上限）。
 > **✅ 已修（第十五轮）**：`IdUtil` 的 Redis 锁「成功路径从不释放」。
+> **✅ 已修（第十六轮）**：两套 `RedisUtil` 合成一套；`tryLock` 的忙等自旋加了 sleep。
 
 ---
 
@@ -489,15 +491,18 @@ Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 
 | 位置 | 行数 | public 方法 | bean 名 |
 |---|---|---|---|
-| `oms` `…/realserver/oms/utils/RedisUtil.java` | 1699 | **102** | `realRedisUtil`（`@Bean`） |
-| `idgenerator` `…/common/utils/redis/RedisUtil.java` | 170 | **13** | `redisUtil`（`@Component`） |
+| `oms` `…/realserver/oms/utils/RedisUtil.java` | 1699 | **120 个声明 / 102 个不同的方法名** | `realRedisUtil`（`@Bean`） |
+| `idgenerator` `…/common/utils/redis/RedisUtil.java` | 179 | **13** | `redisUtil`（`@Component`） |
 | `modelserver` | — | — | **没有第三份** —— 它经 idgenerator 传递依赖在用 idgenerator 那份 |
 
-而那 13 个方法的构成是：**2 段实质内容**（`SET NX EX` 锁、按模式删除）、
+那 13 个 public 方法的构成：**2 段实质内容**（`SET NX EX` 锁、按模式删除）、
 **3 个零调用方的死方法**（`setHash`/`getHashList`/`getPushList`）、
-4 个一行包装、2 个注入 setter。**它是个装着两段实质代码的薄壳。**
+4 个一行包装（`getValue`/`setValue`/`delete`/`scan`）、
+2 个注入 setter（`setRedisTemplate`/`setRedisClusterHelper`）、
+1 个匿名 `SessionCallback` 里的 public 方法（`execute`，`getHashList` 内部用的）。
+**它是个装着两段实质代码的薄壳。**
 
-### 二、改了什么（4 个源文件 + 2 个 pom）
+### 二、改了什么（**10 个文件**：8 个 Java + 2 个 pom）
 
 | # | 文件 | 改动 |
 |---|---|---|
@@ -505,7 +510,7 @@ Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 | 2 | `oms/…/oms/src/test/…/RedisUtilDeleteNamespaceLiveTest.java` | **新增**（3 条真集群用例） |
 | 3 | `oms/…/oms/src/test/…/RedisClusterTestSupport.java` | **新增**（共享的拓扑支撑类） |
 | 4 | `oms/…/oms/src/test/…/RedisClusterHashPipelineLiveTest.java` | 两个拓扑 helper 挪到共享类；**顺手把测试清理里的 `KEYS` 换成 `SCAN`** |
-| 5 | `idgenerator/…/common/utils/redis/RedisUtil.java` | **整个删掉**（170 行） |
+| 5 | `idgenerator/…/common/utils/redis/RedisUtil.java` | **整个删掉**（179 行） |
 | 6 | `idgenerator/…/common/utils/IdUtil.java` | 锁搬进来（私有）；改用 `RedisTemplate`；模板**惰性取、不缓存** |
 | 7 | `idgenerator/…/common/utils/IdUtilRedisLockLiveTest.java` | 3 条 → **6 条** |
 | 8 | `idgenerator/pom.xml` | **删掉** `realserver-oms` 依赖 |
@@ -538,7 +543,7 @@ Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 **非原子性**、**代价**（每个 key 一次 DEL 往返 + **同时至少占两个池化连接**）
 和**模式语义**（glob `MATCH`，不是正则）。
 
-### 四、⭐ 变异检验（6 条，各自只让**恰好一条**用例变红）
+### 四、⭐ 变异检验（6 条：前五条各自只让**恰好一条**用例变红，最后一条让**两条**）
 
 | 变异 | 变红的用例 |
 |---|---|
@@ -649,7 +654,7 @@ if (locked) {
 > 才会拿到 null。
 > **教训与本文件里其它教训同源**：「读代码得出的结论」必须**跑一遍**才算数。
 
-活调用方 6 处（`base_dataversion` / `ENUM_DICT` / 业务表）：
+活调用方 **7 个类、8 处**（`base_dataversion` / `ENUM_DICT` / 业务表）：
 `ModelEnumDictController`、`CommitListController`、`CommitDataRunner`、
 `CommitListServiceImpl`、`SyncModelServiceImpl`、`BaseEntityDataServiceImpl`、
 `SyncModelEntityDataServiceImpl`。
@@ -2546,11 +2551,11 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 | `D:\javawork\1.2\cpscloud1.0\code\application\backend` | `napstarweb` 的 Java 源码（**不是 git 仓库**） |
 | `D:\work\rediscluterproject` | **本仓库**（唯一的 git 仓库）—— 放 spec / plan / patch / 文档 |
 
-**第十六轮改了 6 个源文件 + 2 个 pom**：
+**第十六轮改了 10 个文件（8 个 Java + 2 个 pom）**：
 
 ```
 改  common/idgenerator/…/utils/IdUtil.java                    (锁搬进来 + 惰性取模板 + 值格式不变)
-删  common/idgenerator/…/utils/redis/RedisUtil.java           (170 行的薄壳)
+删  common/idgenerator/…/utils/redis/RedisUtil.java           (179 行的薄壳)
 改  common/idgenerator/pom.xml                                (删掉 realserver-oms)
 改  common/idgenerator/src/test/…/IdUtilRedisLockLiveTest.java (3 → 6 条)
 改  realserver/common/oms/…/oms/utils/RedisUtil.java          (加 deleteNamespace)
@@ -2629,7 +2634,7 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 | `docker run --rm --user 1000:1000 -v "D:/work/rediscluterproject:/repo" -w /repo rc-control:bats bash -c "find tests -name '*.bats' -print0 \| xargs -0 bats"` | **203 通过 / 0 失败** |
 | `bash tests/check_syntax.sh` | `TOTAL=45 FAIL=0`（其中 28 个是真做的 `bash -n`，17 个是 `.bats` 的 SKIP 占位） |
 | `bash tests/validate_libs.sh` | `PASS=54 FAIL=0` |
-| `cd $BE\common\idgenerator; mvn -o clean test` | **3 通过 / 0 失败 / 0 跳过**（第十五轮新增的真集群锁测试） |
+| `cd $BE\common\idgenerator; mvn -o clean test` | **6 通过 / 0 失败 / 0 跳过**（第十五轮 3 条 + 第十六轮 3 条） |
 | `cd $BE\realserver\common\oms; mvn -o clean test` | **66 通过 / 0 失败 / 0 跳过**（第十五轮 63 → 第十六轮 +3） |
 | `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 通过 / 0 失败** |
 | `cd $BE; mvn -o clean install -DskipTests` | **44 个模块全 SUCCESS**（含 proguard）—— ⚠️ 原文档写「29 个」，实际 44 |
@@ -2639,8 +2644,8 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 > ⚠️ **`oms` 的真集群测试需要集群在跑**（`127.0.0.1:16379`）。
 > 集群不在时它们**跳过**（不是变红）—— 已实测
-> `-Dtest.clusters=127.0.0.1:19999` → `Skipped: 2`，`BUILD SUCCESS`。
-> **`idgenerator` 的 6 条同理**（集群不在时 `Skipped: 6`）。
+> `-Dtest.clusters=127.0.0.1:19999` → `Skipped: 8`，`BUILD SUCCESS`。
+> **`idgenerator` 的 6 条同理**（集群不在时 `Skipped: 4` —— 另外两条用替身，不需要集群，照常跑）。
 >
 > ⚠️ **构建必须用 JDK 8**（`D:\java\java-se-8u42-ri`）：
 > `oms` 的 proguard 配了 `${JAVA_HOME}/jre/lib/rt.jar`，**只有 JDK 8 有这个路径**。

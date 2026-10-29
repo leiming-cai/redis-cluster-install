@@ -462,8 +462,9 @@ cd $BE\realserver\common\oms
 mvn -o clean test
 ```
 
-期望：`Tests run: 65, Failures: 0, Errors: 0, Skipped: 0`（基线 63 + 新增 2）。
-若集群不在，新用例会 **Skipped: 2**，`BUILD SUCCESS`。
+期望：`Tests run: 66, Failures: 0, Errors: 0, Skipped: 0`（基线 63 + 新增 3）。
+若集群不在，新用例会 **Skipped: 3**（连同既有的那些，真集群用例一共 `Skipped: 8`），
+`BUILD SUCCESS`。
 
 - [x] **Step 7: 变异检验 —— 证明断言不是空转**
 
@@ -495,7 +496,7 @@ cd $BE\realserver\common\oms
 mvn -o clean test
 ```
 
-期望：`Tests run: 65, Failures: 0, Errors: 0, Skipped: 0`。
+期望：`Tests run: 66, Failures: 0, Errors: 0, Skipped: 0`。
 
 - [x] **Step 10: 提交（Java 树不是 git 仓库 → 只提交本仓库的进度记录）**
 
@@ -1589,6 +1590,6 @@ git -c remote.origin.pushurl=git@github.com:leiming-cai/redis-cluster-install.gi
 - [x] `cd $BE; mvn -o clean install -DskipTests` → **44 个模块**全 SUCCESS
 - [x] `cd $AB; mvn -o clean install -DskipTests` → **13 个模块**全 SUCCESS
 - [x] `cd $BE\common\idgenerator; mvn -o dependency:tree` → **不含 `realserver-oms`**
-- [x] **六条**变异**各自**让**恰好一条**用例变红
+- [x] **六条**变异：五条**各自**让**恰好一条**用例变红，第六条（只扫第一个 master）让**两条**变红
 - [x] patch 反向校验 exit 0；往返校验 `mismatches=0`
 - [x] `git status -sb` → `main...origin/main`（0 ahead / 0 behind）

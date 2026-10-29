@@ -24,8 +24,8 @@ if (locked) {
 `getNextSeqFromRedis` 落到末尾 `return id;`（`id` 仍是 null）→
 `getNextId` 里 `Long.toBinaryString(seq)` 对 null 拆箱 → **NullPointerException**。
 
-活调用方 6 处：`ModelEnumDictController`、`CommitListController`、`CommitDataRunner`、
-`CommitListServiceImpl`、`SyncModelServiceImpl`、`BaseEntityDataServiceImpl`、
+活调用方 **7 个类、8 处**：`ModelEnumDictController`、`CommitListController`、`CommitDataRunner`、
+`CommitListServiceImpl`、`SyncModelServiceImpl`、`BaseEntityDataServiceImpl`（2 处）、
 `SyncModelEntityDataServiceImpl`（`base_dataversion` / `ENUM_DICT` / 业务表）。
 
 ### 🟠 D2：`tryLock` 的 catch 里删的是**另一把锁**
