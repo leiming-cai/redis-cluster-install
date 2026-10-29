@@ -10,11 +10,13 @@
 当前 bats **203 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0），
 `oms` **63 通过 / 0 失败 / 0 跳过**（含 4 条真集群测试）
 
-> **⭐ 2026-10-29 会话开局复核（没有改生产代码，只验证 + 修环境 + 修一个测试脚本）**
+> **⭐ 2026-10-29 会话复核（第十四轮：验证 + 修环境 + 修一个测试脚本 + 加真集群测试）**
 >
 > 本次会话把上面每一条基线**重跑了一遍**，结论：**全部与文档相符**。
 > 期间发现**一个新缺陷**（`check-bash-compat.sh` 的假红 + 误报，
-> **已修 + 已加 4 条回归测试**），并把环境恢复到了文档描述的状态。
+> **已修 + 已加 4 条回归测试**），**新增了 4 条真集群集成测试**
+> （生产写路径此前只有 Mockito 用例、**零**真集群覆盖），
+> 并把环境恢复到了文档描述的状态。
 >
 > | 检查 | 结果 |
 > |---|---|
@@ -24,29 +26,44 @@
 > | `tests/validate_libs.sh` | `PASS=54 FAIL=0`（退出码 0） |
 > | `scripts/check-bash-compat.sh`（bash 4.3） | `BASH_COMPAT: PASS`（203/203） |
 > | `scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 **0**，**A0–A6 七条断言全部出现且全绿** |
-> | `oms` 单测 | **59 通过 / 0 失败 / 1 跳过**（跳过的是 L3 真集群那条；把集群拉起来后单独跑 → **2/2，Skipped: 0**） |
+> | `oms` 单测 | **63 通过 / 0 失败 / 0 跳过**（基线 59 → 第十四轮新增 4 条**真集群**测试；把集群拉起来后 L3 契约测试也是 `2/2，Skipped: 0`） |
 > | `rtdata-module` 单测 | **14 通过 / 0 失败** |
 > | `oms` 依赖树 | **零 `com.sac.platform` 依赖** |
 > | `idgenerator` 依赖树 | **不含 `realserver-entity`** |
-> | 三份 patch 反向校验 | **全部 exit 0**（磁盘上仍是 patch 的后像，源码没漂移） |
+> | 五份 patch 反向校验 | **全部 exit 0**（磁盘上仍是 patch 的后像，源码没漂移） |
 > | `RedisUtil` 的 `@Deprecated` 数量 | **27**（与第十三轮记录一致） |
 > | `RedisClusterHashPipeline` 的公开入口 | 只有 `putAllHashes`，**没有 `getAllHashes`** → 读侧 pipeline **确实还没做** |
 >
-> **本次会话对仓库的改动（3 个文件）**：
+> **本次会话对仓库的改动（6 个文件）**：
 >
 > | 文件 | 改动 |
 > |---|---|
 > | `scripts/check-bash-compat.sh` | 修「假红」：不再吞掉 apk 的错误；失败时区分「包没装上」与「测试真的失败」 |
 > | `tests/bash_compat.bats`（**新**） | 4 条回归用例，用 docker stub 真跑内层脚本 |
 > | `tests/helpers/docker_stub.sh`（**新**） | docker stub：把内层 `sh -c` 真跑起来，配一个按需失败的假 `apk` |
+> | `docs/superpowers/patches/2026-10-29-jedis-ceiling-platform-backend.patch`（**新**） | 第十四轮 Java 侧改动留痕 |
+> | `docs/superpowers/patches/2026-10-29-jedis-ceiling-application-backend.patch`（**新**） | 同上（napstarweb 那个根） |
+> | `docs/superpowers/patches/README.md` | 补第十四轮的 patch 说明 |
 > | `docs/HANDOFF.md` | 本文件 |
+>
+> **Java 侧（不在本仓库，patch 留痕）**：
+> `backend/pom.xml` 与 `application/backend/pom.xml` 的 `jedis.version`
+> 从 `8.1.0-beta2` 恢复成 **`3.10.0`**（并就地写下实测出的上限依据）；
+> 新增 `oms` 的 `RedisClusterHashPipelineLiveTest`（4 条真集群测试）。
 >
 > **本轮还发现了一个「下一轮待办」（未做，只记录）**：
 > **CI 的 `bash -n` 覆盖面有缺口** —— `tests/check_syntax.sh` 已经管了 45 个文件，
 > **但 CI 从来没跑它**，而是在 workflow 里手抄了一份更短的列表（6 个文件），
 > 两份必然漂移。已实测出 14 个脚本**没有任何 CI 语法检查**。
-> 修法只要一行（见「第十一轮遗留的待办」第 10 条）。
+> 修法只要一行（见「会话存档」第四节第 8 条）。
 > ⚠️ 改 workflow 要走 **SSH** 推送（PAT 没有 `workflow` scope）。
+>
+> **⚠️⚠️ 先看这个：会话期间工作树被外部编辑器改过**
+> `backend/pom.xml`（09:59:47）与 `application/backend/pom.xml`（10:03:22）的
+> `jedis.version` 被改成 **`8.1.0-beta2`** —— **不是本轮改的**
+> （VS Code + redhat.java 插件当时在跑）。这个改动**让整个工程编译失败**，
+> 且 jedis 8 与 SDR 2.7.18 **不兼容**（详见「第十四轮」）。
+> 本轮已恢复成 `3.10.0`。**下次动手前先看这两个文件的 mtime**。
 >
 > **环境复原过程（下次会话注意）**：Docker Desktop 当时是**停的**，
 > 容器全在 `Exited` 状态。`docker start` 之后集群是 **`cluster_state:fail`**
@@ -154,6 +171,32 @@ E2E 在 Redis 8 上端到端全绿，**已 fast-forward 合并进 main**（`18dd
 
 **下一步**：第十轮改动待推送。**在一台干净的集群上重测倍率**（当前环境键数涨到 480 万、
 AOF/RDB 反复触发，噪声盖过了差值）；再要提速就做消费/解析侧。
+（**这是第十轮当时的待办，已被第十二~十四轮覆盖**；当前待办见「会话存档」第四节。）
+
+**第十二轮（2026-10-28）把「两台机器 + Redis 已装好」这个实际需求落进了脚本**：
+第 9 步从单条 `--cluster create --cluster-replicas 1` 改成**两阶段装配**
+（先 `--cluster-replicas 0` 建主，再逐个 `--cluster add-node --cluster-slave` 挂副本），
+新增 `lib/topology.sh`（纯函数算主从映射）与 `cluster_require_full_coverage` 配置键。
+**实测证明 `redis-cli` 的自动分配会让整机故障致命**（3 个 master 全挤到一台），
+并且**两台机器在数学上做不到对称容错** —— 要两头都活至少需要 3 台机器。
+bats 163 → **199**，E2E 新增 A0–A6 七条断言并全绿。
+
+**第十三轮（2026-10-28）统一了三个工程的 Redis 连接基础设施**：
+`oms:` 配置块补全、bean 改名、删三个墓碑、`realserver-oms` 解耦
+（零 `com.sac.platform` 依赖）、27 个集群不安全方法加 `@Deprecated`。
+**本轮最重要的收获是纠正了自己的 20 条错注释** —— SDR 2.7.18 在跨槽时
+大多**不抛 CROSSSLOT**，而是**静默降级**成非原子的实现。
+bats 199 → **203**，`oms` 单测 50 → **59**。
+
+**第十四轮（2026-10-29）把 Java 侧的读写第一次放到真集群上验证**，
+并**实测出「JDK 8 下 jedis 的上限 = 3.10.0」**：
+生产写路径 `RedisClusterHashPipeline.putAllHashes` 此前只有 28 条 **Mockito** 用例、
+**零**真集群覆盖 —— 新增的 4 条真集群测试把它验了（`oms` 59 → **63**，0 跳过）。
+**实测结论：jedis 4.0.0 及以上与 spring-data-redis 2.7.18 不兼容**
+（`NoClassDefFoundError: redis/clients/jedis/GeoUnit`），
+要升必须连带升 SDR 到 4.x，而那需要**编译目标升到 JDK 17**。
+会话期间两个根 pom 被**外部编辑器**改成 jedis 8.1.0-beta2 并**导致整个工程编译失败**，
+已恢复成 `3.10.0`。
 
 **第十二轮（2026-10-28）把「两台机器 + Redis 已装好」这个实际需求落进了脚本**：
 第 9 步从单条 `--cluster create --cluster-replicas 1` 改成**两阶段装配**
@@ -2107,18 +2150,34 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ---
 
-## 会话存档（2026-10-29）：第十三轮结束时的完整状态
+## 会话存档（2026-10-29）：第十四轮结束时的完整状态
 
 **这一节是给「下一个会话」看的** —— 打开仓库先读这一节，能立刻知道现在是什么状态、
 东西在哪、哪些坑踩过了。
+
+> ⚠️ **本节已更新到第十四轮**（下面第十三轮的内容仍然有效，
+> 但「验证基线」和「下一次该做什么」两节以第十四轮的为准）。
 
 ### 一、代码在哪、改了什么
 
 | 位置 | 说明 |
 |---|---|
 | `D:\javawork\1.2\cpscloud1.0\code\platform\backend` | `realserver` + `modelserver` 的 Java 源码（**不是 git 仓库**） |
-| `D:\javawork\1.2\cpscloud1.0\code\application\backend\napstarweb` | `napstarweb` 的 Java 源码（**不是 git 仓库**） |
+| `D:\javawork\1.2\cpscloud1.0\code\application\backend` | `napstarweb` 的 Java 源码（**不是 git 仓库**） |
 | `D:\work\rediscluterproject` | **本仓库**（唯一的 git 仓库）—— 放 spec / plan / patch / 文档 |
+
+**第十四轮改了 2 个 pom + 新增 1 个测试**：
+
+```
+改  backend/pom.xml                              (jedis 8.1.0-beta2 -> 3.10.0 + 就地写上限依据)
+改  application/backend/pom.xml                   (同上)
+新增 realserver/common/oms/src/test/…/utils/RedisClusterHashPipelineLiveTest.java  (4 条)
+```
+
+> ⚠️ **那两个 pom 的 jedis 8.1.0-beta2 不是本轮改的** —— 是会话期间
+> （09:59:47 / 10:03:22）**外部编辑器**（VS Code + Java 插件）改的，
+> 改动让**整个工程编译失败**。本轮已恢复成 `3.10.0`。
+> **如果下次又看到 `8.1.0-beta2`，先读「第十四轮」那一节**。
 
 **第十三轮改了 11 个 + 删了 5 个 + 新增 4 个测试**：
 
@@ -2147,10 +2206,12 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 新增 realserver/common/oms/src/test/…/utils/RedisPipelineUtilNoEntityDependencyTest.java
 ```
 
-**留痕**：三份 patch 在 `docs/superpowers/patches/`（Java 树不是 git 仓库，只能这样留痕）：
+**留痕**：五份 patch 在 `docs/superpowers/patches/`（Java 树不是 git 仓库，只能这样留痕）：
 
 | 文件 | 大小 | 校验结果 |
 |---|---|---|
+| `2026-10-29-jedis-ceiling-platform-backend.patch` | 22,571 B | 反向校验 exit 0；往返校验 `checked=2 mismatches=0` |
+| `2026-10-29-jedis-ceiling-application-backend.patch` | 596 B | 反向校验 exit 0；往返校验 `checked=1 mismatches=0` |
 | `2026-10-28-unified-redis-connection-platform-backend.patch` | 107,604 B | 反向校验 exit 0；正向重建 `checked=19 mismatches=0` |
 | `2026-10-28-unified-redis-connection-napstarweb.patch` | 3,138 B | 反向校验 exit 0；正向重建 `checked=2 mismatches=0` |
 | `2026-10-28-unified-redis-connection.patch`（合并，仅供合成仓库） | 110,742 B | 20 个 `diff --git`（4 新增 / 5 删除） |
@@ -2159,19 +2220,29 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 | 命令 | 期望 |
 |---|---|
-| `docker run --rm --user 1000:1000 -v "D:/work/rediscluterproject:/repo" -w /repo rc-control:bats bash -c "find tests -name '*.bats' -print0 \| xargs -0 bats"` | **199 通过 / 0 失败** |
-| `cd $BE\realserver\common\oms; mvn -o clean test` | **59 通过 / 0 失败**（基线 50 → 新增 9） |
+| `docker run --rm --user 1000:1000 -v "D:/work/rediscluterproject:/repo" -w /repo rc-control:bats bash -c "find tests -name '*.bats' -print0 \| xargs -0 bats"` | **203 通过 / 0 失败** |
+| `bash tests/check_syntax.sh` | `TOTAL=45 FAIL=0` |
+| `bash tests/validate_libs.sh` | `PASS=54 FAIL=0` |
+| `cd $BE\realserver\common\oms; mvn -o clean test` | **63 通过 / 0 失败 / 0 跳过**（基线 59 → 真集群 4 条） |
 | `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 通过 / 0 失败** |
+| `cd $BE; mvn -o clean install -DskipTests` | **29 个模块全 SUCCESS**（含 proguard） |
 | `cd $BE\realserver\common\oms; mvn -o dependency:tree` | 只剩自己，**零 `com.sac.platform` 依赖** |
 | `cd $BE\common\idgenerator; mvn -o dependency:tree` | **不含 `realserver-entity`** |
+
+> ⚠️ **`oms` 的那 4 条真集群测试需要集群在跑**（`127.0.0.1:16379`）。
+> 集群不在时它们**跳过**（不是变红）—— 已实测
+> `-Dtest.clusters=127.0.0.1:19999` → `Skipped: 4`，`BUILD SUCCESS`。
+>
+> ⚠️ **构建必须用 JDK 8**（`D:\java\java-se-8u42-ri`）：
+> `oms` 的 proguard 配了 `${JAVA_HOME}/jre/lib/rt.jar`，**只有 JDK 8 有这个路径**。
 
 ### 三、环境现状（2026-10-29 实测）
 
 ```
-rc-redis-publish    Up 19 hours      socat 转发器，把集群暴露到宿主机 127.0.0.1:16379-16384
-rc-cpsweb-app       Up 24 hours      上一轮留下的 consumer（跑的是 10/28 的新 jar）
-rc-cpsweb-node-a    Up 47 hours      Redis 集群 node-a（3 个 master）
-rc-cpsweb-node-b    Up 47 hours      Redis 集群 node-b（3 个 replica）
+rc-redis-publish    Up 3 hours       socat 转发器，把集群暴露到宿主机 127.0.0.1:16379-16384
+rc-cpsweb-app       Up 2 hours       上一轮留下的 consumer（跑的是 10/28 的新 jar）
+rc-cpsweb-node-a    Up 3 hours       Redis 集群 node-a（3 个 master）
+rc-cpsweb-node-b    Up 3 hours       Redis 集群 node-b（3 个 replica）
 ```
 
 **集群健康**：`cluster_state:ok` / `cluster_slots_assigned:16384` /
@@ -2212,8 +2283,11 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
 3. **读侧 pipeline** —— `RedisClusterHashPipeline.getAllHashes`。
    `findByOtype` / `findByOtypeIds` 在集群下是 **N 次串行 `HGETALL`**；
    写侧第十轮已按节点 pipeline 化，**读侧还没做**，是同一根因的另一半。
+   > 第十四轮已经在真集群上锁住了读路径的**顺序正确性**
+   > （`readPathReturnsEntriesInTheSameOrderAsTheKeys`），
+   > 所以做读侧 pipeline 时**别把这条断言改坏**。
 4. **合并三套 `RedisUtil`** —— `oms` / `idgenerator` / `modelserver` 各一份
-   （本轮 spec 的 N8 明确推迟了）。
+   （第十三轮 spec 的 N8 明确推迟了）。
 5. **（可选）`sche-viewer-server`** —— 第四个部署物，有同样的 P0 缺陷
    （`oms:` 块全注释）+ 第四份墓碑。但**它的模块在 aggregator 里是注释掉的**
    （不参与构建），且用 jedis 3.6.1（更老）。本轮**没动它**。
@@ -2221,6 +2295,12 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
    但装的是 Redis 基础设施。本轮**刻意没动**（spec §5.2）：
    改 artifactId 要同步 `backend/pom.xml` 的 `dependencyManagement` + 三个工程的 pom
    + Artifactory 上架，是仪式性成本。
+7. **（新，第十四轮）决定 jedis 要不要继续升** —— 现在是 `3.10.0`（JDK 8 下的上限）。
+   要升到 jedis 4+ 必须连带升 SDR 到 4.x，而那需要**编译目标升到 JDK 17**
+   + 重做 proguard + 改生产写路径。**前提是确认生产服务器能不能脱离 JDK 8。**
+   升级路径本身已实测可行（SDR 4.0.4 + jedis 8.1.0-beta2 在真集群上 write+read 都 OK）。
+8. **（新，第十四轮）把 CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`** ——
+   一行改动，覆盖面 6 → 45 个文件。⚠️ 改 workflow 要走 **SSH** 推送。
 
 ### 五、这一轮踩过的坑（**别再踩**）
 
@@ -2237,19 +2317,56 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
 | 9 | **`cluster-announce-bus-port` 不能改** | 它是节点**之间**通信用的，改了会让集群内部链路断掉（节点全 `disconnected`）。要改就用**转发端口本身** |
 | 10 | **集群的 announce 地址要 6 个节点全改** | 只改 master 的话，`CLUSTER SLOTS` 会混着 `127.0.0.1:1637x` 与 `172.21.0.x`，客户端按后者去连就超时 |
 | 11 | **容器重启后 announce 配置会丢** | `CONFIG SET cluster-announce-*` 是**运行期**改动，容器一重启就回到 `172.21.0.x`，集群变 `cluster_state:fail`（6 个节点全 `disconnected`）。重启后必须重跑 `%TEMP%\opencode\set-announce.sh`（**注意是 `set-announce.sh`，不是 `restore-cluster.sh`** —— 后者会把 bus-port 也改掉，正是坑 9 说的那种改法） |
+| 12 | **（第十四轮）`ApplicationContextRunner.run(cb)` 会在回调返回后销毁上下文** | 连带 `JedisConnectionFactory` 失效（`JedisConnectionFactory was destroyed`）。**所有断言必须写在回调内部** |
+| 13 | **（第十四轮）`seed.info("errorstat")` 返回空** | Redis 8 **没有**名为 `errorstat` 的段，那个调用返回**空字符串** → 计数恒为 0 → **断言变成空转**。Errorstats 段只在完整 `INFO` / `INFO all` 的输出里 |
+| 14 | **（第十四轮）`errorstat_MOVED:count=201` 中间没有逗号** | 按 `,` 切会切出一个元素，再按 `:` 切得到的是 `count=201` 而不是 `count` → 比较永远不成立 → **计数恒为 0** |
+| 15 | **（第十四轮）借连接忘了 AUTH** | 集群开了 `requirepass`，`INFO` 回 NOAUTH，异常被吞掉 → **计数恒为 0** |
+| 16 | **（第十四轮）`JedisPool` 在 jedis 8 里仍然存在，但这不代表 API 没变** | jedis 8 的 `JedisPool extends Pool<Jedis>`，可 `getClusterNodes()` 给的是 `ConnectionPool`。**必须看返回类型，不能只看类还在不在** |
+| 17 | **（第十四轮）外部编辑器会改你的工作树** | 会话期间 `backend/pom.xml` 与 `application/backend/pom.xml` 被改成 jedis 8.1.0-beta2（09:59:47 / 10:03:22，VS Code + Java 插件在跑），**整个工程编译失败**。**动手前先看文件 mtime**，发现异常改动先查清楚是谁改的 |
 
 ---
 
 ## 下一步具体动作
 
-**第七~十三轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
-第十三轮已推送：`521f244..aadcbb9`。
+**第七~十四轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
+第十三轮已推送：`521f244..aadcbb9`；第十四轮：`80ad557` / `9b4f040` / `fdd3193` / `6e86496`。
 
 > **⭐ 当前状态、代码位置、环境、待办、踩过的坑，全部在上面的
 > 「会话存档（2026-10-29）」一节里 —— 下一次会话先读那一节。**
-> 下面的内容是**第十二轮结束时**写的历史记录，保留供对照。
+> 下面的内容是**历史记录**，保留供对照。
 
-### 下一次会话从这里开始（第十三轮结束时）
+### 下一次会话从这里开始（第十四轮结束时）
+
+```powershell
+cd D:\work\rediscluterproject
+git status -sb            # main...origin/main，工作区干净
+git log --oneline -5      # 6e86496 / fdd3193 / 9b4f040 / 80ad557 / 0c74f24
+```
+
+环境（2026-10-29 实测，与上面的「会话存档」一致）：
+
+```
+rc-redis-publish    socat 转发器，把集群暴露到宿主机 127.0.0.1:16379-16384
+rc-cpsweb-node-a/b Redis 集群，cluster_state:ok / 16384 slots / 6 nodes / size 3
+                    ⚠️ 3 个 master 的 announce 地址被改成了 127.0.0.1:1637x（运行期改动）
+                    ⚠️ 容器一重启这个改动就丢，集群会变 cluster_state:fail
+rc-cpsweb-app       上一轮留下的 consumer，未改动
+```
+
+验证基线（**改代码前先跑一遍**）：
+
+| 命令 | 期望 |
+|---|---|
+| `docker run --rm --user 1000:1000 -v "D:/work/rediscluterproject:/repo" -w /repo rc-control:bats bash -c "find tests -name '*.bats' -print0 \| xargs -0 bats"` | **203 / 0** |
+| `bash tests/check_syntax.sh` | `TOTAL=45 FAIL=0` |
+| `bash tests/validate_libs.sh` | `PASS=54 FAIL=0` |
+| `cd $BE\realserver\common\oms; mvn -o clean test` | **63 / 0 / 0 跳过** |
+| `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 / 0** |
+
+> ⚠️ **构建必须用 JDK 8**（`D:\java\java-se-8u42-ri`）——
+> `oms` 的 proguard 要 `${JAVA_HOME}/jre/lib/rt.jar`，只有 JDK 8 有这个路径。
+
+### 下一次会话从这里开始（第十三轮结束时，历史记录）
 
 ```powershell
 cd D:\work\rediscluterproject
@@ -2295,6 +2412,31 @@ Docker VM          2 vCPU / 3.8 GB；MemAvailable ~945 MB，⚠️ **SwapFree �
 
 > 本轮的 E2E 容器（`e2e-node-a/b`）已由脚本自己的 trap 清理干净 ✓。
 > 上面这些 `rc-cpsweb-*` 是第十一轮留下的，跟本轮无关。
+
+### 本轮（第十四轮）的待办，按优先级
+
+1. **（要人做决定）jedis 要不要继续升到 8？** 现在是 `3.10.0`（**JDK 8 下的上限**）。
+   - 已实测：jedis **3.6.1 / 3.8.0 / 3.10.0** + SDR 2.7.18 + JDK 8 → ✅ 全绿；
+     jedis **4.0.0 及以上** → ❌ `NoClassDefFoundError: redis/clients/jedis/GeoUnit`。
+   - 升到 4+ 的代价：**SDR 必须一起升到 4.x**（实测 SDR 4.0.4 + jedis 8.1.0-beta2
+     在真集群上 **write+read 都 OK**，路径是通的），
+     而 SDR 4.x 是 **Java 17 字节码** → 编译目标要升 JDK 17 +
+     **重做 proguard**（现在配的 `${JAVA_HOME}/jre/lib/rt.jar` 只有 JDK 8 有）+
+     改生产写路径（`JedisPool` → `ConnectionPool`）+
+     改 `RedisScanUtils`（`ScanParams`/`ScanResult` 换包），
+     且会沿 `oms` → 三个应用**向上扩散**。
+   - **前提（代码里看不出来，需要人确认）**：生产服务器是不是必须留在 JDK 8？
+2. **（要人做决定）CI 的 `bash -n` 覆盖面** —— 把 workflow 里那条手抄的
+   `for f in ...` 换成 `bash tests/check_syntax.sh`，覆盖面 6 → 45 个文件。
+   ⚠️ 改 `.github/workflows/ci.yml` **必须走 SSH 推送**（PAT 没有 `workflow` scope）。
+3. **读侧 pipeline**（第十三轮的待办，仍然有效）——
+   `RedisClusterHashPipeline.getAllHashes`。写侧第十轮已按节点 pipeline 化，
+   **读侧还没做**，是同一根因的另一半。
+   第十四轮已在真集群上锁住了读路径的**顺序正确性**，
+   做的时候**别把那条断言改坏**。
+4. **填生产真值**（唯一的"欠账"）—— 三个 `application.yml` 的 `oms.clusters`
+   还是占位符 `127.0.0.1:6379`、`password` 空串；同步 Nacos。
+5. **`cluster_require_full_coverage=no`** —— 2 机部署必须，否则任一 master 挂 = 全集群停写。
 
 ### 本轮（第十二轮）的待办，按优先级
 
