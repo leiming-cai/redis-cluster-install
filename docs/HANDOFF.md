@@ -6,7 +6,7 @@
 **基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十三轮已推送
 （`521f244..aadcbb9`）；**本次会话又推了 `80ad557`**（修 `check-bash-compat.sh`
 的假红 + 4 条回归测试）、**`9b4f040`**（CI 覆盖面缺口）、
-**`xxxxxxx`**（第十四轮：真集群测试 + jedis 版本上限）。
+**`fdd3193`**（第十四轮：真集群测试 + jedis 版本上限）。
 当前 bats **203 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0），
 `oms` **63 通过 / 0 失败 / 0 跳过**（含 4 条真集群测试）
 
