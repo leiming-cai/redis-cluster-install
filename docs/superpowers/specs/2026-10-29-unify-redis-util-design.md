@@ -82,7 +82,7 @@ common/idgenerator/src/main/java/…/redis/RedisUtil.java:4  import com.sac.plat
 锁留在 `IdUtil`，`IdUtil` 直接用 `RedisTemplate` → oms 那边**没人**需要那个 4 参
 `setIfAbsent` → **不加**（YAGNI）。oms 现有的 2 参 `setIfAbsent(String, String)` 保持不变。
 
-### ② `IdUtil` 的模板用「惰性获取 + 缓存」，不在静态初始化时解析
+### ② `IdUtil` 的模板用「惰性解析」，**不缓存**
 
 **现状**：`IdUtil` 的静态初始化只解析三样东西 —— `CommonDataMapper`、`DataSource`、
 `IdWorker` —— **不需要 Redis**。
@@ -90,8 +90,13 @@ common/idgenerator/src/main/java/…/redis/RedisUtil.java:4  import com.sac.plat
 **若改成静态初始化就解析 `RedisTemplate`**：没有 Redis 的应用在**加载 `IdUtil` 时**
 就会炸（例如只用 `getNextIdBySnowflake()` 的场景）。
 
-**决定**：惰性解析（首次使用时从 `SpringContextHolder` 取，缓存进一个 `volatile` 静态字段），
-**保持现有失败面不变**。
+**决定**：**惰性**解析 —— 只在真的取序列号时，从**当前**的 Spring 上下文里取。
+
+**并且不缓存**。理由：第十四轮实测过 `ApplicationContextRunner.run(cb)` 在回调返回后
+**销毁上下文**（连带 `JedisConnectionFactory` 失效）。缓存下来的模板会指向**已销毁**的
+工厂，下一次用就报 `JedisConnectionFactory was destroyed`。
+每次使用时从当前上下文取，代价只是一次 bean 查找（`getNextId` 本来就要走一次 Redis
+往返 + 一次 DB 查询，量级可忽略）。
 
 > 取法：`SpringContextHolder.getBean(RedisTemplate.class)`。
 > 容器里有**两个** `RedisTemplate` bean（oms 的 `redisTemplate` 带 `@Primary`，
@@ -99,6 +104,10 @@ common/idgenerator/src/main/java/…/redis/RedisUtil.java:4  import com.sac.plat
 > idgenerator 现在注入的那一个 ✓。
 > ⚠️ 按**名字**取（`getBean("redisTemplate")`）也能工作，但那是把 oms 的 bean 名
 > 硬编码进 idgenerator —— **不采用**，按类型取。
+
+**`IdUtil` 不能变成 `@Component`**：napstarweb 的上下文里**没有** `CommonDataMapper`
+bean（它只用 `SystemIDUtil`，根本不用 `IdUtil`）→ 一旦变成 bean，静态初始化会在
+**启动时**就失败。所以它保持「普通类 + 静态方法」不变。
 
 ### ③ Redis 里的值格式一个字节都不变
 
