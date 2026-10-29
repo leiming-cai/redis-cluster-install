@@ -70,7 +70,7 @@ git -c remote.origin.pushurl=git@github.com:leiming-cai/redis-cluster-install.gi
 **背景：** oms 的 `RedisUtil`（1699 行 / 102 个方法）**一个单测都没有**。
 `deleteNamespace` 会是它第一个被测的方法 —— 所以这条断言必须真的有力。
 
-- [ ] **Step 1: 备份本轮要改的所有 Java 文件**
+- [x] **Step 1: 备份本轮要改的所有 Java 文件**
 
 ```powershell
 $base = "$env:TEMP\opencode\unify-redis-baseline"
@@ -91,7 +91,7 @@ foreach ($f in $files) {
 "backed up $($files.Count) files"
 ```
 
-- [ ] **Step 2: 建共享的拓扑测试支撑类**
+- [x] **Step 2: 建共享的拓扑测试支撑类**
 
 新建 `$BE\realserver\common\oms\src\test\java\com\sac\platform\realserver\oms\utils\RedisClusterTestSupport.java`：
 
@@ -226,7 +226,7 @@ final class RedisClusterTestSupport {
 }
 ```
 
-- [ ] **Step 3: 写失败测试**
+- [x] **Step 3: 写失败测试**
 
 新建 `$BE\realserver\common\oms\src\test\java\com\sac\platform\realserver\oms\utils\RedisUtilDeleteNamespaceLiveTest.java`：
 
@@ -420,7 +420,7 @@ class RedisUtilDeleteNamespaceLiveTest {
 }
 ```
 
-- [ ] **Step 4: 运行测试，确认它失败（编译失败 = 方法还不存在）**
+- [x] **Step 4: 运行测试，确认它失败（编译失败 = 方法还不存在）**
 
 ```powershell
 cd $BE\realserver\common\oms
@@ -430,7 +430,7 @@ mvn -o clean test
 期望：`BUILD FAILURE`，编译错误指向 `RedisUtil.deleteNamespace` **找不到符号**。
 （这一步的"红"是编译期的 —— 方法还没写。）
 
-- [ ] **Step 5: 实现 `deleteNamespace`**
+- [x] **Step 5: 实现 `deleteNamespace`**
 
 在 `$BE\realserver\common\oms\src\main\java\com\sac\platform\realserver\oms\utils\RedisUtil.java`
 的**文件末尾**（`scan(String pattern)` 之后、类的最后一个 `}` 之前）加上：
@@ -455,7 +455,7 @@ mvn -o clean test
 
 （`RedisScanUtils` 与 `RedisUtil` **同一个包** → 不需要 import。）
 
-- [ ] **Step 6: 运行测试，确认它通过**
+- [x] **Step 6: 运行测试，确认它通过**
 
 ```powershell
 cd $BE\realserver\common\oms
@@ -465,7 +465,7 @@ mvn -o clean test
 期望：`Tests run: 65, Failures: 0, Errors: 0, Skipped: 0`（基线 63 + 新增 2）。
 若集群不在，新用例会 **Skipped: 2**，`BUILD SUCCESS`。
 
-- [ ] **Step 7: 变异检验 —— 证明断言不是空转**
+- [x] **Step 7: 变异检验 —— 证明断言不是空转**
 
 把实现改成「只扫第一个 master」是不容易的，但**「删多了」是容易的**：
 把 `deleteNamespace` 里的 pattern 改成 `"*"`（删掉一切）→ 第一条用例必须变红。
@@ -479,7 +479,7 @@ mvn -o clean test
 期望：`deletesOnlyTheKeysThatMatchThePattern` 变红
 （`deleteNamespace deleted a key that does NOT match the pattern`）。
 
-- [ ] **Step 8: 把已有 live test 里的两个拓扑 helper 换成共享类**
+- [x] **Step 8: 把已有 live test 里的两个拓扑 helper 换成共享类**
 
 `$BE\realserver\common\oms\src\test\java\com\sac\platform\realserver\oms\utils\RedisClusterHashPipelineLiveTest.java`：
 删掉 `masterAddresses(...)` 与 `countKeysPerMaster(...)` 两个方法
@@ -488,7 +488,7 @@ mvn -o clean test
 `RedisClusterTestSupport.countKeysPerMaster(template, keys)`。
 其余不动。
 
-- [ ] **Step 9: 重新跑，确认 63 + 2 仍然全绿**
+- [x] **Step 9: 重新跑，确认 63 + 2 仍然全绿**
 
 ```powershell
 cd $BE\realserver\common\oms
@@ -497,7 +497,7 @@ mvn -o clean test
 
 期望：`Tests run: 65, Failures: 0, Errors: 0, Skipped: 0`。
 
-- [ ] **Step 10: 提交（Java 树不是 git 仓库 → 只提交本仓库的进度记录）**
+- [x] **Step 10: 提交（Java 树不是 git 仓库 → 只提交本仓库的进度记录）**
 
 本任务的产出全在 Java 树上，**此时还没有 patch**（patch 在 Task 4 统一生成）。
 所以本任务**不提交**，只更新本仓库的进度记录：
@@ -512,6 +512,43 @@ cd D:\work\rediscluterproject
 
 ---
 
+**鎵ц璁板綍锛堝疄闄呬笌璁″垝鐨勫嚭鍏ワ級**锛歚n
+**Step 10 的期望值写错了**：它说 `.java` 应当是 CRLF，但 `oms/src/test/.../oms/utils/`
+这个包里**本来就是 LF**（`RedisClusterHashPipelineTest` / `RedisPipelineUtilTest` /
+`RedisScanUtilsTest` / `RedisPipelineUtilNoEntityDependencyTest` 全是 LF，第十四轮
+新增的 live test 也是 LF）。按 Step 10 无脑转成 CRLF 会让
+`RedisClusterHashPipelineLiveTest` 的 diff 变成 **448 行行尾噪音**而不是 ~104 行。
+→ 已改回 LF，并给两个新文件也用 LF（与同包一致）。**教训：行尾要「跟邻居一致」，
+不是「一律 CRLF」。**
+
+**计划里的测试代码缺一个 `UtilsPackageScan`**：`RedisUtilConfig.realRedisPipelineUtil`
+需要 `RedisClusterHelper` bean，而它是 `@Component`，`ApplicationContextRunner` 不做
+组件扫描 → 计划那版测试的上下文**起不来**。已按仓库既有模式补上嵌套的
+`UtilsPackageScan`（与 `RedisModeCaseSensitivityTest` / `RedisClusterOmsContractTest` /
+`RedisClusterHashPipelineLiveTest` 三个兄弟类一致）。
+
+**代码审查（两轮）追加的修复**（计划里没有，但都属于本任务）：
+- `masterAddresses` 读不到拓扑时**返回空列表** → `totalMovedErrors` 的
+  「没有 MOVED 重定向」断言会**空转通过**（没测到任何东西也算 0 次重定向）。
+  已改成抛 `IllegalStateException`。
+- `deleteNamespace` 的 javadoc 补上了**非原子性**（中途失败会停在部分删除的状态）
+  与**代价**（每个 key 一次 DEL 往返，几百个 key 没问题、几万个不合适）。
+- 测试清理原来用 `template.keys(...)` —— 那正是 `RedisUtil.delete(Collection)` 的
+  javadoc 里点名警告的集群级阻塞操作。已改成 `RedisScanUtils.scan(...)`，
+  **并把同样的改动应用到了既有的 `RedisClusterHashPipelineLiveTest`**（只改清理，
+  不动任何断言）。
+- 「匹配不到任何 key」这条边界补了一条用例。
+- `totalMovedErrors` 的空转洞：原来每个 master 的 `INFO` 失败都只贡献 0。
+  **第一版的修法又踩了一个坑**：它去数「有几个 master 报了 `errorstat_MOVED:` 行」——
+  但 **Redis 不打印计数为 0 的 errorstat**，本机 16380 这个健康的 master 一个
+  `errorstat_*` 行都没有 → 在「从没发生过 MOVED」的集群上（正是这个用例要证明的健康
+  情形）**会误报红**。已改成数「INFO 成功读到的 master 数」，并另立一条断言检查
+  `# Errorstats` 段是否存在（该**段头**即使计数全为 0 也会打印 —— 已实测）。
+
+**结果**：`oms` **66 通过 / 0 失败 / 0 跳过**（基线 63 + 3 条新用例），
+4 个文件行尾与邻居一致，集群里没有残留 key。
+变异检验做了三轮：改宽 pattern → 「只删匹配的」变红；只删第一个 master 的槽位 →
+两条都变红；把 `errorstat_MOVED` 的匹配串改坏 → 「没测到」的断言变红。
 ### Task 2: `IdUtil` 自给自足（锁搬进来 + 惰性取模板）
 
 **Files:**
