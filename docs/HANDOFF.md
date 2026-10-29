@@ -2522,10 +2522,16 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
 7. ~~**（第十四轮）决定 jedis 要不要继续升**~~ —— **已结案（第十五轮）**：
    用户确认**生产必须留在 JDK 8** → jedis **固定 `3.10.0`，不升级**。
    （理由与实测数据见「第十四轮」的结论先行表。）
-8. **（第十四轮）把 CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`** ——
-   一行改动，**真实覆盖面 15 → 28 个文件**（⚠️ **不是** 6 → 45：
-   `check_syntax.sh` 的 `TOTAL=45` 里有 17 条是 `.bats` 的 SKIP 占位）。
-   ⚠️ 改 workflow 要走 **SSH** 推送。
+8. ~~**（第十四轮）把 CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`**~~ ——
+   **✅ 已做（第十五轮）**：`.github/workflows/ci.yml` 里那条手抄的
+   `for f in ...` 换成了 `bash tests/check_syntax.sh`，并**新增**一步
+   `bash tests/validate_libs.sh`。**真实覆盖面 15 → 28 个文件**
+   （⚠️ **不是** 6 → 45：`check_syntax.sh` 的 `TOTAL=45` 里有 17 条是
+   `.bats` 的 SKIP 占位）。⚠️ 改 workflow **必须走 SSH 推送**。
+   **变异检验**：改坏 `scripts/e2e-cluster-config.sh`（旧 CI 列表**根本没查**的
+   14 个脚本之一）→ `check_syntax.sh` 报 `FAIL:` 且退出码 1；
+   改坏 `validate_libs.sh` 里的一条断言 → `PASS=53 FAIL=1` 且退出码 1。
+   → **新步骤真的会红，不是空转**。
 9. **（新，第十五轮）`tryLock` 的忙等自旋没有 sleep** —— 锁被占用时以无限速的
    `SET NX` 空转，最长 10 秒。修好 F1 之后争用罕见，影响变小，但**问题还在**。
    修法很小（循环里 sleep 几毫秒），但它属于「行为改动」，本轮刻意没做。

@@ -25,7 +25,21 @@ jobs:
           find tests -name '*.bats' -print0 | xargs -0 bats
 
       - name: Bash syntax check
-        run: |
-          for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh scripts/e2e-cpsweb-nodes.sh lib/*.sh; do
-            bash -n "$f"
-          done
+        # One command, and no hand-maintained file list.
+        #
+        # The list used to live here, which meant two lists had to be kept in
+        # step: this one (6 named files + lib/*.sh = 15 files) and the one in
+        # tests/check_syntax.sh (28 files really checked with `bash -n`).
+        # They had already drifted -- 14 scripts had no syntax check in CI at
+        # all. tests/check_syntax.sh owns the list now, so a new script is
+        # covered as soon as it is added there.
+        #
+        # It exits with the number of failures, so a broken script fails this
+        # step. The 17 .bats files are counted in TOTAL but skipped: their
+        # @test DSL is not valid bash, and bats runs them instead.
+        run: bash tests/check_syntax.sh
+
+      - name: Library contract checks
+        # 54 assertions over lib/*.sh (the command builders, the config
+        # parser, the topology algorithm). Pure bash -- no docker needed.
+        run: bash tests/validate_libs.sh
