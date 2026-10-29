@@ -2,6 +2,46 @@
 
 Unified-diff patches for the Java source trees that live **outside** this git repo.
 
+## 2026-10-29 — jedis version ceiling + live-cluster test
+
+Two things changed in the Java trees during the fourteenth round:
+
+1. **`backend/pom.xml` and `application/backend/pom.xml`** — `jedis.version` was
+   changed to `8.1.0-beta2` by an external editor (not by this work) and left
+   the whole tree uncompilable. It is now `3.10.0`, with the measured ceiling
+   documented in place. **3.10.0 is the highest jedis that works with
+   spring-data-redis 2.7.18 on JDK 8** — see `docs/HANDOFF.md` §14.
+2. **A new live-cluster integration test** in the `oms` module:
+   `RedisClusterHashPipelineLiveTest.java` (4 cases). The write path
+   (`RedisClusterHashPipeline.putAllHashes`) had **28 Mockito-based tests and
+   zero** coverage against a real Redis cluster; this file exercises it against
+   one.
+
+### Which patch to use
+
+| Patch | Target root | Files |
+|---|---|---|
+| `2026-10-29-jedis-ceiling-platform-backend.patch` | `D:\javawork\1.2\cpscloud1.0\code\platform\backend` | 2 (`pom.xml` + the new test) |
+| `2026-10-29-jedis-ceiling-application-backend.patch` | `D:\javawork\1.2\cpscloud1.0\code\application\backend` | 1 (`pom.xml`) |
+
+### Applying
+
+```powershell
+cd D:\javawork\1.2\cpscloud1.0\code\platform\backend
+git apply --reverse --check ..\..\..\..\work\rediscluterproject\docs\superpowers\patches\2026-10-29-jedis-ceiling-platform-backend.patch
+git apply ..\..\..\..\work\rediscluterproject\docs\superpowers\patches\2026-10-29-jedis-ceiling-platform-backend.patch
+```
+
+### Verification performed
+
+- Reverse-apply check against both live roots: exit `0` for `platform-backend`
+  and for `application-backend`.
+- Round-trip: reverse-apply the live tree to the "before" state, then
+  forward-apply the same patch again — `apply_exit=0` and **0 mismatches**
+  against the live tree (`platform-backend`: 2 files checked,
+  `application-backend`: 1 file checked).
+- Both patch files start with the bytes `dif`, no BOM.
+
 ## 2026-10-28 — unified redis connection
 
 The redis client was unified across three deployables. The Java trees are not git

@@ -1,12 +1,14 @@
 # cluster-config.sh 实施进度交接
 
 **更新时间**：2026-10-29
-**工作分支**：无 —— 第七~十三轮都在 `main` 上，**全部已推送**
+**工作分支**：无 —— 第七~十四轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
 **基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十三轮已推送
-（`521f244..aadcbb9`）；**本次会话又推了一个 `80ad557`**（修 `check-bash-compat.sh`
-的假红 + 4 条回归测试）。当前 bats **203 通过 / 0 失败**，
-E2E `E2E PASSED`（退出码 0）
+（`521f244..aadcbb9`）；**本次会话又推了 `80ad557`**（修 `check-bash-compat.sh`
+的假红 + 4 条回归测试）、**`9b4f040`**（CI 覆盖面缺口）、
+**`xxxxxxx`**（第十四轮：真集群测试 + jedis 版本上限）。
+当前 bats **203 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0），
+`oms` **63 通过 / 0 失败 / 0 跳过**（含 4 条真集群测试）
 
 > **⭐ 2026-10-29 会话开局复核（没有改生产代码，只验证 + 修环境 + 修一个测试脚本）**
 >
@@ -58,6 +60,10 @@ E2E `E2E PASSED`（退出码 0）
 > 那正是「坑 9」说的会让节点链路断掉的改法）。
 >
 > **下一轮动手前先读这一段**。
+
+**第十四轮（2026-10-29）**：**在 Docker Redis 集群上实测 Java 侧的读写**，
+并**实测出「JDK 8 下 jedis 能升到哪个版本」的硬上限**。
+详见下文「第十四轮」。
 
 
 **第十三轮（2026-10-28）**：**统一三个工程的 Redis 连接基础设施**
@@ -343,6 +349,139 @@ Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 
 > 键数比第九轮涨了 6 倍，是这轮每轮 20 万新 obid 累积出来的。
 > 要恢复干净基线，要么删掉 benchmark 数据，要么让脚本复用固定 obid 段（会牺牲抽样检测能力）。
+
+---
+
+## 第十四轮（2026-10-29）：在 Docker Redis 集群上实测 Java 读写 + jedis 版本的硬上限
+
+**这一轮回答两个问题：**
+① Java 侧（生产写路径 + 读路径）在**真的 Docker Redis 集群**上读写是否正确？
+② **JDK 8 之下，jedis 最多能升到哪个版本？**
+
+### 一、⭐ 结论先行：JDK 8 下 jedis 的上限是 **3.10.0**
+
+这是**逐版本在真集群上跑出来的**，不是查文档推断的：
+
+| jedis | SDR 2.7.18 + JDK 8 的实测结果 |
+|---|---|
+| **3.6.1 / 3.8.0 / 3.10.0** | ✅ **SDR write+read OK**（读回 `42.0,1712345678000,1`） |
+| 4.0.0 | ❌ `NoClassDefFoundError: redis/clients/jedis/GeoUnit`（另需 gson） |
+| 4.4.3 / 5.2.0 / 6.0.0 / 7.2.1 | ❌ `NoClassDefFoundError: redis/clients/jedis/GeoUnit` |
+| 8.1.0-beta2 | ❌ 同上，另需 `redis.clients.authentication` |
+
+**根因（两条，都是实测的）**：
+
+1. **jedis 4 起把 `GeoUnit` 从 `redis.clients.jedis` 挪到了 `redis.clients.jedis.args`**，
+   而 **spring-data-redis 2.7.18 引用的是老包名** —— 一用 SDR 就 `NoClassDefFoundError`。
+2. **SDR 2.7.18 的 `JedisClusterNodeResourceProvider` 调用
+   `JedisPool.getResource():Lredis/clients/jedis/Jedis;`**，
+   而 jedis 4+ 的 `getClusterNodes()` 返回的是 `Map<String, ConnectionPool>`，
+   元素类型从 `JedisPool` 变成了 `ConnectionPool`。
+
+**要越过这条线，就得把 spring-data-redis 一起升**：
+
+| SDR | 声明的 jedis | 最低 JDK | 与 jedis 8 实测 |
+|---|---|---|---|
+| 2.7.18（本工程现在） | 3.8.0 | **8** | ❌ GeoUnit 缺失 |
+| 3.2.4 / 3.5.10 | 5.0.2 / 6.0.0 | **17** | ✅ write+read OK |
+| 4.0.4 | 7.0.0 | **17** | ✅ write+read OK |
+
+**但 SDR 3.x/4.x 是 Java 17 字节码**，JDK 8 的 javac 直接拒绝：
+
+```
+bad class file .../JedisConnectionFactory.class
+class file has wrong version 61.0, should be 52.0
+```
+
+（JDK 21 + `--release 8` 可以编译通过，但**产物变成 Java 17 字节码**，
+而且 `oms` 的 proguard 配的是 `${JAVA_HOME}/jre/lib/rt.jar` ——
+**那个路径只有 JDK 8 有**，JDK 9+ 只有 `jmods`。）
+
+> **所以在 JDK 8 这个前提下，jedis 8 不是一个「改个版本号」的事**，
+> 它的真实代价是：升 SDR 到 4.x + 编译目标升到 JDK 17 + 重做 proguard +
+> 改 `RedisClusterHashPipeline`（`JedisPool` → `ConnectionPool`）+
+> 改 `RedisScanUtils`（`ScanParams`/`ScanResult` 换包），
+> 而且这些改动会沿 `oms` → 三个应用**向上扩散**。
+>
+> **本轮已把 pom 恢复到可编译状态**：`jedis.version` 从 `8.1.0-beta2` 改成
+> **`3.10.0`**（3.x 里 API 与 3.6.1 完全一致，**不需要改任何生产代码**），
+> 并在 pom 里就地写下这条上限及依据。
+
+### 二、⭐ 生产写路径第一次在**真集群**上被验证
+
+**此前的覆盖情况**：`RedisClusterHashPipelineTest` 的 **28 条用例全是 Mockito** ——
+拓扑快照、pipeline 回复、被拒 key 的兜底**全都是构造出来的**。
+这个类的真正难点全在与真 Redis 的交互上，**一条都没被真集群检验过**。
+
+本轮新增 `RedisClusterHashPipelineLiveTest`（`oms` 模块，**4 条**），
+用 `ApplicationContextRunner` 装配**真实的** `oms:` 契约 → 真的 `JedisConnectionFactory`
+→ 真的 `JedisCluster` → 真的 Docker 集群：
+
+| 用例 | 锁住什么 |
+|---|---|
+| `writesEveryKeyOfTheBatchAndReadsItBackUnchanged` | 批量写 300 个 key，**逐个读回，字字相等**（同时覆盖 slot 分组、属主正确、**值序列化与读路径一致**） |
+| `spreadsTheBatchAcrossSeveralMastersWithoutAnyMovedRedirect` | **服务端收到的 MOVED 次数必须为 0**，且 key 确实落在多个 master 上 |
+| `readPathReturnsEntriesInTheSameOrderAsTheKeys` | 读路径返回顺序**必须与传入 key 顺序一致**（`OmsReadDaoImpl.findByOtype` 是**按下标**对齐的，顺序错了会静默返回错位数据） |
+| `overwritingTheSameKeyKeepsTheLastValue` | 重复写同一个 key 得到最后写的值 |
+
+**实测结果：`63 通过 / 0 失败 / 0 跳过`**（基线 59 + 新增 4）。
+
+### 三、⭐ 这一轮最有价值的收获：**我自己的断言也空转过**
+
+新写的「MOVED 次数必须为 0」那条断言，**第一次写完是绿的** ——
+而分组逻辑明明被我改坏了。**这是一条空转断言**，和本仓库历史上那些
+「从没失败过的断言」是同一类错误。三次修正才让它真的会红：
+
+| # | 空转的原因 | 症状 |
+|---|---|---|
+| 1 | `seed.info("errorstat")` —— **Redis 8 没有名为 `errorstat` 的段**，返回**空** | 计数恒为 0，断言永远成立 |
+| 2 | 按 `,` 切 `errorstat_MOVED:count=201` —— 但这个格式**中间没有逗号** | 同上，恒为 0 |
+| 3 | 借连接时**忘了 AUTH** | 同上，恒为 0 |
+
+**改对之后**，变异检验立刻生效：
+
+| 变异 | 结果 |
+|---|---|
+| 把 hash value 的序列化器换成 `StringRedisSerializer` | **3 条变红**（读回时 JSON 解析失败） |
+| 把分组逻辑改成「所有 key 挤到第一个 master」 | **1 条变红**：`the batch was redirected 201 times` |
+
+> **教训**：这次空转的是**我自己刚写的断言**，而且**它一开始是绿的**，
+> 所以「测试全过」给不了任何信心 ——
+> **只有「把实现改坏，测试变红」才能证明断言有效**。
+> 上一轮刚在 `check-bash-compat.sh` 上犯过一次同样的错（见「当前测试基线」），
+> **一周内两次**，说明这已是本项目的系统性问题，值得在写断言时默认怀疑它。
+
+### 四、顺带修掉的一个真实缺陷：`ApplicationContextRunner` 的上下文会被销毁
+
+`ApplicationContextRunner.run(callback)` 在**回调返回后销毁上下文**，
+连带 `JedisConnectionFactory` 失效（`JedisConnectionFactory was destroyed`）。
+把断言写在回调**外面**会拿到已销毁的工厂。
+**所有断言必须写在回调内部。**
+
+### 五、本轮的留痕
+
+| 东西 | 位置 |
+|---|---|
+| 新增真集群测试（4 条） | `realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java` |
+| pom 的 jedis 版本与上限说明 | `backend/pom.xml` 与 `application/backend/pom.xml`（`<jedis.version>` 就地注释） |
+| 逐版本兼容性实测 | 见本节「结论先行」的表；探针脚本在 `%TEMP%\opencode\probe\SdrJedisProbe.java` |
+| patch | `docs/superpowers/patches/2026-10-29-jedis-ceiling-platform-backend.patch`（2 个文件）<br>`docs/superpowers/patches/2026-10-29-jedis-ceiling-application-backend.patch`（1 个文件） |
+
+**验证**：`oms` 63/0、`rtdata-module` 14/0、
+**backend reactor 29 个模块 `mvn -o clean install` 全 SUCCESS**（含 proguard）、
+**napstarweb reactor 12 个模块全 SUCCESS**。
+patch 的反向校验两个根都 **exit 0**；
+**往返校验**（反向 → 正向）**0 mismatch**。
+
+### 六、这一轮的坑
+
+| # | 坑 | 后果 / 正确做法 |
+|---|---|---|
+| 1 | **有人（不是我）在会话期间把 `backend/pom.xml` 的 jedis 改成了 8.1.0-beta2**（09:59:47，VS Code + Java 插件当时在跑） | 整个工程**编译失败**。本轮已恢复成 `3.10.0`。**如果下次又看到这个值，先看本节** |
+| 2 | `RedisClusterHashPipeline` 的 `getClusterNodes()` 在 jedis 4+ 返回 `Map<String, ConnectionPool>` | 3.x 下不用改；一旦升 4+ 就必须改（L356、L188、L381） |
+| 3 | `jedis` 8 还需要额外的 `redis.clients.authentication:redis-authx-core` | 只加 jedis 版本会 `NoClassDefFoundError: redis/clients/authentication/core/Token` |
+| 4 | `JedisPool` 在 jedis 8 里**仍然存在**（`extends Pool<Jedis>`），但 `getClusterNodes()` 给的不再是它 | 「类还在」不等于「API 没变」——**必须看返回类型** |
+| 5 | 本机 `mvn` 直连不了外网拉插件元数据 | `dependency:build-classpath` 会报 `NoPluginFoundForPrefixException`；用 `mvn -o` + 本地仓库 |
 
 ---
 
@@ -1355,6 +1494,20 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 | `bash scripts/check-bash-compat.sh` | `BASH_COMPAT: PASS`（在 bash 4.3 上跑同一套 bats） |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 | `bash scripts/e2e-cpsweb-nodes.sh` | `E2E PASSED`，退出码 0（需 Docker + `cpsweb-env:1.0`） |
+
+### Java 侧的基线（第十四轮更新）
+
+| 命令 | 期望 |
+|---|---|
+| `cd $BE\realserver\common\oms; mvn -o clean test` | **63 通过 / 0 失败 / 0 跳过**（基线 59 → 新增 4 条真集群测试） |
+| `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 通过 / 0 失败** |
+| `cd $BE; mvn -o clean install -DskipTests` | **29 个模块全 SUCCESS**（含 proguard） |
+| `cd $BE\realserver\common\oms; mvn -o dependency:tree` | 只剩自己，**零 `com.sac.platform` 依赖** |
+| `cd $BE\common\idgenerator; mvn -o dependency:tree` | **不含 `realserver-entity`** |
+
+> ⚠️ **构建必须用 JDK 8**（`D:\java\java-se-8u42-ri`）：
+> `oms` 的 proguard 配了 `${JAVA_HOME}/jre/lib/rt.jar`，**只有 JDK 8 有这个路径**。
+> 而且 **jedis 在 JDK 8 下最高只能到 3.10.0** —— 见「第十四轮」的结论先行表。
 
 > ✅ **`check-bash-compat.sh` 的「假红」已修**（2026-10-29）。
 >

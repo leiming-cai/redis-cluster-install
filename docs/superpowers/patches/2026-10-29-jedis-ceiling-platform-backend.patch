@@ -1,0 +1,468 @@
+diff --git a/pom.xml b/pom.xml
+index 3d1c4ef..5c4ad5f 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -80,7 +80,8 @@
+ 			要升到 jedis 4+，必须同时把 spring-data-redis 升到 4.x，而 SDR 4.x 是
+ 			Java 17 字节码，JDK 8 的 javac 读不了（bad class file... wrong version 61.0）。
+ 			详见 docs/HANDOFF.md「第十四轮」。
+-		<jedis.version>3.6.1</jedis.version>
++		-->
++		<jedis.version>3.10.0</jedis.version>
+ 		<jsoup.version>1.16.1</jsoup.version>
+ 		<junrar.version>7.4.1</junrar.version>
+ 		<jasypt.version>2.1.2</jasypt.version>
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java
+new file mode 100644
+index 0000000..f1be330
+--- /dev/null
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java
+@@ -0,0 +1,448 @@
++package com.sac.platform.realserver.oms.utils;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.autoconfigure.AutoConfigurations;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++import org.springframework.data.redis.connection.jedis.JedisClusterConnection;
++import org.springframework.data.redis.connection.jedis.JedisConnectionFactory;
++import org.springframework.data.redis.core.RedisTemplate;
++
++import com.sac.platform.realserver.oms.config.RedisConfigProperties;
++import com.sac.platform.realserver.oms.config.RedisPropertiesConfig;
++import com.sac.platform.realserver.oms.config.RedisUtilConfig;
++
++import redis.clients.jedis.Jedis;
++import redis.clients.jedis.JedisCluster;
++import redis.clients.jedis.JedisPool;
++import redis.clients.jedis.util.JedisClusterCRC16;
++
++/**
++ * L4 真集群验证：**生产写路径** {@link RedisClusterHashPipeline#putAllHashes}
++ * 在一个真的 Redis 集群上是否成立。
++ *
++ * <p>为什么需要这一层：{@code RedisClusterHashPipelineTest} 的 28 条用例全部是
++ * Mockito —— 拓扑快照、pipeline 回复、被拒 key 的兜底**全都是构造出来的**。
++ * 但这个类真正的难点全在**与真 Redis 的交互**上：
++ * <ul>
++ *   <li>{@code CLUSTER SLOTS} 的真实返回格式（host 是 byte[]、端口是 Integer、
++ *       有 master 段也有 replica 段）；</li>
++ *   <li>真集群上 key 会被分到**三个不同的 master**，pipeline 必须按 slot 属主分组，
++ *       否则会收到 MOVED；</li>
++ *   <li>pipeline 里的 MOVED/ASK 是**返回值**不是异常，
++ *       {@code syncAndReturnAll()} 会把它们装进返回列表；</li>
++ *   <li>写进去的**值必须能被同一个 RedisTemplate 读回来**——
++ *       序列化器不一致的话，读出来是乱码，而这一点 mock 永远测不出来。</li>
++ * </ul>
++ *
++ * <p>本类把这些都交给真集群裁决。集群不可达时**跳过**而不是变红
++ * （CI 的 runner 上没有 Redis）。
++ *
++ * <p>默认连本机 127.0.0.1:16379（Docker 集群转发到宿主机的端口）；
++ * 可用 {@code -Dtest.clusters} / {@code -Dtest.password} 覆盖。
++ *
++ * <p><b>实现注意</b>：{@code ApplicationContextRunner.run(...)} 在回调返回后会
++ * **销毁**上下文（连带 JedisConnectionFactory），所以断言必须写在回调**内部** ——
++ * 否则拿到的是已经销毁的工厂，报 "JedisConnectionFactory was destroyed"。
++ */
++class RedisClusterHashPipelineLiveTest {
++
++    private static final String CLUSTERS =
++            System.getProperty("test.clusters", "127.0.0.1:16379");
++
++    private static final String PASSWORD =
++            System.getProperty("test.password", "CpsE2eClusterPw");
++
++    /** 本次运行使用的 key 前缀：便于测试结束时精确删除，不碰集群里的其它数据。 */
++    private static final String KEY_PREFIX = "live_pipeline_test:";
++
++    private final ApplicationContextRunner runner = new ApplicationContextRunner()
++            .withConfiguration(AutoConfigurations.of(
++                    RedisPropertiesConfig.class, RedisUtilConfig.class))
++            .withUserConfiguration(UtilsPackageScan.class)
++            .withPropertyValues(
++                    "oms.redisMode=cluster",
++                    "oms.clusters[0]=" + CLUSTERS,
++                    "oms.password=" + PASSWORD,
++                    "oms.database=0",
++                    "oms.timeout=5000",
++                    "oms.connectTimeout=2000",
++                    "oms.readTimeout=5000",
++                    "oms.maxWait=3000",
++                    "oms.maxTotal=16",
++                    "oms.maxIdle=4",
++                    "oms.minIdle=1")
++            .withInitializer(ctx -> org.springframework.boot.context.properties
++                    .ConfigurationPropertiesBindingPostProcessor.register(
++                            (org.springframework.beans.factory.support.BeanDefinitionRegistry) ctx
++                                    .getBeanFactory()));
++
++    /**
++     * 在一个活着的集群上下文里跑 body；集群不可达就跳过。
++     *
++     * <p>body 必须在回调内部执行 —— 回调返回后上下文就被销毁了。
++     */
++    private void withLiveCluster(java.util.function.BiConsumer<RedisTemplate<String, Object>,
++            RedisClusterHashPipeline> body) {
++        runner.run(context -> {
++            assertNotNull(context.getBean("omsRedisConfigProperties"));
++            RedisConfigProperties props = context.getBean(RedisConfigProperties.class);
++            assertEquals("cluster", props.getRedisMode());
++
++            @SuppressWarnings("unchecked")
++            RedisTemplate<String, Object> template =
++                    (RedisTemplate<String, Object>) context.getBean("redisTemplate");
++            assertNotNull(template);
++            RedisClusterHashPipeline pipeline = context.getBean(RedisClusterHashPipeline.class);
++            assertNotNull(pipeline);
++
++            // 这个契约必须是集群模式，否则下面的测试全都测不到集群路径。
++            assertTrue(context.getBean(RedisClusterHelper.class).isCluster(),
++                    "the live test must exercise the cluster path");
++
++            if (!isReachable(template)) {
++                org.junit.jupiter.api.Assumptions.assumeTrue(false,
++                        "Redis cluster not reachable at " + CLUSTERS + " (skipping)");
++                return;
++            }
++            try {
++                body.accept(template, pipeline);
++            } finally {
++                cleanUp(template);
++            }
++        });
++    }
++
++    private boolean isReachable(RedisTemplate<String, Object> t) {
++        try {
++            t.opsForValue().get("__live_probe__");
++            return true;
++        } catch (Exception e) {
++            return false;
++        }
++    }
++
++    /**
++     * 生产写路径的核心契约：批量写进去的每一个 key，都必须能被同一个
++     * RedisTemplate 原样读回来。
++     *
++     * <p>这条断言同时覆盖了三件事：分组有没有算错 slot、有没有写到错误的 master、
++     * 以及**值序列化**是否与读路径一致（不一致的话读出来是乱码或类型不符）。
++     */
++    @Test
++    void writesEveryKeyOfTheBatchAndReadsItBackUnchanged() {
++        withLiveCluster((template, pipeline) -> {
++            Map<String, Map<String, String>> batch = new LinkedHashMap<>();
++            for (int i = 0; i < 300; i++) {
++                String key = KEY_PREFIX + "roundtrip:" + i;
++                Map<String, String> hash = new LinkedHashMap<>();
++                hash.put("Value", "12.34,171234567800" + (i % 10) + ",1");
++                hash.put("Quality", "1");
++                batch.put(key, hash);
++            }
++
++            pipeline.putAllHashes(batch);
++
++            // 逐个读回来：值必须一字不差。
++            for (Map.Entry<String, Map<String, String>> entry : batch.entrySet()) {
++                Map<Object, Object> read = template.opsForHash().entries(entry.getKey());
++                assertNotNull(read, "key was not written: " + entry.getKey());
++                assertEquals(entry.getValue().size(), read.size(),
++                        "hash size mismatch for " + entry.getKey());
++                for (Map.Entry<String, String> field : entry.getValue().entrySet()) {
++                    assertEquals(field.getValue(), String.valueOf(read.get(field.getKey())),
++                            "value mismatch for " + entry.getKey() + " field " + field.getKey());
++                }
++            }
++        });
++    }
++
++    /**
++     * 集群和单机的根本差别：**一个批次会被分到多个 master**。
++     *
++     * <p>这里断言的不是「写成功」——即使分组逻辑完全坏掉，写入**仍然会成功**，
++     * 因为 Redis 会回 MOVED，兜底路径再逐 key 重写一遍。**结果正确，但每个 key
++     * 多走一次重定向**，而那正是第十轮要消灭的往返。
++     *
++     * <p>所以真正能判定的信号是**服务端收到的 MOVED 次数**：
++     * 分组正确时，每个 key 都直接发给它的属主 master，MOVED 应为 0；
++     * 分组坏掉时，所有 key 挤到第一个 master，其中约 2/3 会被回 MOVED。
++     *
++     * <p>用 {@code errorstat_MOVED} 计数（Redis 6.2+），逐 master 累加。
++     */
++    @Test
++    void spreadsTheBatchAcrossSeveralMastersWithoutAnyMovedRedirect() {
++        withLiveCluster((template, pipeline) -> {
++            Map<String, Map<String, String>> batch = new LinkedHashMap<>();
++            for (int i = 0; i < 300; i++) {
++                Map<String, String> hash = new LinkedHashMap<>();
++                hash.put("Value", "spread,1712345678000,1");
++                batch.put(KEY_PREFIX + "spread:" + i, hash);
++            }
++
++            // 先量一次基线（前面的用例可能已经产生过 MOVED）。
++            long before = totalMovedErrors(template);
++            pipeline.putAllHashes(batch);
++            long after = totalMovedErrors(template);
++            System.out.println("[live-test] MOVED before=" + before + " after=" + after
++                    + " detail=[" + lastMovedDiag + "]");
++
++            // 分组正确 => 一次 MOVED 都不该有。
++            assertEquals(0L, after - before,
++                    "the batch was redirected " + (after - before)
++                            + " times; the per-master grouping is broken"
++                            + " (every redirected key costs an extra round trip)"
++                            + " -- before=" + before + " after=" + after
++                            + " detail=[" + lastMovedDiag + "]");
++
++            // 并且它确实落到了多个 master 上。
++            Map<String, Integer> perMaster = countKeysPerMaster(template, batch.keySet());
++            assertTrue(perMaster.size() >= 2,
++                    "the batch was expected to span several masters, but only saw: " + perMaster);
++            int total = 0;
++            for (Integer count : perMaster.values()) {
++                total += count;
++            }
++            assertEquals(batch.size(), total,
++                    "every key must live on exactly one master; saw " + perMaster);
++        });
++    }
++
++    /**
++     * 累加所有 master 的 {@code errorstat_MOVED:count}。
++     *
++     * <p>只统计 master：副本上的 MOVED 不代表写路径走错了（客户端本来就不路由到副本）。
++     */
++    private long totalMovedErrors(RedisTemplate<String, Object> template) {
++        long moved = 0L;
++        StringBuilder diag = new StringBuilder();
++        for (String hostPort : masterAddresses(template)) {
++            String[] parts = hostPort.split(":");
++            Jedis seed = null;
++            try {
++                seed = new Jedis(parts[0], Integer.parseInt(parts[1]), 2000);
++                // 集群开了 requirepass，忘了 AUTH 的话 INFO 会回 NOAUTH，
++                // 异常被吞掉后计数恒为 0 —— 断言又会变成空转。
++                seed.auth(PASSWORD);
++                seed.ping();
++                String info = seed.info();
++                long nodeMoved = 0L;
++                for (String line : info.split("\r?\n")) {
++                    if (line.startsWith("errorstat_MOVED:")) {
++                        // 格式是 errorstat_MOVED:count=201 —— 冒号后面直接是
++                        // count=N，中间**没有逗号**。
++                        nodeMoved += Long.parseLong(
++                                line.substring("errorstat_MOVED:count=".length()).trim());
++                    }
++                }
++                moved += nodeMoved;
++                diag.append(hostPort).append(" moved=").append(nodeMoved).append("; ");
++            } catch (Exception e) {
++                diag.append(hostPort).append(" ERR@").append(e.getClass().getSimpleName())
++                        .append(':').append(e.getMessage()).append("; ");
++            } finally {
++                if (seed != null) {
++                    seed.close();
++                }
++            }
++        }
++        lastMovedDiag = diag.toString();
++        return moved;
++    }
++
++    /** 上一次 totalMovedErrors 的逐节点明细，失败时带进断言消息。 */
++    private String lastMovedDiag = "";
++
++    /**
++     * 集群里所有 master 的 host:port（来自 CLUSTER SLOTS 的 master 段）。
++     *
++     * <p>不依赖 JedisCluster 的连接池：那里面也包含副本，而副本广播的地址
++     * （172.21.0.3:638x）在宿主机上**不可达**，借连接会超时。
++     */
++    private java.util.List<String> masterAddresses(RedisTemplate<String, Object> template) {
++        JedisConnectionFactory factory = (JedisConnectionFactory) template.getConnectionFactory();
++        JedisCluster nativeCluster = ((JedisClusterConnection) factory.getConnection())
++                .getNativeConnection();
++
++        java.util.LinkedHashSet<String> masters = new java.util.LinkedHashSet<String>();
++        for (JedisPool pool : nativeCluster.getClusterNodes().values()) {
++            Jedis seed = null;
++            try {
++                seed = pool.getResource();
++                for (Object range : seed.clusterSlots()) {
++                    List<?> r = (List<?>) range;
++                    List<?> master = (List<?>) r.get(2);
++                    String host = new String((byte[]) master.get(0), "UTF-8");
++                    int port = ((Number) master.get(1)).intValue();
++                    masters.add(host + ":" + port);
++                }
++                break;
++            } catch (Exception e) {
++                // 试下一个节点
++            } finally {
++                if (seed != null) {
++                    seed.close();
++                }
++            }
++        }
++        return new java.util.ArrayList<String>(masters);
++    }
++
++    /**
++     * 读路径（{@code opsHashGetALLPipe}）在集群下是**逐 key** 的
++     * —— 这是第十三轮记录下来的已知缺口（读侧还没做 pipeline）。
++     *
++     * <p>这里锁住的是**正确性**：读出来的顺序必须与传入的 key 顺序一致，
++     * 因为 {@code OmsReadDaoImpl.findByOtype} 是**按下标**把结果和 key 对齐的
++     * （{@code keys.get(count)}）。顺序错了会静默地返回错位的数据 ——
++     * 这种错误不会抛异常，只会让业务拿到别人的点值。
++     */
++    @Test
++    void readPathReturnsEntriesInTheSameOrderAsTheKeys() {
++        withLiveCluster((template, pipeline) -> {
++            Map<String, Map<String, String>> batch = new LinkedHashMap<>();
++            List<String> keys = new ArrayList<>();
++            for (int i = 0; i < 50; i++) {
++                String key = KEY_PREFIX + "ordered:" + i;
++                Map<String, String> hash = new LinkedHashMap<>();
++                hash.put("Value", "ordered" + i + ",1712345678000,1");
++                batch.put(key, hash);
++                keys.add(key);
++            }
++            pipeline.putAllHashes(batch);
++
++            RedisPipelineUtil pipelineUtil = new RedisPipelineUtil(template,
++                    new RedisClusterHelper(template.getConnectionFactory()));
++
++            List<Object> results = pipelineUtil.opsHashGetALLPipe(keys);
++
++            assertEquals(keys.size(), results.size());
++            for (int i = 0; i < keys.size(); i++) {
++                @SuppressWarnings("unchecked")
++                Map<String, String> read = (Map<String, String>) results.get(i);
++                assertNotNull(read, "no result for key " + keys.get(i));
++                assertEquals("ordered" + i + ",1712345678000,1", read.get("Value"),
++                        "result " + i + " does not belong to key " + keys.get(i)
++                                + " -- the read path returned the entries out of order");
++            }
++        });
++    }
++
++    /**
++     * 写完立刻读（同一批次内）不能读到旧值；HSET 对同一 field 是幂等的，
++     * 所以重复写同一个 key 必须得到最后写的那个值。
++     */
++    @Test
++    void overwritingTheSameKeyKeepsTheLastValue() {
++        withLiveCluster((template, pipeline) -> {
++            String key = KEY_PREFIX + "overwrite";
++
++            Map<String, String> first = new LinkedHashMap<>();
++            first.put("Value", "first,1712345678000,1");
++            Map<String, Map<String, String>> batch1 = new LinkedHashMap<>();
++            batch1.put(key, first);
++            pipeline.putAllHashes(batch1);
++
++            Map<String, String> second = new LinkedHashMap<>();
++            second.put("Value", "second,1712345678001,1");
++            Map<String, Map<String, String>> batch2 = new LinkedHashMap<>();
++            batch2.put(key, second);
++            pipeline.putAllHashes(batch2);
++
++            assertEquals("second,1712345678001,1",
++                    String.valueOf(template.opsForHash().get(key, "Value")));
++        });
++    }
++
++    /**
++     * 统计每个 master 各自持有本次批次的多少个 key。
++     *
++     * <p>用 CLUSTER SLOTS 拿到 slot -&gt; master 的映射，再用 KEYSLOT 算出每个 key
++     * 的槽位，然后按属主计数。
++     */
++    private Map<String, Integer> countKeysPerMaster(RedisTemplate<String, Object> template,
++            Set<String> keys) {
++        JedisConnectionFactory factory = (JedisConnectionFactory) template.getConnectionFactory();
++        JedisCluster nativeCluster = ((JedisClusterConnection) factory.getConnection())
++                .getNativeConnection();
++
++        Map<String, Integer> counts = new LinkedHashMap<>();
++        try {
++            // CLUSTER SLOTS 只能从某个节点上问（JedisCluster 本身没有这个命令），
++            // 这与生产代码 refreshSlotSnapshot 的做法一致。
++            Map<Integer, String> slotOwner = new LinkedHashMap<>();
++            boolean topologyRead = false;
++            String lastError = null;
++            for (JedisPool pool : nativeCluster.getClusterNodes().values()) {
++                Jedis seed = null;
++                try {
++                    seed = pool.getResource();
++                    for (Object range : seed.clusterSlots()) {
++                        List<?> r = (List<?>) range;
++                        // 槽位号与端口的 Java 类型随 Jedis 版本而变（Integer 或 Long），
++                        // 生产代码 parseSlotSnapshot 也是用 Number.intValue() 取的。
++                        int start = ((Number) r.get(0)).intValue();
++                        int end = ((Number) r.get(1)).intValue();
++                        List<?> master = (List<?>) r.get(2);
++                        String host = new String((byte[]) master.get(0), "UTF-8");
++                        int port = ((Number) master.get(1)).intValue();
++                        String hostPort = host + ":" + port;
++                        for (int slot = start; slot <= end; slot++) {
++                            slotOwner.put(slot, hostPort);
++                        }
++                    }
++                    topologyRead = true;
++                    break;
++                } catch (Exception e) {
++                    // 试下一个节点：集群里可能有宿主机不可达的地址
++                    lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
++                } finally {
++                    if (seed != null) {
++                        seed.close();
++                    }
++                }
++            }
++            assertTrue(topologyRead,
++                    "could not read CLUSTER SLOTS from any node; last error was " + lastError
++                            + "; nodes=" + nativeCluster.getClusterNodes().keySet());
++
++            for (String key : keys) {
++                int slot = JedisClusterCRC16.getSlot(key.getBytes("UTF-8"));
++                String owner = slotOwner.get(slot);
++                assertNotNull(owner, "no slot owner for slot " + slot + " (key " + key + ")");
++                Integer count = counts.get(owner);
++                counts.put(owner, count == null ? 1 : count + 1);
++            }
++        } catch (Exception e) {
++            throw new IllegalStateException("could not read the cluster topology", e);
++        }
++        return counts;
++    }
++
++    /** 删掉本次测试写入的所有 key，保持集群干净。 */
++    private void cleanUp(RedisTemplate<String, Object> template) {
++        try {
++            Set<String> found = template.keys(KEY_PREFIX + "*");
++            if (found != null && !found.isEmpty()) {
++                template.delete(new ArrayList<>(found));
++            }
++        } catch (Exception e) {
++            // 清理失败不影响其它断言的结论
++        }
++    }
++
++    @org.springframework.context.annotation.Configuration
++    @org.springframework.context.annotation.ComponentScan(
++            basePackageClasses = com.sac.platform.realserver.oms.utils.RedisClusterHelper.class)
++    static class UtilsPackageScan {
++    }
++}
