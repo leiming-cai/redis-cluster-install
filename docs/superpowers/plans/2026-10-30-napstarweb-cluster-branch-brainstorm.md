@@ -29,8 +29,16 @@
 - [x] 5. 分段呈现设计（§1–§3、§4–§6），逐段确认
 - [x] 6. 写设计文档 `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md` + 提交（`bbd0b2e`，已推送）
 - [x] 7. spec 自审 —— 修了 3 处歧义（`keys` 提法、注入方式、string 读的对称性）
-- [ ] 8. 用户复核 spec ← **当前**
-- [ ] 9. 转入 writing-plans
+- [x] 8. 用户复核 spec —— 认可，并要求出计划 + 存会话
+- [x] 9. 转入 writing-plans —— 计划 `docs/superpowers/plans/2026-10-30-napstarweb-cluster-branch.md`（`6efe15d`，15 个 Task / 1790 行）
+- [x] 10. 存会话 —— `docs/superpowers/sessions/2026-10-30-napstarweb-cluster-branch-session.md`（`94604a4`，**含 spec 与 plan 全文**）
+
+## 交接给下一个会话
+
+**唯一入口**：`docs/superpowers/sessions/2026-10-30-napstarweb-cluster-branch-session.md`
+
+从 **计划的 Task 0** 开始执行。⚠️ Task 0 必须在任何改动之前 ——
+两棵 Java 树不是 git 仓库，基线丢了就永远拿不回来。
 
 ## 关键事实速查
 
