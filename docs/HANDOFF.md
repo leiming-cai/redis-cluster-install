@@ -230,18 +230,25 @@ SDR 2.7.18 大多**不抛**，而是**静默降级**成非原子的客户端实�
 （命令行可以完全不传配置），并修掉脚本里三个会「让正确的运行变红」的缺陷。
 详见下文「第十一轮」。
 
-**下一步**（第十七轮结束后，详见「会话存档（2026-10-30）」）：
-① **填生产真值** —— 这是**唯一的「欠账」**，现在**有了一份可照做的清单**：
+**下一步**（第十八轮结束后，详见「会话存档（2026-10-30）」）：
+① ⭐⭐ **（新，最高优先级）napstarweb 的 10 处 `executePipelined` 必须先加集群分支** ——
+SDR 2.7.18 在集群模式下**必然抛 `UnsupportedOperationException`**，回调体一次都不执行。
+不修就切集群 → **启动初始化被中断（应用起得来但功能是残的）** +
+**`COMMITDATAINCRE` 增量静默丢失**。
+**设计与实施计划已写好**（`docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md`
++ `docs/superpowers/plans/2026-10-30-napstarweb-cluster-branch.md`），
+**从计划的 Task 0（备份基线）开始执行**；
+② **填生产真值** —— 这是**唯一的「欠账」**，现在**有了一份可照做的清单**：
 `docs/OPERATIONS.md` §4.5（Redis 侧 10 行 + Kafka 侧 10 行）。
 ⚠️ **`oms:` 要在**三个应用各自的** Nacos dataId 里**分别填**（不只是 `ext_base.yaml`）；
-② 设 `cluster_require_full_coverage=no`（2 机部署必须，否则任一 master 挂 = 全集群停写）；
-③ **读侧 pipeline**（`findByOtype` 集群下仍是 N 次串行 `HGETALL`）；
-④ ~~合并**两套** `RedisUtil`~~ —— **✅ 已做（第十六轮）**（不是三套 ——
+③ 设 `cluster_require_full_coverage=no`（2 机部署必须，否则任一 master 挂 = 全集群停写）；
+④ **读侧 pipeline**（`findByOtype` 集群下仍是 N 次串行 `HGETALL`）；
+⑤ ~~合并**两套** `RedisUtil`~~ —— **✅ 已做（第十六轮）**（不是三套 ——
 modelserver 没有第三套）；反向依赖 `common/idgenerator → realserver/oms` 已消除；
-⑤ ~~**CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`~~ —— **✅ 已做（第十五轮）**
+⑥ ~~**CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`~~ —— **✅ 已做（第十五轮）**
 （真实覆盖面 15 → 28 个文件）；
-⑥ （旧的）**别再在这台机器上加并发**（已换出 1.77 GB）；换干净集群重测倍率；
-⑦ **（新）ZK/Kafka 切两节点集群** —— 仓库的 `scripts/e2e-kafka-cluster.sh`
+⑦ （旧的）**别再在这台机器上加并发**（已换出 1.77 GB）；换干净集群重测倍率；
+⑧ **（新）ZK/Kafka 切两节点集群** —— 仓库的 `scripts/e2e-kafka-cluster.sh`
 已经实现了（2 voter ZK + 2 broker Kafka，断言 A1–A7），
 **但只在 Docker E2E 环境验证过、没在真机上验证过**。
 完整流程与配置模板见 `docs/OPERATIONS.md` §3；
@@ -250,6 +257,8 @@ modelserver 没有第三套）；反向依赖 `common/idgenerator → realserver
 > **✅ 已修（第十五轮）**：`IdUtil` 的 Redis 锁「成功路径从不释放」。
 > **✅ 已修（第十六轮）**：两套 `RedisUtil` 合成一套；`tryLock` 的忙等自旋加了 sleep。
 > **✅ 已修（第十七轮）**：`install.sh --yes` 的帮助文本（在骗人）。
+> **📋 已设计完待执行（第十八轮）**：napstarweb 的集群分支 + oms 读侧 pipeline
+> （`getAllHashes` / `getAllValues`）—— **一行生产代码都还没改**。
 
 ---
 
@@ -2757,6 +2766,62 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ---
 
+## 会话存档（2026-10-30）：第十八轮 —— napstarweb 集群分支（**设计与计划已完成，未改一行代码**）
+
+**⭐ 新会话请先读这一节。**
+
+> **完整存档（含设计文档全文 + 实施计划全文）**：
+> **`docs/superpowers/sessions/2026-10-30-napstarweb-cluster-branch-session.md`**
+> （2755 行 / 8 章；第 3 章是设计全文，第 4 章是计划全文）
+
+### 一句话
+
+**发现并设计好了一个「切集群就会炸」的缺口。**
+
+napstarweb 树里有 **10 处** `redisTemplate.executePipelined(...)`，**一处集群分支都没有**；
+而 SDR 2.7.18 在 Redis Cluster 模式下**必然抛 `UnsupportedOperationException`** ——
+`JedisClusterConnection.openPipeline()` 直接抛，`RedisTemplate.executePipelined`
+是**先 `openPipeline()` 再执行回调体** → **回调体一次都不执行，Redis 命令一条都没发出去**。
+
+napstarweb 已被配成 `oms.redisMode: cluster`（第十三轮改的）→ **按待办清单填完地址就会炸**：
+
+1. `StartupRunner` 初始化被中断 → **应用启动成功、功能却是残的**
+2. `RTListener`（`COMMITDATAINCRE`）抛异常 → Spring Kafka 默认错误处理器
+   **跳过并提交 offset** → **实时数据增量静默丢失**
+
+**platform 树的 11 处早就有 `isCluster()` 分支**（第十轮做的）→ **只有 napstarweb 漏了**。
+根因：第十三轮统一 Redis 基础设施时只补了**配置契约**，没管**调用点**。
+
+### 本轮做了什么
+
+| 项 | 结果 |
+|---|---|
+| 实测 | 真集群探针（`%TEMP%\opencode\probe\`）：`executePipelined` 两个重载都抛；对照组 `opsForHash().putAll()` 正常 → **集群本身没问题** |
+| 站点清单 | **10 处**（4 个单 key 写 + 6 个多 key 读）全部定位到文件+行号+方法名 |
+| 设计 | `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md`（`bbd0b2e`）—— 用户逐节确认 |
+| 计划 | `docs/superpowers/plans/2026-10-30-napstarweb-cluster-branch.md`（`6efe15d`）—— **15 个 Task** |
+| **生产代码** | **一行没改**（两棵 Java 树一个字都没动） |
+| 测试 | **没新增** |
+| 文档 | 只写了 spec / plan / 存档三份；`OPERATIONS.md` 与 `HANDOFF.md` 的正文更新在计划 Task 13 |
+
+### 用户已定的 6 个决定
+
+| # | 决定 |
+|---|---|
+| 1 | 多 key 读的集群分支**在 oms 补 `getAllHashes`**（不写在 napstarweb 本地） |
+| 2 | **`sche-viewer-server` 本轮不动**（模块不参与构建、standalone），只写进文档 |
+| 3 | 测试策略：**核心测 oms + 仓库静态守卫**（不给 napstarweb 建测试基建） |
+| 4 | 集群分支**统一用 `redisTemplate.execute(cb)`**（回调体逐字复用，不改 `GraphDataService` 接口签名） |
+| 5 | 2 个 string 读站点**也做节点分组**（`getAllValues`） |
+| 6 | 设计 §1–§6 **已逐节确认** |
+
+### 下一步
+
+**从计划的 Task 0 开始**（备份 11 个文件的基线 —— 两棵 Java 树不是 git 仓库，
+基线丢了就永远拿不回来）。完整清单见计划文件的「完成判据」。
+
+---
+
 ## 会话存档（2026-10-30）：第十七轮结束时的完整状态
 
 **这一节是给「下一个会话」看的** —— 打开仓库先读这一节，能立刻知道现在是什么状态、
@@ -2764,6 +2829,7 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 > ⚠️ **本节已更新到第十七轮**（下面第十六轮、第十五轮、第十四轮的内容仍然有效，
 > 但「验证基线」和「下一次该做什么」两节以第十七轮的为准）。
+> ⚠️ **第十八轮的存档在上一节** —— 第十七轮及更早的内容仍然有效。
 
 > **✅ 会话已于 2026-10-30 收尾。** 收尾时复核过的状态：
 >
