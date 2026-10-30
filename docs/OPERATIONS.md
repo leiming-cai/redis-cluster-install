@@ -24,7 +24,7 @@
 | 你的任务 | 路线 | 预计耗时 |
 |---|---|---|
 | **首次部署**：两台机器装集群 → 程序连上去 | §1 → §2 → §3（可选）→ §4 → §5 | 半天 |
-| **排障**：程序连不上 / 读写报错 | §1.1 → §4.5 → §5.5 → §7 | 15 分钟 |
+| **排障**：程序连不上 / 读写报错 | §1.1 → §4.6 → §5.5 → §7 | 15 分钟 |
 | **扩容**：加机器 / 加实例 / 中间件改集群 | §2.5 → §3.3 → §6 | 1 小时 |
 
 ### 0.2 与其它文档的分工
@@ -121,12 +121,12 @@
 | 4 | `cluster-config.sh` 执行组网 | §2.3 |
 | 5 | 验证集群健康（`cluster_state:ok` / 16384 槽 / 6 节点） | §2.3 |
 | 6 | （可选）ZooKeeper / Kafka 切两节点集群 | §3 |
-| 7 | 填 Nacos 里的 `oms:` 与 `spring.kafka.*` 真值（**三个应用各一份**，见 §4.4） | §4.4 |
+| 7 | 填 Nacos 里的 `oms:` 与 `spring.kafka.*` 真值（**三个应用各一份**，见 §4.5） | §4.5 |
 | 8 | 构建 → 启动 → 验证读写 | §5 |
 
 > ⚠️ **第 2 步和第 7 步必须用同一个密码**。脚本侧写 `cluster.conf`，
 > 程序侧写 Nacos 的 `oms.password`，两边不一致 = 认证失败。
-> 见 §4.4 的清单。
+> 见 §4.5 的清单。
 
 ---
 
@@ -191,7 +191,7 @@ vim cluster.conf
 redis_prefix = /opt/software/redis
 
 # 集群密码。必填。
-# ⚠️ 这个值必须与 Nacos 里 oms.password 完全一致（见 §4.4）
+# ⚠️ 这个值必须与 Nacos 里 oms.password 完全一致（见 §4.5）
 cluster_password = <集群密码>
 
 # redis.conf 的 bind 地址
@@ -737,7 +737,8 @@ Kafka 从单 broker 切成两 broker 后，**程序侧必须同步改**，否则
 
 > ⚠️ **realserver / napstarweb 也要改** —— 它们**不读** `share_base.yaml`
 > （见 §4.3），`spring.kafka.*` 得放进**它们自己 group 的 dataId**。
-> 完整清单见 §4.4 的 #11–#20。
+> 完整清单见 §4.5 的 #11–#20；
+> **可直接粘贴的 YAML 配置块见 §4.4**。
 
 **另外三个要确认的**：
 
@@ -826,7 +827,7 @@ oms:
   minIdle: 10
 ```
 
-**⚠️ `127.0.0.1:6379` 和空密码是占位符，不是真值。** 见 §4.4。
+**⚠️ `127.0.0.1:6379` 和空密码是占位符，不是真值。** 见 §4.5。
 
 > **端口和 context-path 不在这个文件里** —— 三个 `application.yml` 的 `server:` 块
 > **是注释掉的**，真值在 Nacos（§4.3）。
@@ -859,7 +860,7 @@ Nacos 地址都是 `node1:18848`。
 > realserver 和 napstarweb 的 `bootstrap.yml` 里**没有** `shared-configs` /
 > `extension-configs` 指向 `ext_base.yaml` → 它们**根本不会去读那个文件**。
 > 如果只改了 `ext_base.yaml`，这两个应用会静默地用**本地 `application.yml` 里的
-> 占位符** `127.0.0.1:6379` + 空密码 → 启动看着正常，**第一次读写才炸**（§4.5）。
+> 占位符** `127.0.0.1:6379` + 空密码 → 启动看着正常，**第一次读写才炸**（§4.6）。
 
 **`ext_base.yaml` 现在的内容**（实测解压 Nacos 导出包确认）：
 
@@ -934,7 +935,217 @@ spring:
 > `*** Using Redis Cluster with nodes: <节点列表>` **逐字打印生效值**。
 > 改完配置 → 重启 → **看这行**。行里的节点列表就是真正生效的值。
 
-### 4.4 ⭐ 生产真值填写清单
+### 4.4 Kafka 集群的 YAML 配置（可直接粘贴）
+
+#### 4.4.1 三个应用本地 `application.yml` 的现状
+
+**三个应用的 `spring.kafka` 块全部是注释掉的，或者压根没有**：
+
+| 应用 | 本地 `application.yml` 里的 `spring.kafka` |
+|---|---|
+| realserver | **没有**（文件共 40 行，`spring:` 整块是注释；生效的只有 `logging:` / `commitdata:` / `oms:`） |
+| modelserver | **没有**（`spring:` 整块是注释） |
+| napstarweb | **有，但整块是注释**（`bootstrap-servers` 指向一个**旧的单 broker 生产地址** / `group-id: svg` / `max-poll-records: 100000`） |
+
+> **所以生产上 Kafka 连接串的唯一来源是 Nacos。**
+> 要本地离线跑 Kafka，得先把注释解开 —— 注意注释里那个 `bootstrap-servers`
+> 是**旧的单 broker 生产地址**，不是集群地址。
+
+#### 4.4.2 集群版 YAML 完整配置块
+
+下面这份是**两 broker 集群**下三个应用都适用的配置。
+放进 **Nacos 里该应用自己 group 的 dataId**（见 §4.3），或解开本地 `application.yml` 的注释。
+
+```yaml
+spring:
+  kafka:
+    # 集群：多个 broker 用逗号分隔。客户端从任意一个连上，
+    # 再通过 CLUSTER/metadata 拿到全部 broker 的地址。
+    # ⚠️ 填的必须是「客户端能访问到的地址」——
+    #    填容器内网 IP，宿主机上的程序连不上；
+    #    填 127.0.0.1，容器里的程序连不上。
+    bootstrap-servers: <A机IP>:9092,<B机IP>:9092
+
+    producer:
+      # acks=all + 幂等，避免 acks 超时重发产生重复消息
+      # （实测一次 publish 出现过 12,763 条重复）
+      acks: all
+      retries: 6
+      batch-size: 20
+      buffer-memory: 33554432
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        linger.ms: 1
+        # 幂等不是默认项，要显式开
+        enable.idempotence: true
+
+    listener:
+      # batch = 批量消费；concurrency 是消费线程数
+      type: batch
+      concurrency: 1
+
+    consumer:
+      # consumer 侧也可以单独指定（不写就用上面的 bootstrap-servers）
+      bootstrap-servers: <A机IP>:9092,<B机IP>:9092
+      # ⚠️ 换 group-id = 换消费组 = 重新消费全量。切集群时不要顺手改它。
+      group-id: sac
+      enable-auto-commit: false
+      # latest = 只消费启动之后的新消息；earliest = 从头消费
+      # ⚠️ 改这个会改变起点，同样要当心
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ⚠️ 生产值是 100000。Boot 默认是 500 —— 差 200 倍，
+      #    500 时 pipeline 摊薄得极差，是吞吐上限的真实原因之一。
+      max-poll-records: 100000
+```
+
+> ⚠️ **键名写错不会报错，只会被静默忽略。**
+> `KafkaProperties` 上的 `@ConfigurationProperties(prefix = "spring.kafka")`
+> **没有**关掉 `ignoreUnknownFields`，而它的**默认值就是 `true`**
+> （已对 `spring-boot-autoconfigure-2.7.18.jar` 与
+> `spring-boot-2.7.18.jar` 反编译确认）。
+>
+> 后果：`spring.kafka.consumers.group-id`（少个 `r`）、`max-poll-record`（少个 `s`）
+> 这类拼写错误**启动时一声不吭**，那个配置就是**不生效**。
+>
+> **所以别信"启动没报错"，要信"值生效了"** —— 用 §4.4.6 的方法逐项确认。
+
+**本文档用到的键，全部对着 `spring-boot-autoconfigure-2.7.18.jar` 反编译验证过**：
+
+| 键 | 在 jar 里的位置 |
+|---|---|
+| `spring.kafka.bootstrap-servers` | `KafkaProperties.bootstrapServers` |
+| `spring.kafka.consumer.bootstrap-servers` | `KafkaProperties$Consumer.bootstrapServers` |
+| `spring.kafka.consumer.group-id` / `enable-auto-commit` / `auto-offset-reset` / `key-deserializer` / `value-deserializer` / `max-poll-records` | `KafkaProperties$Consumer.*` |
+| `spring.kafka.producer.acks` / `retries` / `batch-size` / `buffer-memory` / `key-serializer` / `value-serializer` | `KafkaProperties$Producer.*` |
+| `spring.kafka.producer.properties.*` | `KafkaProperties$Producer.properties`（`Map<String,String>`，任意键） |
+| `spring.kafka.listener.type` / `concurrency` | `KafkaProperties$Listener.*` |
+
+> `spring.kafka.producer.bootstrap-servers` 也是真键（`KafkaProperties$Producer.bootstrapServers`），
+> 但**一般不用写** —— 顶层那个 `spring.kafka.bootstrap-servers` 已经够用。
+
+#### 4.4.3 每个应用放在哪、消费什么
+
+**三个应用都用 Kafka**（`realserver` 的 `rtdata-module` 里就有 `RTListener`），
+所以三个都要配：
+
+| 应用 | `spring.kafka` 放哪 | 消费的 topic | 源码位置 |
+|---|---|---|---|
+| **realserver** | **它自己 group** 的 `icms-real-controller.yaml` | `COMMITDATA`、`INCDATA`、`QUERYRESPONSE`、`COMMITDATAINCRE` | `realserver/plugins/rtdata-module/.../kafka/RTListener.java` |
+| **modelserver** | `DEFAULT_GROUP/share_base.yaml` | `COMMITDATA` 等（`commitDataIncreModule` / `hisDataModule` / `services`） | `modelserver/plugins/...`、`modelserver/services/...` |
+| **napstarweb** | **它自己 group** 的 `napstarweb-controller.yaml` | `COMMITDATAINCRE`（`monitor` 模块）、`REALALARM`（`realalarmconsumer` 插件） | `napstarweb/monitor/.../kafka/RTListener.java`、`napstarweb/plugins/realalarmconsumer/.../RealAlarmListener.java` |
+| rtdata-consumer | 它自己的 `icms-rtdataconsumer.yaml` | `INCDATA`（写 Redis 的那条链路） | `realserver/plugins/rtdata-consumer` |
+
+> ⚠️ **`REALALARM` 那条 listener 的消费组是硬编码在注解里的**：
+> `@KafkaListener(id = "test-xy8", topics = "REALALARM")`。
+> `@KafkaListener` 上有 `id` 时，**它覆盖** `spring.kafka.consumer.group-id`。
+> 所以 `realanodiaconsumer.yaml` 里那个 `group-id: test-xy8` 其实是**一致的**，
+> 但你改 `spring.kafka.consumer.group-id` **改不动它** —— 要改得改注解。
+
+> ⚠️ **生产上没有 `COMMITDATAINCRE` 这个 topic。**
+> `2start_kafka.sh` 只建了 QUERYREQUEST / COMMITDATA / INCDATA / QUERYRESPONSE / REALALARM
+> 五个；`COMMITDATAINCRE` 是**靠 Kafka 的 auto-create 自动建**的
+> （生产 `server.properties` 没设 `auto.create.topics.enable`，默认就是 true），
+> 于是拿到的是 **`num.partitions=1`、RF=1** 的默认配置 ——
+> **不是集群版的 2 分区 / RF=2**。要一致就得手工建（§3.2）。
+
+#### 4.4.4 唯一一份"活"的例子：`rtdata-consumer`
+
+`realserver/plugins/rtdata-consumer/src/main/resources/application.yml` 是仓库里
+**唯一一份生效的 Kafka 配置**（第十一轮改成从 yaml 取配置）。它同时含
+Redis 与 Kafka 两块，可以直接当模板抄：
+
+```yaml
+server:
+  port: 8092
+
+spring:
+  kafka:
+    bootstrap-servers: 172.21.0.2:9092,172.21.0.3:9092
+    consumer:
+      bootstrap-servers: 172.21.0.2:9092,172.21.0.3:9092
+      group-id: rc-kafka-cluster-1793069287
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    listener:
+      type: batch
+      concurrency: 1
+
+oms:
+  redisMode: cluster
+  clusters:
+    - 172.21.0.2:6379
+    - 172.21.0.2:6380
+    - 172.21.0.3:6382
+  password: <集群密码>
+  database: 0
+  timeout: 5000
+
+commitdata:
+  inclusions:
+    object-type:
+      "31": DPSPoint
+      "33": MVPoint
+```
+
+> ⚠️ **这里的地址是 E2E 集群的临时地址，不能带进生产。**
+> 生产配置来自 Nacos（`share_base` 提供 `spring.kafka.*`，
+> `ext_base` 提供 `oms.*`），不是这个文件。
+
+#### 4.4.5 命令行覆盖写法
+
+不连 Nacos 时，用命令行参数临时覆盖（**这是本项目验证配置生效的标准手法**）：
+
+```bash
+java -jar rtdata-consumer-1.0.14.jar \
+  --spring.cloud.nacos.config.enabled=false \
+  --spring.cloud.nacos.discovery.enabled=false \
+  --spring.kafka.bootstrap-servers=<A机IP>:9092,<B机IP>:9092 \
+  --spring.kafka.consumer.bootstrap-servers=<A机IP>:9092,<B机IP>:9092 \
+  --spring.kafka.consumer.group-id=<新的组> \
+  --spring.kafka.consumer.auto-offset-reset=earliest \
+  --spring.kafka.listener.type=batch \
+  --spring.kafka.listener.concurrency=2 \
+  --oms.redisMode=cluster \
+  --oms.clusters[0]=<A机IP>:6379 \
+  --oms.clusters[1]=<B机IP>:6382 \
+  --oms.password='<集群密码>' \
+  --server.port=8092
+```
+
+> ⚠️ **索引型参数要带引号**：`"--Dspring.kafka.consumer.bootstrap-servers=..."`。
+> ⚠️ **`mvn spring-boot:run` 会 fork 新 JVM，不传递 Maven 的 `-D` 系统属性** ——
+> 要写 `"-Dspring-boot.run.jvmArguments=-D..."`。直接 `java -jar` 没这个问题。
+
+#### 4.4.6 改完怎么验
+
+**① 确认连上了哪个集群**
+
+```bash
+# 客户端视角：列出 broker
+kafka-broker-api-versions.sh --bootstrap-server <A机IP>:9092,<B机IP>:9092
+```
+
+**② 确认消费组在消费、分区已分配**
+
+```bash
+kafka-consumer-groups.sh --bootstrap-server <A机IP>:9092,<B机IP>:9092 \
+  --describe --group <group-id>
+```
+
+期望看到每个分区都有 `CURRENT-OFFSET`，且 **ACTIVE CONSUMER 数 = 分区数**。
+RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
+所以期望 **2 个消费者**。
+
+**③ 确认没有积压**
+
+`kafka-consumer-groups.sh --describe` 的 `LAG` 列应为 0（或持续下降）。
+
+---
+
+### 4.5 ⭐ 生产真值填写清单
 
 **这是本手册最该被打印出来的一页。**
 
@@ -965,7 +1176,7 @@ spring:
 >
 > > **如果只改了 `ext_base.yaml`**，realserver 和 napstarweb **读不到** →
 > > 它们会用本地 `application.yml` 的占位符 `127.0.0.1:6379` + 空密码 →
-> > **启动正常、第一次读写才炸**（§4.5 第一种下场）。
+> > **启动正常、第一次读写才炸**（§4.6 第一种下场）。
 > > 这是本手册里**最容易踩**的一个坑。
 
 #### Kafka 侧（§3 做完集群后）
@@ -986,7 +1197,7 @@ spring:
 | 19 | 两台节点的 `server.properties` | `broker.id` / `advertised.listeners` / `zookeeper.connect` / `default.replication.factor` / `offsets.topic.replication.factor` | 见 §3.2 | 切集群时 ✅ |
 | 20 | `安装包/bin/2start_kafka.sh` | `KAFKA_ADDRESSES` + 建 topic 的 `--replication-factor` | **该文件不在本仓库**（属于另一个交付物），见 §3.3 | 切集群时 ✅ |
 
-### 4.5 改错的实测症状
+### 4.6 改错的实测症状
 
 **这三种下场都实测过，不是推理**：
 
@@ -1007,7 +1218,7 @@ spring:
 | `No qualifying bean of type 'RedisConnectionFactory'` | `redisMode` 写成了不认识的值（老版本还大小写敏感） |
 | `oms.clusters must be configured when oms.redisMode=cluster` | `redisMode=cluster` 但 `clusters` 没填或填成了空 |
 | `JedisNoReachableNodeException: No reachable node in cluster` | 节点地址不可达，或 `password` 不对 |
-| `NOAUTH Authentication required` | `oms.password` 与集群密码不一致（见 §4.4 的三处一致） |
+| `NOAUTH Authentication required` | `oms.password` 与集群密码不一致（见 §4.5 的三处一致） |
 
 ---
 
@@ -1134,7 +1345,7 @@ java -jar portal-controller-1.0.14.jar \
 **这一行逐字打印了生效的节点列表** —— 它是判断"你的配置到底生效了没有"的**唯一可靠依据**。
 
 > 行里的节点列表**不是**你配置文件里写的那个列表，就说明**配置没生效**
-> （被别处覆盖了，或者改错了文件）。回去查 §4.4 的清单。
+> （被别处覆盖了，或者改错了文件）。回去查 §4.5 的清单。
 
 其它模式的对应行：
 
@@ -1151,7 +1362,7 @@ java -jar portal-controller-1.0.14.jar \
 
 ### 5.4 端到端验证读写
 
-**光看启动日志不够** —— §4.5 说过的第一种下场（6379 上什么都没有）是
+**光看启动日志不够** —— §4.6 说过的第一种下场（6379 上什么都没有）是
 **启动正常、第一次读写才炸**。必须做一次真实读写。
 
 ```bash
@@ -1273,7 +1484,7 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 | `Cannot find master to join` / `Unable to connect to any of the peers` | **集群总线端口没放行**（业务端口 + 10000） | 放行 16379-16384，重跑 `cluster-config.sh` |
 | `ERR This instance has cluster support disabled` | 程序连的是单机 Redis，却声明了 `cluster` | 检查 Nacos 的 `oms.redisMode` / `oms.clusters` |
 | `JedisNoReachableNodeException` | 节点地址不可达，或密码不对 | `redis-cli -c -a '<密码>' -h <节点> -p 6379 PING` 逐个试 |
-| `NOAUTH Authentication required` | `oms.password` 与集群密码不一致 | 见 §4.4 的"三处一致" |
+| `NOAUTH Authentication required` | `oms.password` 与集群密码不一致 | 见 §4.5 的"三处一致" |
 | `cluster_state:fail`，节点全 `disconnected` | 节点之间连不上 | 查总线端口；查 `ulimit -n`（需 ≥ 10001） |
 | `Fatal error, can't open config file ...: Permission denied` | `/etc/redis` 父目录属主是旧 uid，redis 穿不过去 | 重跑 `cluster-config.sh`（它会 chown 父目录） |
 | `status=226/NAMESPACE` 启动失败 | systemd 单元里 `ReadWritePaths=` 有**不带 `-`** 的路径，而它不存在 | 用仓库的模板（都带 `-` 前缀） |
@@ -1291,6 +1502,12 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 | `under-replicated partitions` 非空 | 副本没跟上 | 查 broker 是否都在 `/brokers/ids` 里；查 ISR |
 | 只有一个 broker 在注册 | 第二个 broker 的 `zookeeper.connect` 写错 | 核对 `server.properties` |
 | `NoNode` / 连接拒绝 | ZK 没起 | `zkServer.sh status` 看 Mode |
+| 程序报 `Connection to node -1 could not be established` | `spring.kafka.bootstrap-servers` 没填，或填的是**客户端访问不到的地址** | 见 §4.4.2 —— 填**两个 broker**，且是客户端能访问到的地址 |
+| 程序连上了但**收不到消息** | topic 不存在（靠 auto-create 建的只有 1 分区 / RF=1），或 `auto-offset-reset` 是 `latest` 从最新开始 | `kafka-topics.sh --describe` 确认分区数与 RF；需要重放就改 `auto-offset-reset: earliest` + 换 group-id |
+| `spring.kafka.consumer.group-id` 改了却没生效 | 那个 listener 的 `@KafkaListener(id = "...")` **覆盖**了它 | 改注解（§4.4.3） |
+| 吞吐上不去，每批只有 500 条 | `max-poll-records` 没配，生效的是 Boot 默认 **500** | 配成 `100000`（§4.4.2） |
+| 消息**重复** | 生产端 `acks=all` 但**没开幂等** | `spring.kafka.producer.properties.enable.idempotence: true` |
+| 改了 `spring.kafka.*` **完全没反应** | 键名拼错了 —— 未知键**被静默忽略**，不报错 | 对照 §4.4.2 的键表核对拼写；用 §4.4.6 确认值真的生效 |
 
 ### 7.3 程序
 
@@ -1298,9 +1515,9 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 |---|---|---|
 | 启动报 `No qualifying bean of type 'RedisConnectionFactory'` | `redisMode` 值不合法（或老版本大小写敏感） | 改成 `standalone`/`cluster`/`sentinel` 之一 |
 | 启动报 `oms.clusters must be configured...` | `redisMode=cluster` 但 `clusters` 空 | 填 `clusters` |
-| 启动正常但**第一次读写**报 `No reachable node` | `oms.clusters` 指向了空地址 | 见 §4.5 |
+| 启动正常但**第一次读写**报 `No reachable node` | `oms.clusters` 指向了空地址 | 见 §4.6 |
 | 只有 modelserver 变了，realserver / napstarweb 没变 | 只改了 `DEFAULT_GROUP/ext_base.yaml`，而那两个应用**根本不读它**（§4.3） | `oms:` 要在**三个应用各自的** Nacos dataId 里都填一遍 |
-| 日志里没有 `*** Using Redis Cluster with nodes:` | 配置没生效 / `redisMode` 不是 cluster | 按 §4.4 核对，Nacos 与本地 yaml 都要查 |
+| 日志里没有 `*** Using Redis Cluster with nodes:` | 配置没生效 / `redisMode` 不是 cluster | 按 §4.5 核对，Nacos 与本地 yaml 都要查 |
 | 启动多花 12 秒 | Nacos 连不上，在 grpc 超时 | 关掉 Nacos 开关（只在离线调试时） |
 | 构建报 `Can't read .../jre/lib/rt.jar` | 用错了 JDK | `JAVA_HOME` 指到 JDK 8 |
 | 构建报莫名其妙的语法错误 | VSCode ECJ 污染了 `target/classes` | **等 8 秒**再重新构建 |
@@ -1401,6 +1618,10 @@ docs/superpowers/patches/             Java 侧的改动留痕（Java 树不是 g
 | 11 | 生产 `max-poll-records` 是 **100000**，测试里生效的是 Boot 默认 **500** |
 | 12 | 源码 artifactId 与部署 jar 名**不一样**（`model-controller` → `portal-controller-*`） |
 | 13 | `install.sh --yes` **不可用**（无条件中止，且报错文案误导） |
+| 14 | 三个应用的本地 `application.yml` 里 **`spring.kafka` 全是注释掉的或压根没有** —— 生产 Kafka 连接串的唯一来源是 Nacos |
+| 15 | `REALALARM` 那条 listener 的消费组 **硬编码在 `@KafkaListener(id = "test-xy8")`** 里，改 `spring.kafka.consumer.group-id` 改不动它 |
+| 16 | 生产**没有** `COMMITDATAINCRE` 这个 topic，靠 auto-create 自动建 —— 拿到的是 **1 分区 / RF=1**，不是集群版的 2 分区 / RF=2 |
+| 17 | 三个应用**全都用 Kafka**：realserver 消费 4 个 topic，napstarweb 消费 2 个（§4.4.3） |
 
 ---
 
