@@ -19,16 +19,17 @@
 
 - [x] 1. 探索项目上下文（代码 / 配置 / 依赖链 / 实测探针）
 - [x] 2. 视觉伴侣 —— 不适用（后端 Java 改造，无视觉问题）
-- [ ] 3. 逐个提问澄清（一次一个）
-      - [ ] Q1 多 key 读的集群分支落在哪
-      - [ ] Q2 sche-viewer-server 的 15 处是否纳入本轮
-      - [ ] Q3 napstarweb 没有测试基建 → 新测试放哪
-      - [ ] Q4 `handleModeDataByObid(..., RedisConnection, ...)` 签名怎么改
-- [ ] 4. 提 2–3 个方案 + 权衡 + 推荐
-- [ ] 5. 分段呈现设计，逐段确认
-- [ ] 6. 写设计文档 `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md` + 提交
-- [ ] 7. spec 自审（占位符 / 矛盾 / 歧义 / 范围）
-- [ ] 8. 用户复核 spec
+- [x] 3. 逐个提问澄清（一次一个）
+      - [x] Q1 多 key 读的集群分支落在哪 → **oms 补 getAllHashes**
+      - [x] Q2 sche-viewer-server 的 15 处是否纳入本轮 → **本轮不动，只写文档**
+      - [x] Q3 napstarweb 没有测试基建 → 新测试放哪 → **核心测 oms + 仓库静态守卫**
+      - [x] Q4 集群分支怎么执行回调体 → **统一用 `redisTemplate.execute(cb)`**
+      - [x] Q5（追加）2 个 string 读站点 → **也做节点分组 `getAllValues`**
+- [x] 4. 提方案 + 权衡 + 推荐（Q1/Q3/Q5 各带 2–3 个选项）
+- [x] 5. 分段呈现设计（§1–§3、§4–§6），逐段确认
+- [x] 6. 写设计文档 `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md` + 提交（`bbd0b2e`，已推送）
+- [x] 7. spec 自审 —— 修了 3 处歧义（`keys` 提法、注入方式、string 读的对称性）
+- [ ] 8. 用户复核 spec ← **当前**
 - [ ] 9. 转入 writing-plans
 
 ## 关键事实速查
