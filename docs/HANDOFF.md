@@ -1,7 +1,7 @@
 # cluster-config.sh 实施进度交接
 
-**更新时间**：2026-10-30（会话收尾；第十六轮的工作全部完成并已推送）
-**工作分支**：无 —— 第七~十六轮都在 `main` 上，**全部已推送**
+**更新时间**：2026-10-30（会话收尾；第十七轮的工作全部完成并已推送）
+**工作分支**：无 —— 第七~十七轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
 **基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十三轮已推送
 （`521f244..aadcbb9`）；**第十四轮又推了 `80ad557`**（修 `check-bash-compat.sh`
@@ -10,11 +10,49 @@
 **`09e080a`**（会话存档）；**第十六轮推了 `9be5aec`**（CI 语法覆盖面 15→28）、
 **`c873d04`/`da93756`**（合并两套 RedisUtil 的设计与计划）、
 **`ba5b0f6`**（计划进度）、**`389547b`**（**第十六轮的代码 + patch + 文档**）、
-**`cebb6ca`**（最终审查查出的文档数字更正）。
+**`cebb6ca`**（最终审查查出的文档数字更正）；
+**第十七轮推了 `18f81a0`**（操作手册的设计）、
+**`22f8fdb`**（设计补 ZK/Kafka 章）、
+**`e84a9c8`**（**新增 `docs/OPERATIONS.md`（1297 行）+ README/USAGE 互链 + 修 `install.sh --yes` 的假帮助文本**）、
+**`dde7c52`**（**补上 Kafka 集群在 YAML 里的配置**）。
 当前 bats **203 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0），
 `oms` **66 通过 / 0 失败 / 0 跳过**（含 3 条新增的真集群用例），
 `idgenerator` **6 通过 / 0 失败**（第十五轮 3 条 + 第十六轮 3 条），
 `rtdata-module` **14 通过 / 0 失败**
+
+> **⭐ 2026-10-30 会话复核（第十七轮：写一份端到端操作手册）**
+>
+> 这一轮**一行生产代码都没改**（只改了 `install.sh` 的一段**帮助注释**），
+> 产出的是**文档**：`docs/OPERATIONS.md`（1297 行，8 章）。
+>
+> **为什么写它**：`docs/USAGE.md` 只讲**脚本**，
+> 而「程序侧的 YAML 怎么配、程序怎么构建启动验证、ZK/Kafka 怎么组集群」
+> **在任何地方都没有可操作说明** —— 只散落在本文件的会话记录里。
+>
+> | 项 | 结果 |
+> |---|---|
+> | 新文件 | `docs/OPERATIONS.md`（1297 行 / 8 章）+ 2 份 spec（`18f81a0`、`22f8fdb`） |
+> | 配套改动 | `README.md` 加入口、`docs/USAGE.md` 加互链（各 +5 行） |
+> | `install.sh` | **只改注释**：帮助文本说 `--yes` 能用，实现却无条件 `die`（见下） |
+> | 验证 | bats **203/0**、`check_syntax` **45/0**、`validate_libs` **54/0** |
+>
+> **⭐ 这一轮查出来的三个「会烧掉实施人员一小时」的坑**
+> （都不是读文档能看出来的，全部是实读源码 / 实解压 Nacos 导出包 / 实连容器查出来的）：
+>
+> | # | 坑 | 后果 |
+> |---|---|---|
+> | 1 | **三个应用从 Nacos 拉的东西不一样** —— 只有 modelserver 引用了 `DEFAULT_GROUP/ext_base.yaml`；realserver / napstarweb **压根不读它** | 只改 `ext_base.yaml` 的话，那两个应用**读不到** → 静默用本地 `application.yml` 的占位符 `127.0.0.1:6379` + 空密码 → **启动正常、第一次读写才炸** |
+> | 2 | **`install.sh --yes` 完全没实现** —— flag 被接受但无条件 `die`，且报错让去设 `A_USER`/`A_HOST` 等环境变量，**代码从不读它们** | 照帮助文本走会白折腾一轮 |
+> | 3 | **生产上没有 `COMMITDATAINCRE` 这个 topic** —— `2start_kafka.sh` 只建 5 个；它是靠 Kafka 的 **auto-create** 自动建的 → 拿到 **`num.partitions=1`、RF=1**，不是集群版的 2 分区 / RF=2 | 集群化后这个 topic 的副本/分区数与预期不符 |
+>
+> **另有两个「不写规则、给判据」的地方**（本项目的规矩：没跑过的假设不写成规则）：
+> ① **Nacos 与本地 `application.yml` 谁覆盖谁** —— `share_base.yaml` 里有
+> `spring.cloud.config.override-none: true`，而这个开关自己就在远端配置里，
+> **本轮没实测** → 改给可验证判据：**启动日志那行
+> `*** Using Redis Cluster with nodes: <节点列表>` 逐字打印生效值**；
+> ② **各应用 dataId 的 group 名** —— 源码 `bootstrap.yml` 写
+> `MODELSERVER_GROUP`/`NAPSTARWEB_GROUP`，而 Nacos 导出包里在 `PORTAL_GROUP`。
+> `DEFAULT_GROUP` 那两份两边一致、确定；**各应用自己那份请到控制台按 dataId 查一眼再改**。
 
 > **⭐ 2026-10-29 会话复核（第十六轮：合并两套 `RedisUtil`）**
 >
@@ -192,21 +230,26 @@ SDR 2.7.18 大多**不抛**，而是**静默降级**成非原子的客户端实�
 （命令行可以完全不传配置），并修掉脚本里三个会「让正确的运行变红」的缺陷。
 详见下文「第十一轮」。
 
-**下一步**（第十五轮结束后，详见「会话存档（2026-10-29）」）：
-① **填生产真值** —— 三个 `application.yml` 的 `oms.clusters` 现在是**占位符
-`127.0.0.1:6379`**、`password` 是空串，必须换真值并同步 Nacos；
+**下一步**（第十七轮结束后，详见「会话存档（2026-10-30）」）：
+① **填生产真值** —— 这是**唯一的「欠账」**，现在**有了一份可照做的清单**：
+`docs/OPERATIONS.md` §4.5（Redis 侧 10 行 + Kafka 侧 10 行）。
+⚠️ **`oms:` 要在**三个应用各自的** Nacos dataId 里**分别填**（不只是 `ext_base.yaml`）；
 ② 设 `cluster_require_full_coverage=no`（2 机部署必须，否则任一 master 挂 = 全集群停写）；
 ③ **读侧 pipeline**（`findByOtype` 集群下仍是 N 次串行 `HGETALL`）；
 ④ ~~合并**两套** `RedisUtil`~~ —— **✅ 已做（第十六轮）**（不是三套 ——
 modelserver 没有第三套）；反向依赖 `common/idgenerator → realserver/oms` 已消除；
-⑤ **CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`**（真实覆盖面 15 → 28 个文件）；
+⑤ ~~**CI 的 `bash -n` 换成 `bash tests/check_syntax.sh`~~ —— **✅ 已做（第十五轮）**
+（真实覆盖面 15 → 28 个文件）；
 ⑥ （旧的）**别再在这台机器上加并发**（已换出 1.77 GB）；换干净集群重测倍率；
-验证生产值 `max-poll-records=100000`（测试里生效的是 Boot 默认 **500**）。
-
+⑦ **（新）ZK/Kafka 切两节点集群** —— 仓库的 `scripts/e2e-kafka-cluster.sh`
+已经实现了（2 voter ZK + 2 broker Kafka，断言 A1–A7），
+**但只在 Docker E2E 环境验证过、没在真机上验证过**。
+完整流程与配置模板见 `docs/OPERATIONS.md` §3；
 > **✅ 已结案**：jedis 升不升 —— 用户确认**生产必须留在 JDK 8** →
 > jedis **固定 `3.10.0`，不升级**（第十四轮已实测出这个上限）。
 > **✅ 已修（第十五轮）**：`IdUtil` 的 Redis 锁「成功路径从不释放」。
 > **✅ 已修（第十六轮）**：两套 `RedisUtil` 合成一套；`tryLock` 的忙等自旋加了 sleep。
+> **✅ 已修（第十七轮）**：`install.sh --yes` 的帮助文本（在骗人）。
 
 ---
 
@@ -477,6 +520,168 @@ Docker VM        2 vCPU / 3.8 GB；node-a 872MB / node-b 910MB / app 368MB
 
 > 键数比第九轮涨了 6 倍，是这轮每轮 20 万新 obid 累积出来的。
 > 要恢复干净基线，要么删掉 benchmark 数据，要么让脚本复用固定 obid 段（会牺牲抽样检测能力）。
+
+---
+
+## 第十七轮（2026-10-30）：写一份端到端操作手册
+
+**这一轮没改一行生产代码**（只改了 `install.sh` 的一段**帮助注释**）。
+产出的是**文档**。
+
+### 一、为什么写它
+
+| | 覆盖情况 | 位置 |
+|---|---|---|
+| 脚本侧（组网、状态、扩容、卸载） | 完整 | `docs/USAGE.md`（34 KB，**纯脚本**） |
+| 程序侧（YAML 配置、构建、启动、验证） | **完全没有** | 只散落在本文件的会话记录里 |
+
+`docs/HANDOFF.md` 是**交接记录**，不是可操作说明 —— 它记录「做过什么、踩过什么坑」，
+不告诉实施人员「照着哪几步做」。结果是：
+
+- 要读完 200 KB 的交接记录才能拼出一条完整链路；
+- `oms:` 配置块的真值所在**只存在于一句话里**；
+- 仓库里有三份**未填的生产真值**（三个 `application.yml` 的 `oms:` 块全是占位符
+  `127.0.0.1:6379` + 空密码），**没人知道该改哪几处**。
+
+### 二、产出（5 个文件，+1931/-1）
+
+| 文件 | 改动 |
+|---|---|
+| **`docs/OPERATIONS.md`**（**新**，1297 行 / 8 章） | 端到端操作手册 |
+| `docs/superpowers/specs/2026-10-30-operations-manual-design.md`（新，287 行） | 设计（用户逐条确认过） |
+| `README.md` | +5 行，加入口 |
+| `docs/USAGE.md` | +5 行，加互链 |
+| `install.sh` | **只改注释**：帮助文本说 `--yes` 能用，实现却无条件 `die` |
+
+**`docs/OPERATIONS.md` 的章节**：
+
+```
+第 0 章  怎么用这份文档（三条阅读路线 + 与其它文档的分工 + 术语）
+第 1 章  全链路总览（链路图 + 组件/代码位置对照 + 上线 8 步）
+第 2 章  【脚本】已有 Redis 的两台机器如何组网
+         2.1 前置条件逐项核对  2.2 cluster.conf 怎么写  2.3 三步执行
+         2.4 幂等重跑/续跑/回滚  2.5 两台机器的容错硬边界
+第 3 章  【脚本】ZooKeeper + Kafka：从单节点到两节点集群
+         3.1 现状（生产是单节点）  3.2 两节点集群的完整配置
+         3.3 切换流程（6 步）  3.4 断言 A1–A7
+         3.5 两个必须避开的坑  3.6 2 voter ≠ 高可用  3.7 程序侧要跟着改
+第 4 章  【程序】YAML 配置
+         4.1 oms: 逐键说明  4.2 三个应用的 application.yml
+         4.3 Nacos：真值在哪  4.4 Kafka 集群的 YAML 配置（可直接粘贴）
+         4.5 ⭐生产真值填写清单  4.6 改错的实测症状
+第 5 章  【程序】使用：配置 → 构建 → 启动 → 验证
+第 6 章  【其他脚本】运维四件套 + 测试类脚本一览
+第 7 章  故障排查速查表（Redis / ZK+Kafka / 程序，三张表）
+第 8 章  附录（端口表 / 文件布局 / 容易记错的点）
+```
+
+### 三、⭐ 这一轮查出来的三个坑（都不是读文档能看出来的）
+
+#### 坑 1：三个应用从 Nacos 拉的东西**不一样**
+
+`bootstrap.yml` 决定了它读哪些 dataId：
+
+| 应用 | 自己的 group | 额外引用的 dataId | 能读到 `ext_base.yaml` 的 `oms:` 吗 |
+|---|---|---|---|
+| **modelserver** | `MODELSERVER_GROUP` | `share_base.yaml`、`ext_base.yaml`、`napstarmappingconfig.yaml`（都在 `DEFAULT_GROUP`） | ✅ **能** |
+| **realserver** | `MODELSERVER_GROUP` | **无** | ❌ **不能** |
+| **napstarweb** | `NAPSTARWEB_GROUP` | 只有 `kafkabus.yaml` | ❌ **不能** |
+
+**后果**：只改 `DEFAULT_GROUP/ext_base.yaml` 的话，realserver / napstarweb **读不到** →
+静默用**本地 `application.yml` 的占位符** `127.0.0.1:6379` + 空密码 →
+**启动正常、第一次读写才炸**（这正是 §4.6 的「第一种下场」）。
+
+→ 所以 §4.5 的清单里，`oms:` 要在**三个应用各自的** Nacos dataId 里**分别填**。
+`spring.kafka.*` 同理（`share_base.yaml` 也只对 modelserver 生效）。
+
+**实测依据**：解压容器内
+`/opt/cpsweb_install/env/nacos/nacos_config_export_pg.zip`，
+逐个 `cat` 出 `ext_base.yaml` / `share_base.yaml` / `PORTAL_GROUP/*.yaml`。
+
+#### 坑 2：`install.sh --yes` 的帮助文本在骗人
+
+```bash
+# 帮助文本说：
+#   bash install.sh --yes    # non-interactive: re-use cached state if any
+# 实现是：
+ASSUME_YES=1 ;;                    # case --yes|-y
+...
+die "--yes mode requires credentials via env: A_USER A_HOST A_PORT A_PASS ..."
+```
+
+**flag 被接受，然后无条件 `die`**；而且那句报错让去设那 8 个环境变量 ——
+**代码从不读它们**（`A_HOST=""` 是硬编码的空串，只有 `prompt_credentials()` 会赋值）。
+
+→ **只改了帮助注释**（6 行），**零行为变更**。`docs/USAGE.md` §13 里
+「`--yes` 当前不可用」的说法**才是对的**，是帮助文本在骗人。
+
+#### 坑 3：生产上没有 `COMMITDATAINCRE` 这个 topic
+
+`安装包/bin/2start_kafka.sh` 只建 5 个（QUERYREQUEST / COMMITDATA / INCDATA /
+QUERYRESPONSE / REALALARM），**不含** `COMMITDATAINCRE` —— 而 realserver 的
+`RTListener` **要消费它**。
+
+它是**靠 Kafka 的 auto-create 自动建**的（生产 `server.properties` 没设
+`auto.create.topics.enable`，默认就是 true）→ 拿到的是
+**`num.partitions=1`、RF=1** 的默认配置，**不是集群版的 2 分区 / RF=2**。
+
+### 四、⭐ 两个「不写规则、给判据」的地方
+
+**① Nacos 与本地 `application.yml` 谁覆盖谁 —— 不写。**
+`share_base.yaml` 里有 `spring.cloud.config.override-none: true`，
+而这个开关自己就在远端配置里 —— **本轮没有实测过**这个优先级组合。
+按本项目的规矩（"没跑过的假设不写成规则"），改给**可验证的判据**：
+`RedisUtilConfig` 在装配连接工厂时逐字打印生效值 ——
+`*** Using Redis Cluster with nodes: <节点列表> (...)`。
+**改完配置 → 重启 → 看这行。**
+
+**② 各应用 dataId 的 group 名 —— 不替你猜。**
+源码和部署 jar 的 `bootstrap.yml` 写的是 `MODELSERVER_GROUP` / `NAPSTARWEB_GROUP`，
+而**导出包**里这些 dataId 放在 `PORTAL_GROUP`。
+`DEFAULT_GROUP` 下的 `ext_base.yaml` / `share_base.yaml` **两边是一致的**（确定）；
+**各应用自己那份在哪个 group，请到 Nacos 控制台按 dataId 查一眼再改。**
+
+### 五、⭐ Kafka 集群的 YAML（第二轮追加，`dde7c52`）
+
+补了 `docs/OPERATIONS.md` §4.4（6 个子节）：集群版 YAML 完整配置块、
+每个应用放哪/消费什么 topic、命令行覆盖写法、改完怎么验。
+
+**又查出三件事**：
+
+| # | 事实 | 出处 |
+|---|---|---|
+| 1 | 三个应用的本地 `application.yml` 里 **`spring.kafka` 全是注释掉的或压根没有** | 实读三个文件 |
+| 2 | `REALALARM` 那条 listener 的消费组**硬编码在注解里**：`@KafkaListener(id = "test-xy8", topics = "REALALARM")` —— 有 `id` 时**覆盖** `spring.kafka.consumer.group-id` | 实读 `RealAlarmListener.java` |
+| 3 | 三个应用**全都用 Kafka**：realserver 消费 4 个 topic、napstarweb 2 个、modelserver 在 plugins/services 里 | 全树扫 `@KafkaListener`/`KafkaTemplate` |
+
+**还验证了键名的真伪**（本项目规矩：不查源码就不写）：
+反编译 `spring-boot-autoconfigure-2.7.18.jar` + `spring-boot-2.7.18.jar` 确认 ——
+- `spring.kafka.consumer.bootstrap-servers` **是真键**
+  （`KafkaProperties$Consumer.bootstrapServers` 确实存在）——这点一开始不确定；
+- 文档用到的**每一个键**都列了它在 jar 里的对应字段；
+- 顺带发现 `@ConfigurationProperties` 的 `ignoreUnknownFields` **默认是 `true`**
+  → **键名拼错不会报错，只会被静默忽略** → §4.4.2 加了警告，§7.2 加了排障行。
+
+### 六、验证
+
+| 检查 | 结果 |
+|---|---|
+| bats（非特权 uid 1000） | **203 通过 / 0 失败** |
+| `tests/check_syntax.sh` | `TOTAL=45 FAIL=0` |
+| `tests/validate_libs.sh` | `PASS=54 FAIL=0` |
+| `install.sh --help` | 退出码 0，输出含 `Usage:` |
+| 文档内无真实密码 / 真实内网 IP | ✅（`10.137.220.108` 已换成描述性文字） |
+
+**这一轮没有改任何脚本行为**（只有 `install.sh` 的注释），
+所以 E2E / Java 侧基线**不受影响**，沿用第十六轮的结论。
+
+### 七、留痕
+
+| 东西 | 位置 |
+|---|---|
+| **操作手册** | `docs/OPERATIONS.md`（1297 行） |
+| 设计文档 | `docs/superpowers/specs/2026-10-30-operations-manual-design.md`（287 行） |
+| 提交 | `18f81a0`（设计）、`22f8fdb`（设计补 ZK/Kafka）、`e84a9c8`（手册 + 互链 + install.sh 注释）、`dde7c52`（Kafka YAML） |
 
 ---
 
@@ -1611,13 +1816,22 @@ docker network rm rc-cpsweb-net
 
 | 文档 | 路径 |
 |---|---|
+| ⭐**操作手册（照着做的那一份）** | **`docs/OPERATIONS.md`**（第十七轮新增，1297 行 / 8 章） |
+| 脚本逐参数参考 | `docs/USAGE.md` |
+| 验收清单 | `docs/VERIFICATION.md` |
 | 规格（cluster-config.sh） | `docs/superpowers/specs/2026-10-13-redis-cluster-config-script-design.md` |
 | 实施计划（14 个 Task） | `docs/superpowers/plans/2026-10-13-redis-cluster-config-script.md` |
 | 规格（E2E 迁 Redis 8） | `docs/superpowers/specs/2026-10-19-e2e-on-redis-8-design.md` |
 | 实施计划（Redis 8 迁移） | `docs/superpowers/plans/2026-10-19-e2e-on-redis-8.md` |
+| 设计（操作手册） | `docs/superpowers/specs/2026-10-30-operations-manual-design.md`（第十七轮） |
 
 第一轮的规格与计划均已按「脚本建目录、流程 9 步」的决策同步过
 （提交 `a68d7dd`、`75442ed`）；Redis 8 迁移这一轮的 spec / plan 见上表。
+
+> **三个文档的分工**（第十七轮确立）：
+> `OPERATIONS.md` = **按任务组织的端到端手册**（照着做）→
+> `USAGE.md` = **按参数组织的脚本参考**（查选项）→
+> `HANDOFF.md` = **本文件**，结论的来源与踩坑记录（查"为什么"）。
 
 ---
 
@@ -2536,31 +2750,37 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ---
 
-## 会话存档（2026-10-29）：第十六轮结束时的完整状态
+## 会话存档（2026-10-30）：第十七轮结束时的完整状态
 
 **这一节是给「下一个会话」看的** —— 打开仓库先读这一节，能立刻知道现在是什么状态、
 东西在哪、哪些坑踩过了。
 
-> ⚠️ **本节已更新到第十六轮**（下面第十五轮、第十四轮的内容仍然有效，
-> 但「验证基线」和「下一次该做什么」两节以第十六轮的为准）。
+> ⚠️ **本节已更新到第十七轮**（下面第十六轮、第十五轮、第十四轮的内容仍然有效，
+> 但「验证基线」和「下一次该做什么」两节以第十七轮的为准）。
 
 > **✅ 会话已于 2026-10-30 收尾。** 收尾时复核过的状态：
 >
 > | 项 | 结果 |
 > |---|---|
-> | git | `main...origin/main`，**0 ahead / 0 behind**，工作区干净；最后一个提交 `cebb6ca` |
-> | CI | run #30 / #33 / #34 **全部 success**（含新加的 `check_syntax.sh` + `validate_libs.sh` 两步） |
-> | 测试 | bats **203/0**、`check_syntax` exit 0、`validate_libs` exit 0、`oms` **66/0/0 跳过**、`idgenerator` **6/0/0 跳过**、`rtdata-module` **14/0**；两个 reactor（44 / 13）全 SUCCESS |
-> | patch | `2026-10-29-unify-redis-util.patch` 反向校验 exit 0；往返校验 `checked=9 mismatches=0` |
-> | 容器 | `rc-redis-publish` / `rc-cpsweb-app` / `rc-cpsweb-node-a|b` **Up 24 小时 —— 没重启过**，所以 announce 的运行期改动**还在** |
-> | 集群 | `cluster_state:ok` / 16384 slots / 6 nodes / size 3（**2026-10-30 实测**） |
+> | git | `main...origin/main`，**0 ahead / 0 behind**，工作区干净；最后一个提交 `dde7c52` |
+> | 测试 | bats **203/0**、`check_syntax` **TOTAL=45 FAIL=0**、`validate_libs` **PASS=54 FAIL=0** |
+> | Java 侧 | 本轮**未动**（沿用第十六轮：`oms` **66/0/0 跳过**、`idgenerator` **6/0/0 跳过**、`rtdata-module` **14/0**、两个 reactor 44/13 全 SUCCESS） |
+> | 本轮产出 | **`docs/OPERATIONS.md`（1297 行）** + 2 份 spec + README/USAGE 互链 |
+> | 容器 | `rc-redis-publish` / `rc-cpsweb-app` / `rc-cpsweb-node-a|b` **Up 26 小时 —— 没重启过**，所以 announce 的运行期改动**还在** |
+> | 集群 | `cluster_state:ok` / 16384 slots / 6 nodes / size 3（**本轮实测**）；master `dbsize=0`，replica 6382 仍有 **2,748,791** 陈旧 key，`master_link_status:down` |
+> | ZK/Kafka | 两节点集群**仍在跑**：node-a=follower(myid=1) / node-b=leader(myid=2)；broker 1/2；`INCDATA` 2 分区，Leader 1/2，ISR 1,2 |
 >
-> **下一轮不需要重做第十六轮的任何一件事。** 剩下的全是需要**外部输入**或
-> **新设计**的活儿，见下面「四、下一次会话该做什么」。
+> **下一轮不需要重做第十七轮的任何一件事。**
+> 第十七轮把「怎么做」写清楚了；**剩下的全是需要外部输入**或**新设计**的活儿，
+> 见下面「四、下一次会话该做什么」。
 >
 > ⚠️ **唯一要留意的环境变化**：三个 master 现在是**空的**（820 万压测残留被第十六轮的
-> 变异检验误删了），三个 replica 的复制链路**是断的**、还留着 820 万陈旧 key。
+> 变异检验误删了），三个 replica 的复制链路**是断的**、还留着陈旧 key。
 > 详见「三、环境现状」。
+>
+> 📖 **新会话请先读 [`docs/OPERATIONS.md`](OPERATIONS.md)** —— 那是**照着做的那一份**
+> （脚本组网 → YAML 配置 → 程序启动 → 验证，含 ZK/Kafka）。
+> 本文件是**结论的来源与踩坑记录**，不是操作说明。
 
 ### 一、代码在哪、改了什么
 
@@ -2751,6 +2971,14 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
    （`JedisDataException: ERR This instance has cluster support disabled`）。
    真正会「静默连上」的是第三种：6379 上是一个 **Redis Cluster**。
    → 见「下一步具体动作」里建议的 fail-fast 方案。
+   > 📖 **第十七轮已经把这件事变成一张可照做的清单**：
+   > `docs/OPERATIONS.md` **§4.5**（Redis 侧 10 行 + Kafka 侧 10 行，
+   > 每一行都指到**具体文件 + 键名 + 填什么**）。
+   > ⚠️ **别只改 `DEFAULT_GROUP/ext_base.yaml`** ——
+   > **只有 modelserver 读它**；realserver / napstarweb 要在
+   > **它们自己 group 的 dataId** 里各填一份（§4.3）。
+   > 改完**重启并看日志那行** `*** Using Redis Cluster with nodes: <节点列表>`
+   > —— 行里的列表就是真正生效的值。
 2. **`cluster_require_full_coverage=no`**（第十二轮的键）—— 默认 `yes` 时
    **任一 master 挂掉 = 全集群停写**；2 机部署必须设 `no`。
 3. **读侧 pipeline** —— `RedisClusterHashPipeline.getAllHashes`。
@@ -2801,6 +3029,19 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
 12. **（新，第十六轮）`common/utils/redis/RedisLock` 是个孤儿注解** ——
     两个树里**零引用**（它以前也是死的，只是现在那个包里只剩它和 `RedisConfig`）。
     可以删或挪走。
+13. **（新，第十七轮）ZK/Kafka 切两节点集群** —— 仓库的
+    `scripts/e2e-kafka-cluster.sh` 已经实现了（2 voter ZK + 2 broker Kafka，
+    RF=2，断言 A1–A7），**但只在 Docker E2E 环境验证过、没在真机上验证过**。
+    > 📖 完整流程、配置模板与断言清单见 `docs/OPERATIONS.md` **§3**。
+    > ⚠️ **2 voter 不是高可用**（quorum=2，挂一个就失去 quorum）——
+    > 要真容错得 **3 voter**。这是多数派决定的，不是配置能绕过的。
+    > ⚠️ 生产现在是**单节点**，而 `安装包/bin/2start_kafka.sh`
+    > **不在本仓库**（属于另一个交付物），改它要另开一轮。
+    > ⚠️ **生产没有 `COMMITDATAINCRE` 这个 topic** —— 它靠 auto-create 自动建，
+    > 拿到的是 **1 分区 / RF=1**，不是集群版的 2 分区 / RF=2。
+14. **（新，第十七轮）`docs/OPERATIONS.md` 需要持续维护** —— 它现在是
+    「照着做的那一份」，**改动脚本行为或 Nacos 契约时要一并更新它**，
+    否则它会变成下一个「过期文档」。
 
 ### 五、这一轮踩过的坑（**别再踩**）
 
