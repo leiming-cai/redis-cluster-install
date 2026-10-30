@@ -1451,8 +1451,9 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 |---|---|---|
 | `bats tests/lib/*.bats tests/*.bats` | 单元测试（203 条） | bats |
 | `find tests -name '*.bats' -print0 \| xargs -0 bats` | 同上，CI 的调用方式 | bats |
-| `bash tests/check_syntax.sh` | 语法检查（`TOTAL=45`，其中 28 个是真做的 `bash -n`） | bash |
+| `bash tests/check_syntax.sh` | 语法检查（`TOTAL=46`，其中 29 个是真做的 `bash -n`） | bash |
 | `bash tests/validate_libs.sh` | `lib/` 里的纯函数单测（`PASS=54`） | bash |
+| `bash tests/validate_java_pipelines.sh <app-backend> [platform-backend]` | **静态守卫**：napstarweb 树里出现裸 `executePipelined` 就失败（集群模式下 pipeline 必炸 → 实时数据静默丢失），见 §6.3 | bash |
 | `bash scripts/check-bash-compat.sh` | 在 **bash 4.3** 上跑整套 bats —— 唯一能看见那类 bug 的地方 | docker |
 | `bash scripts/e2e-cluster-config.sh` | `cluster-config.sh` 的 Docker 双节点 E2E（断言 A0–A6 + DoD1–DoD7） | docker |
 | `bash scripts/e2e-cpsweb-nodes.sh` | 在 **CPS Web 环境镜像**派生的节点上部署集群并跑消费者写入测试 | docker + `cpsweb-env:1.0` |
@@ -1472,6 +1473,66 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 
 > ⚠️ **`scripts/smoke-test.sh` 不调用 `install.sh`** —— 它在两个容器里手工复刻了一遍
 > 集群搭建流程。**它通过不代表 `install.sh` 本身可用**。
+
+### 6.3 静态守卫：napstarweb 的 Redis pipeline
+
+`tests/validate_java_pipelines.sh` 是一道**静态守卫**，专门防一件事：
+**napstarweb 树里出现裸的 `redisTemplate.executePipelined(...)`**。
+
+> ⛔ **为什么这件事严重**：
+> SDR 2.7.18 在 Redis Cluster 模式下**不支持 pipeline** ——
+> `JedisClusterConnection.openPipeline()` 抛 `UnsupportedOperationException`，
+> 回调体**一次都不执行** → 一条 Redis 命令都发不出去。
+> 后果不是报错，是**静默丢数据**：
+> - `StartupRunner` 的初始化中断 → 应用起来了但功能残废；
+> - `RTListener`（`COMMITDATAINCRE`）抛异常 → Spring Kafka 默认的 error handler
+>   跳过这条消息并**提交 offset** → 实时数据增量**静默丢失**。
+>
+> 正确的形状是：**pipeline 在非集群（`else`）分支里，集群分支用不带 pipeline 的 `execute`**。
+
+#### 用法
+
+```bash
+# 在开发机上（需要能读到两棵 Java 源码树）
+bash tests/validate_java_pipelines.sh \
+     "D:/javawork/1.2/cpscloud1.0/code/application/backend" \
+     "D:/javawork/1.2/cpscloud1.0/code/platform/backend"
+
+# 在容器里（宿主机没有可用的 bash）
+docker run --rm \
+  -v "D:/work/rediscluterproject:/repo" \
+  -v "D:/javawork/1.2/cpscloud1.0/code/application/backend:/ab:ro" \
+  -v "D:/javawork/1.2/cpscloud1.0/code/platform/backend:/pb:ro" \
+  -w /repo rc-control:bats \
+  bash -c "bash tests/validate_java_pipelines.sh /ab /pb"
+
+# 想看清「它到底把哪些调用算成有守卫」
+VERBOSE=1 bash tests/validate_java_pipelines.sh <app-backend> [platform-backend]
+```
+
+#### 退出码
+
+| 码 | 含义 | 怎么办 |
+|---|---|---|
+| **0** | 通过 | — |
+| **1** | **有违规**：出现了裸调用，或者 pipeline 落在了**集群分支**里 | 按打印出来的 `file:line` 改代码，把 pipeline 挪到 `else` 分支 |
+| **2** | 用法/环境错误：路径不存在、参数缺失、**或者被扫的树和基线对不上** | 看 `ERROR:` 那几行。最常见的是「调用点数量变了」—— 那是**有意的改动**，确认无误后更新脚本里的 `NAPSTAR_BASELINE` / `PB_BASELINE` |
+
+> ⚠️ **退出码 2 不是「跳过」** —— 空树、路径写错、调用点数量对不上，都会是 2。
+> 这是刻意的：**一个从不失败的断言等于没有断言**。宁可吵闹，也不要静默放过。
+>
+> ⚠️ **违规优先于基线**：真有裸调用时先报违规（1），基线不符（2）排在后面 ——
+> 「新增了一个裸调用」会同时触发「数量对不上」，那时候要说的是「这里有裸调用」。
+
+#### 它查什么
+
+| 树 | 判据 | 现状 |
+|---|---|---|
+| `napstarweb` | **结构 + 极性**：调用必须在守卫的 `if/else` 里面，**且在非集群（`else`）分支里** | 10 处调用，全部有守卫 |
+| `sche-viewer-server` | **只报告，不判失败** —— 它的模块在 `application/backend/pom.xml` 里是注释掉的（不参与构建），`oms:` 块也整段注释（standalone） | 15 处调用，**切集群前必须一并处理** |
+| `platform`（realserver / modelserver） | **位置**：调用上面 40 行内有个 `isCluster` 标记（那边的守卫是早返回 / 拆方法，判不了极性） | 11 处调用，全部有守卫 |
+
+注释掉的调用不算活调用（`//` 行注释、`/* … */` 块注释、行尾注释、字符串字面量里的内容都不算）。
 
 ---
 
