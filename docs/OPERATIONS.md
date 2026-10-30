@@ -1179,6 +1179,30 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 > > **启动正常、第一次读写才炸**（§4.6 第一种下场）。
 > > 这是本手册里**最容易踩**的一个坑。
 
+> ⛔ **切集群前必读：napstarweb 的 `executePipelined` 集群分支**
+>
+> SDR 2.7.18 在 Redis Cluster 模式下**不支持 pipeline** ——
+> `JedisClusterConnection.openPipeline()` 直接抛 `UnsupportedOperationException`，
+> **回调体一次都不会执行**（Redis 命令一条都没发出去）。
+>
+> napstarweb 树里原本有 **10 处** `redisTemplate.executePipelined(...)`，
+> 其中：
+> - **4 处写**（`SVGCacheServiceImpl` / `RTListener` / `SVGParseService` / `CanvasMonitorServiceImpl`）
+>   → 已加集群分支，改用 `redisTemplate.execute(cb)`（非 pipeline，每条命令一次往返，按槽路由）
+> - **6 处读**（`CalculateService` / `CalculateForCanvasService` / `SVGParseService.batchGetSymbol` /
+>   `CanvasMonitorServiceImpl.batchGetSymbol`）
+>   → 已加集群分支，改用 `oms` 的 `RedisClusterHashPipeline.getAllHashes` / `getAllValues`
+>   （按 slot 分组，每个 master 一条 pipeline，**返回顺序与入参一致**）
+>
+> ⚠️ **不带上这份改造就切集群**，后果是：
+> ① `StartupRunner` 的初始化被中断 → **应用启动成功、功能却是残的**
+> ② `RTListener`（`COMMITDATAINCRE`）抛异常 → Spring Kafka 默认错误处理器
+>    **跳过并提交 offset** → **实时数据增量静默丢失**
+>
+> 改造细节见 `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md`。
+> 另：`sche-viewer-server` 还有 **15 处**同样的裸调用 —— 它当前不参与构建且是
+> standalone，**暂时安全**，但**将来切集群前必须一并处理**。
+
 #### Kafka 侧（§3 做完集群后）
 
 > 同理，`spring.kafka.*` 也**只对 modelserver** 走 `share_base.yaml`；

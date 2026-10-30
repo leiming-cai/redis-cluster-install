@@ -701,6 +701,179 @@ QUERYRESPONSE / REALALARM），**不含** `COMMITDATAINCRE` —— 而 realserve
 
 ---
 
+## 第十八轮（2026-10-30）：napstarweb 集群分支 + 读侧 pipeline
+
+**这一轮改的是 Java 侧**（`platform/backend` 的 oms 模块 + `application/backend` 的 napstarweb），
+仓库里的 `cluster-config.sh` 一行没动。
+
+### 一、结论先行
+
+**napstarweb 的 10 处 `executePipelined` 在集群模式下必然炸。**
+
+SDR 2.7.18 的 `JedisClusterConnection.openPipeline()` 直接抛
+`UnsupportedOperationException("Pipeline is currently not supported for JedisClusterConnection.")`，
+而 `RedisTemplate.executePipelined(...)` 是**先 `openPipeline()` 再执行回调体**
+→ **回调体一次都没跑，Redis 命令一条都没发出去**。
+
+真集群实测（探针见 `tests/probes/cluster-execute-probe.java`）：
+`executePipelined` 两个重载都抛；对照组 `opsForHash().putAll()` 正常 → **集群本身没问题**。
+
+**为什么第十三轮没发现**：那一轮统一的是**配置契约**（三个应用的 `oms:` 块补全），
+没管**调用点**。platform 树的 11 处**早就有 `isCluster()` 分支**（第十轮做的），
+只有 napstarweb 漏了。
+
+### 二、改了什么（9 个 Java 文件 + 2 个 pom）
+
+| # | 文件 | 改动 |
+|---|---|---|
+| 1 | `oms/…/oms/utils/RedisClusterHashPipeline.java` | **加** `getAllHashes` / `getAllValues`（读侧按节点 pipeline） |
+| 2 | `oms/…/oms/utils/RedisClusterHashPipelineTest.java` | **加 13 条 Mockito 用例**（28 → 41；含 1 个 `utf8Codec()` serializer） |
+| 3 | `oms/…/oms/utils/RedisClusterHashPipelineLiveTest.java` | **加 5 条真集群用例**（4 → 9） |
+| 4 | `application/backend/pom.xml` | dependencyManagement **显式**声明 `realserver-oms`（原先只是传递依赖） |
+| 5 | `napstarweb/monitor/pom.xml` | 显式声明 `realserver-oms` |
+| 6 | `napstarweb/monitor/…/monitor/services/impl/SVGCacheServiceImpl.java` | W1 集群分支 |
+| 7 | `napstarweb/monitor/…/monitor/kafka/RTListener.java` | W2 集群分支 |
+| 8 | `napstarweb/monitor/…/monitor/services/SVGParseService.java` | W3 集群分支 + R5 `getAllValues` |
+| 9 | `napstarweb/monitor/…/monitor/cimg/services/impl/CanvasMonitorServiceImpl.java` | W4 集群分支 + R6 `getAllValues` |
+| 10 | `napstarweb/monitor/…/monitor/services/CalculateService.java` | R1 + R2 `getAllHashes` |
+| 11 | `napstarweb/monitor/…/monitor/services/CalculateForCanvasService.java` | R3 + R4 `getAllHashes` |
+
+**读侧 API 契约**：`getAllHashes(List<String>)` / `getAllValues(List<String>)` 的返回值
+**与入参 keys 等长、同序** —— napstarweb 是**按下标对齐**消费的，顺序错了会静默返回错位数据。
+非集群部署自动退化成逐 key 读。
+
+### 三、关键设计决定
+
+1. **集群分支统一用 `redisTemplate.execute(cb)`**（回调体逐字复用，`RedisConnection` 参数原样传下去）
+   → `JedisClusterConnection.hSet/hDel/set` 都按槽路由 → **`GraphDataService` 接口签名不用改**。
+2. **多 key 读走 oms 的 `getAllHashes` / `getAllValues`** → 按 slot 分组，每 master 一条 pipeline
+   → **返回顺序与入参一致**（napstarweb 是按下标对齐消费的，顺序错了会静默返回错位数据）。
+3. **反序列化必须复刻 SDR 的 `deserializeMixedResults`**
+   → 用 public static 的 `SerializationUtils.deserialize(raw, hashKeySerializer, hashValueSerializer)`。
+   ⚠️ SDR 对**空 hash** 有特例（返回未反序列化的原始 map）；本类返回反序列化后的空 map
+   → **差异不可观测**，但单独立了一条真集群测试钉住。
+4. **类名 `RedisClusterHashPipeline` 不改**（现在也承载 string 读 → 命名债）：
+   改名会破坏 bean 名 `redisClusterHashPipeline`、**32 条已有测试**
+   （`RedisClusterHashPipelineTest` 28 条 + `RedisClusterHashPipelineLiveTest` 4 条
+   —— 这是**做决定时**的条数，改名之前要重新数一遍）、
+   以及当时已留痕的 **7 份 patch**（`docs/superpowers/patches/`，现在更多了）→ 收益不抵成本。
+   → 这个**命名债已经写进类的 javadoc**，改名之前先读那段注释。
+
+### 四、验证
+
+| 检查 | 结果 |
+|---|---|
+| `oms` 单测 | **41 通过 / 0 失败 / 0 跳过**（Mockito；基线 28 + 新 13） |
+| `oms` 真集群测试 | **9 通过 / 0 失败 / 0 跳过**（基线 4 + 新 5） |
+| `oms` 模块合计 | **84 通过 / 0 失败 / 0 跳过**（基线 66 + 新 13 Mockito + 新 5 真集群；**`Skipped: 0` 必须确认** —— 集群不在时真集群用例会**跳过**，那等于没跑） |
+| `idgenerator` | 6 / 0 / 0 跳过（未受影响） |
+| `rtdata-module` | 14 / 0（未受影响） |
+| backend reactor | **44 个模块全 SUCCESS** |
+| napstarweb reactor | **13 个模块全 SUCCESS** |
+| 探针 | `PROBE PASSED` |
+| 守卫脚本 | 退出码 0，`SUMMARY: PASS=21 FAIL=0`；**变异检验**（本轮手工做了 27 个变异用例）确认它会红 ⚠️ **变异用例没有入库**（没有提交成 `.bats`），所以这个保证**不能自动复现** |
+| bats | **203 通过 / 0 失败** |
+| `tests/check_syntax.sh` | `TOTAL=46 FAIL=0` |
+| `tests/validate_libs.sh` | `PASS=54 FAIL=0` |
+
+### 五、留痕
+
+| 东西 | 位置 |
+|---|---|
+| 设计文档 | `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md` |
+| 实施计划 | `docs/superpowers/plans/2026-10-30-napstarweb-cluster-branch.md` |
+| patch | **Task 14 生成**（本轮写作时还不存在）：<br>`docs/superpowers/patches/2026-10-30-napstarweb-cluster-branch-platform-backend.patch`<br>`docs/superpowers/patches/2026-10-30-napstarweb-cluster-branch-application-backend.patch` |
+| 探针 | `tests/probes/cluster-execute-probe.java` + `scripts/probe-cluster-execute.sh` |
+| 守卫 | `tests/validate_java_pipelines.sh`（用法见 `docs/OPERATIONS.md` §6.3） |
+| 操作手册 | `docs/OPERATIONS.md` §4.5（切集群前必读）+ §6.3（守卫） |
+
+> ⚠️ **两棵 Java 树不是 git 仓库** —— 改动只以 patch 形式留痕。
+> **Task 14 会生成那两份 patch**；在本轮写这份记录时它们**还不存在**，
+> 别把「计划里写了」当成「文件已经有了」。
+
+> 📌 **跑探针的完整命令（Windows + Git Bash）** —— 本轮实测通过的：
+>
+> ```bash
+> cd /d/work/rediscluterproject
+> export AB_DIR='D:/javawork/1.2/cpscloud1.0/code/application/backend'
+> export PROBE_JAR='$AB_DIR/napstarweb/web-controller/target/web-controller-1.0.14.jar'
+> export JAVA_HOME='D:/java/java-se-8u42-ri'
+> export TMPDIR='C:/Users/Public'          # ⚠️ 见下
+> bash scripts/probe-cluster-execute.sh
+> ```
+>
+> ⚠️ **`TMPDIR` 必须给一个 Windows 路径** —— 默认的 `/tmp` 是 Git Bash 的
+> Unix 路径，脚本把 jar 解到那里之后，`javac.exe`（Windows 版 JVM）
+> **读不到那些 jar** → 编译报「找不到符号 RedisCallback / RedisConnection」，
+> 现象像「类路径没配上」，实际是**路径跨了体系**。
+> 设成 `C:/Users/Public` 就好。
+>
+> ⚠️ **宿主机上 Git Bash 在 `D:\Program Files\Git\bin\bash.exe`** ——
+> 不是 `C:\Program Files\Git`。WSL 的 `bash.exe` 也不行（它是 Linux 内核，
+> 跑不了 `javac.exe`）。
+
+### 六、留了一个「已知差异」没修
+
+集群分支（非 pipeline）**每条命令立即生效**，单机分支（pipeline）**批量生效**。
+`GraphDataServiceImpl.fillBaseModelData` 里有「先 `opsForHash().get()` 再 `redisConnection.hSet()`」
+的读后写 → 集群下后一次能读到前一次，单机 pipeline 下读不到。
+**这是两种模式本来就有的差异**，集群分支反而更正确。**本轮不修**（修它要动单机路径 → 风险外溢）。
+
+> 📌 `GraphDataServiceImpl` 在 **napstarweb 树**里，不在 platform 树里 —— 差异就在那里咬人。
+> R2 的说明已经写在**四个集群分支点**（`SVGCacheServiceImpl` / `RTListener` / `SVGParseService` /
+> `CanvasMonitorServiceImpl`）和 `GraphDataServiceImpl` 的注释里。
+
+### 七、偏离计划的地方（下一轮别再重新发现一遍）
+
+计划文件（`docs/superpowers/plans/2026-10-30-napstarweb-cluster-branch.md`）是**上一轮**写的，
+有几处与实现不符。**以本节为准。**
+
+| # | 计划里写的 | 实际做的 | 为什么 |
+|---|---|---|---|
+| 1 | M4 变异用例 `readSideSpreadsTheBatchAcrossSeveralMasters` 从 `CLUSTER SLOTS` 推 master 分布 | **换成读侧的 `errorstat_MOVED` 增量断言**，用例改名 `readSideSpreadsTheBatchAcrossSeveralMastersWithoutAnyMovedRedirect` | **原计划那条是空断言**：master 分布来自 `CLUSTER SLOTS`，**与实现无关** → 分组写错了照样通过。改成和写侧同款的 MOVED 增量信号 |
+| 2 | 真集群用例 `readSideReturnsEntriesInTheSameOrderAsTheKeys` | 改名 `getAllHashesReturnsEntriesInTheSameOrderAsTheKeys` | 旧路径的对偶用例叫 `readPathReturnsEntriesInTheSameOrderAsTheKeys` —— **只差一个词**，容易混。计划的变异表按名字索引用例，改名免得指错 |
+| 3 | 写侧 / 读侧各写一份分组逻辑 | 抽成**一个共享的 `groupByOwner`** | 设计明确禁止两份拓扑逻辑 |
+| 4 | （无） | 加了私有 `ReadResult` 载体 | 回复类型不对时要能指出**是哪个 key** 出的问题；否则看起来像「key 不存在」 |
+| 5 | 守卫判据：**「调用点上面 40 行内有个 `isCluster` 标记」** | 改成**花括号深度祖先判据 + 极性判据** | 位置判据有**假阴性**：在**本来就有集群分支的文件里**，另一个方法里手滑写下一句裸调用 —— 它离那个分支只有几行，位置判据照样放它过关（守卫脚本自己的注释记着：**`pad=0 / pad=20` 两种偏移都漏掉了**）。另外补了**极性**：pipeline 落在**集群分支**里也要报（那比裸调用更糟 —— 集群模式下必抛） |
+| 6 | （无） | 守卫自己的 4 个缺陷被查出并修掉 | ① awk 的 `for (n in hit)` 下标是**字符串** → mawk 按字典序比 → 误报；② 标记正则会匹配类型名 `RedisClusterHelper`（Red+isCluster+Helper）；③ 缺后缀边界 → `isClusterMode` 会**当成守卫**；④ platform 基线检查是**单向**的（注释掉一处 → count=10 → exit 0），改成双向对称 |
+| 7 | （无） | 读后写差异（R2）用**探针实测**确认，并写进代码注释 | 这是**两种模式本来就有的差异**，不是本轮引入的；集群分支反而更正确 → **不修**（修它要动单机路径 → 风险外溢） |
+| 8 | （无） | `GraphDataServiceImpl` 归到 **napstarweb 树** | 计划把它算在 platform 树里了 —— 而 R2 的差异正是在那里咬人，所以注释写在 napstarweb 树的那个文件里 |
+
+> 📌 **第 5、6 条是这一轮最贵的两课**：守卫脚本自己也会有 bug。
+> 「守卫是绿的」**不等于**「代码是安全的」—— 守卫必须被**变异检验**过
+> （故意改坏代码，确认它变红），否则它可能只是一台永绿的机器。
+
+### 八、Docker 集群的恢复要点（下一轮要用它）
+
+本轮重建了 e2e 集群，**拓扑**：
+
+| 角色 | 容器 | 容器内端口 | 宿主机端口（1:1 映射） | announce |
+|---|---|---|---|---|
+| master × 3 | `rc-cpsweb-node-a` | 6379 / 6380 / 6381 | 16379 / 16380 / 16381 | `127.0.0.1:1637x` |
+| replica × 3 | `rc-cpsweb-node-b` | 6382 / 6383 / 6384 | 16382 / 16383 / 16384 | `172.21.0.3:638x` |
+
+- **announce 设置写在 `/etc/redis/cluster/redis-<port>.conf`** 里 → **重启后仍在**。
+  （运行时数据在 `/opt/software/redis/cluster/<port>/`。）
+- **容器端口 1:1 映射到宿主机**（16379→6379 … 16384→6384）：
+  这个 1:1 正是 `cluster-announce-port` 能等于**已发布端口**的原因，
+  也是 Redis 算 cluster bus 端口的方式（**P + 10000**）。
+
+> ⛔ **最大的坑：`cluster-announce-bus-port` 必须与 announce 端口配套。**
+> 把它设成 0（「用我真实的 bus 端口」）会**在 announce-ip 是 127.0.0.1 时打断节点间互联** ——
+> 每个节点于是去连**自己的 loopback**。
+>
+> 本轮的实际配置：
+> - node-a 的三个 master：`cluster-announce-ip 127.0.0.1`，
+>   `cluster-announce-port 16379/16380/16381`，`cluster-announce-bus-port 16379/16380/16381`
+> - node-b 的三个 replica：`cluster-announce-ip 172.21.0.3`，
+>   `cluster-announce-port 6382/6383/6384`，`cluster-announce-bus-port 16382/16383/16384`
+>
+> （node-b 的 replica 用**容器内端口**做 announce port、**宿主机端口**做 bus port ——
+> 因为对端要连过来，走的是**容器网络**里的地址。master 那一侧对端也在同一台容器，
+> 所以走 loopback 就行。**两边的规则不同，因为拓扑不同。**）
+
+---
+
 ## 第十六轮（2026-10-29）：合并两套 `RedisUtil`，去掉反方向的依赖
 
 **这一轮改的是 Java 侧**（`common/idgenerator` / `realserver/common/oms` /
@@ -2132,34 +2305,43 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 |---|---|
 | `bats tests/lib/*.bats tests/*.bats` | **203 通过 / 0 失败** |
 | `find tests -name '*.bats' -print0 \| xargs -0 bats` | **203 通过 / 0 失败**（CI 调用方式） |
-| `bash tests/check_syntax.sh` | `TOTAL=45 FAIL=0` |
+| `bash tests/check_syntax.sh` | `TOTAL=46 FAIL=0` |
 | `bash tests/validate_libs.sh` | `PASS=54 FAIL=0` |
 | `bash scripts/check-bash-compat.sh` | `BASH_COMPAT: PASS`（在 bash 4.3 上跑同一套 bats） |
 | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`，退出码 0（需 Docker，见下） |
 | `bash scripts/e2e-cpsweb-nodes.sh` | `E2E PASSED`，退出码 0（需 Docker + `cpsweb-env:1.0`） |
+| `bash tests/validate_java_pipelines.sh <app-backend> [platform-backend]` | 退出码 0，`SUMMARY: PASS=21 FAIL=0`（见 `docs/OPERATIONS.md` §6.3） |
 
-> ⚠️ **`check_syntax.sh` 的 `TOTAL=45` 里有 17 条是 `.bats` 的 SKIP 占位**
+> ⚠️ **`check_syntax.sh` 的 `TOTAL=46` 里有 17 条是 `.bats` 的 SKIP 占位**
 > （`.bats` 用的是 bats 的 DSL，`bash -n` 查不了，要靠 bats 自己跑）。
-> 真正被 `bash -n` 查过的是 **28** 个文件。
+> 真正被 `bash -n` 查过的是 **29** 个文件。
 > **CI 现在查的是 15 个**（6 个具名 + `lib/*.sh` 展开 9 个）——
 > 所以「把 CI 那条手抄列表换成 `bash tests/check_syntax.sh`」的真实覆盖面是
-> **15 → 28**，**不是** 6 → 45。
+> **15 → 29**，**不是** 6 → 46。
+>
+> ⚠️ `TOTAL` 从 45 变成 46 是**第十八轮**加的 —— 新增了 `scripts/probe-cluster-execute.sh`
+> 和 `tests/validate_java_pipelines.sh` 两个被检查的脚本。
 
-### Java 侧的基线（第十六轮更新）
+### Java 侧的基线（第十八轮更新）
 
 | 命令 | 期望 |
 |---|---|
 | `cd $BE\common\idgenerator; mvn -o clean test` | **6 通过 / 0 失败 / 0 跳过**（第十五轮 3 条 + 第十六轮 3 条） |
-| `cd $BE\realserver\common\oms; mvn -o clean test` | **66 通过 / 0 失败 / 0 跳过**（第十五轮 63 → 新增 3 条真集群用例） |
+| `cd $BE\realserver\common\oms; mvn -o clean test` | **84 通过 / 0 失败 / 0 跳过**（第十六轮 66 → 第十八轮 +18） |
 | `cd $BE\realserver\plugins\rtdata-module; mvn -o test` | **14 通过 / 0 失败** |
 | `cd $BE; mvn -o clean install -DskipTests` | **44 个模块全 SUCCESS**（含 proguard）—— ⚠️ 原文档写「29 个」，实际是 44 |
 | `cd $AB; mvn -o clean install -DskipTests` | napstarweb reactor **13 个模块**全 SUCCESS |
 | `cd $BE\realserver\common\oms; mvn -o dependency:tree` | 只剩自己，**零 `com.sac.platform` 依赖** |
 | `cd $BE\common\idgenerator; mvn -o dependency:tree` | **不含 `realserver-entity`**，**也不含 `realserver-oms`**（第十六轮新增的核对项） |
 | `cd $BE\modelserver\services; mvn -o dependency:tree` | `realserver-oms` 是**直接** `compile` 依赖（不是经 idgenerator 传递来的） |
+| `cd $AB; mvn -o dependency:tree`（napstarweb/monitor） | `realserver-oms` 是**显式**声明的依赖（第十八轮新增的核对项） |
 
-> ⚠️ **`idgenerator` 的 6 条用例、`oms` 的 3 条新用例都需要集群在跑**
-> （`127.0.0.1:16379`）。集群不在时它们**跳过**（不是变红）。
+> ⚠️ **`oms` 的 84 条里有 9 条是真集群用例**（`RedisClusterHashPipelineLiveTest`），
+> 需要集群在跑（`127.0.0.1:16379`）。集群不在时它们**跳过**（不是变红）——
+> **但基线写的是「0 跳过」**，所以「84 / 0 跳过」意味着**集群真的在跑**。
+> 第十八轮之前那 8 条真集群用例是**会跳过**的，现在全跑了。
+>
+> ⚠️ **`idgenerator` 的 6 条用例也需要集群在跑**。集群不在时它们**跳过**（不是变红）。
 > ⚠️ **本地仓库里的 `realserver-oms` jar 是 proguard 处理过的** ——
 > `RedisPropertiesConfig` / `RedisUtilConfig` **已被改名**（写作时叫 `a` / `b`），
 > **从 idgenerator 的测试类路径上引用不到**。详见「第十五轮」第四节。
@@ -2766,9 +2948,15 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 
 ---
 
-## 会话存档（2026-10-30）：第十八轮 —— napstarweb 集群分支（**设计与计划已完成，未改一行代码**）
+## 会话存档（2026-10-30）：第十八轮 —— napstarweb 集群分支（**设计与计划阶段**）
 
 **⭐ 新会话请先读这一节。**
+
+> ⚠️ **这一节是「设计 + 计划」阶段的存档**，写于「一行代码都还没改」的时候。
+> **第十八轮后来已经实现了** → 实际做了什么、验证结果、偏离计划的地方、
+> 以及 Docker 集群的恢复要点，见上面**「第十八轮（2026-10-30）：napstarweb 集群分支 + 读侧 pipeline」**那一章。
+> **本节的事实描述（10 处调用、SDR 必炸、根因）仍然成立**，但「本轮做了什么」那张表
+> 和「下一步」都**已经过时** —— 以上面那一章为准。
 
 > **完整存档（含设计文档全文 + 实施计划全文）**：
 > **`docs/superpowers/sessions/2026-10-30-napstarweb-cluster-branch-session.md`**
@@ -2800,9 +2988,9 @@ napstarweb 已被配成 `oms.redisMode: cluster`（第十三轮改的）→ **�
 | 站点清单 | **10 处**（4 个单 key 写 + 6 个多 key 读）全部定位到文件+行号+方法名 |
 | 设计 | `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md`（`bbd0b2e`）—— 用户逐节确认 |
 | 计划 | `docs/superpowers/plans/2026-10-30-napstarweb-cluster-branch.md`（`6efe15d`）—— **15 个 Task** |
-| **生产代码** | **一行没改**（两棵 Java 树一个字都没动） |
-| 测试 | **没新增** |
-| 文档 | 只写了 spec / plan / 存档三份；`OPERATIONS.md` 与 `HANDOFF.md` 的正文更新在计划 Task 13 |
+| **生产代码** | **一行没改**（两棵 Java 树一个字都没动）—— ⚠️ **这是设计阶段的状态，实现见上面那一章** |
+| 测试 | **没新增**（同上） |
+| 文档 | 只写了 spec / plan / 存档三份；`OPERATIONS.md` 与 `HANDOFF.md` 的正文更新在计划 Task 13（**已完成**） |
 
 ### 用户已定的 6 个决定
 
@@ -2815,10 +3003,14 @@ napstarweb 已被配成 `oms.redisMode: cluster`（第十三轮改的）→ **�
 | 5 | 2 个 string 读站点**也做节点分组**（`getAllValues`） |
 | 6 | 设计 §1–§6 **已逐节确认** |
 
-### 下一步
+### 下一步（设计阶段写下的，**已完成**）
 
 **从计划的 Task 0 开始**（备份 11 个文件的基线 —— 两棵 Java 树不是 git 仓库，
 基线丢了就永远拿不回来）。完整清单见计划文件的「完成判据」。
+
+> ✅ **本轮已实现完毕**：Task 0–13 已完成（代码 + 测试 + 文档），
+> **Task 14（patch 生成 + 全量验证）尚未执行** —— 那两份 patch 文件**还不存在**。
+> 详见上面「第十八轮」那一章的「五、留痕」。
 
 ---
 
