@@ -681,7 +681,14 @@ QUERYRESPONSE / REALALARM），**不含** `COMMITDATAINCRE` —— 而 realserve
 |---|---|
 | **操作手册** | `docs/OPERATIONS.md`（1297 行） |
 | 设计文档 | `docs/superpowers/specs/2026-10-30-operations-manual-design.md`（287 行） |
-| 提交 | `18f81a0`（设计）、`22f8fdb`（设计补 ZK/Kafka）、`e84a9c8`（手册 + 互链 + install.sh 注释）、`dde7c52`（Kafka YAML） |
+| 提交 | `18f81a0`（设计）、`22f8fdb`（设计补 ZK/Kafka）、`e84a9c8`（手册 + 互链 + install.sh 注释）、`dde7c52`（Kafka YAML）、`e5ece0f`（本轮交接记录） |
+
+> ⚠️ **收尾时踩了一次「外部编辑器覆盖工作树」（坑 27）**：
+> VS Code 把 `docs/OPERATIONS.md` 的**旧缓冲区**写回磁盘，
+> **新写的 §4.4 整节（217 行）被回退**，而 `git add -A` 照单全收。
+> 已用 `git reset --soft` + `git checkout dde7c52 -- docs/OPERATIONS.md` 恢复，
+> 并确认 `git diff dde7c52 HEAD -- docs/OPERATIONS.md` **为 0 行**（逐字节相同）。
+> **下次改这份手册前，先在 VS Code 里关掉或重新载入它。**
 
 ---
 
@@ -3073,6 +3080,8 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
 | 24 | **（第十六轮）注释里的「历史」会过期** | 我在第十五轮写的「原来的写法是在成功路径上直接 return —— 没有人释放这把锁」**当时是对的**，但代码搬过来之后，它就贴在**已经做对了**的代码旁边 → 读 diff 的人以为这次改的就是那个缺陷。**同一个文件里有三份这样的注释，三份都要改** |
 | 25 | **（第十六轮）「变异检验」本身也会造成破坏** | 把 `deleteNamespace` 的 pattern 改成 `"*"` 在**满 keyspace**（820 万 key）上跑不动：删除速度约 2000/s，Spring 的 DEBUG 日志**每个 key 一行** → 45 分钟产出 **828 MB** 日志，最后被超时杀掉。**做「删更多」这类变异前，先看 keyspace 有多大** |
 | 26 | **（2026-10-30 收尾）GitHub 的 SSH 边缘会整个连不上** | 症状：`ssh_dispatch_run_fatal: Connection to 20.205.243.166 port 22: Connection timed out`；`.NET` 的 TCP 探测却**是通的**（TCP 连得上，但 SSH banner 不来）。**两条路都试过**：SSH 22 超时；`ssh.github.com:443`（不同边缘 IP）能完成认证（`Hi leiming-cai!`）但**传数据时被 reset**。→ **最后是 HTTPS 推上去的**（`git push origin main`，本提交不碰 `.github/` → PAT 的 workflow scope 限制不适用）。**别在 SSH 卡住时一直重试**，三条路都试一遍，HTTPS 常常先恢复 |
+| 27 | **（第十七轮）VS Code 用旧缓冲区把新写的文件覆盖回磁盘** | **本项目第二次被外部编辑器改工作树**（第一次是坑 17 的 jedis 版本）。这一次的形态更险：VS Code 开着 `docs/OPERATIONS.md`，**格式化器**（表格分隔符被改成 `\| --- \|` 是它的签名）把它**编辑缓冲区里的旧内容**写回了磁盘 —— **新写的 §4.4 整节 217 行被回退**，而 `git add -A` 照单全收进了提交。**发现方式**：`git diff dde7c52 c5be416 -- docs/OPERATIONS.md` 出现了**整节的删除**。**正确做法**：① **每次提交前先 `git diff HEAD --stat` 看一眼改了什么**，别只看 `git status`；② 提交后**用 `git grep <HEAD> -- <file>` 验证提交内容**（别用 `git show \| Select-String` —— PowerShell 会把 UTF-8 管道解码坏，**匹配不到中文**，看起来像"内容丢了"，其实是编码假象）；③ 发现回归后 `git reset --soft HEAD~1` + `git checkout <好的提交> -- <file>` 恢复。**根因是 VS Code 缓冲区比磁盘新/旧**，所以**改完长文件后要先让编辑器重新载入**（关掉标签页或 `File: Revert File`） |
+
 
 ---
 
