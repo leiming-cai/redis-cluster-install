@@ -1,6 +1,6 @@
 # cluster-config.sh 实施进度交接
 
-**更新时间**：2026-10-29
+**更新时间**：2026-10-30（会话收尾；第十六轮的工作全部完成并已推送）
 **工作分支**：无 —— 第七~十六轮都在 `main` 上，**全部已推送**
 **主仓库**：`D:\work\rediscluterproject`
 **基线**：`main` = `origin/main`（`git status -sb` 无 ahead/behind）；第十三轮已推送
@@ -9,7 +9,8 @@
 **`fdd3193`**（真集群测试 + jedis 版本上限）、**`6e86496`**、
 **`09e080a`**（会话存档）；**第十六轮推了 `9be5aec`**（CI 语法覆盖面 15→28）、
 **`c873d04`/`da93756`**（合并两套 RedisUtil 的设计与计划）、
-**`ba5b0f6`**（计划进度）、**`389547b`**（**第十六轮的代码 + patch + 文档**）。
+**`ba5b0f6`**（计划进度）、**`389547b`**（**第十六轮的代码 + patch + 文档**）、
+**`cebb6ca`**（最终审查查出的文档数字更正）。
 当前 bats **203 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0），
 `oms` **66 通过 / 0 失败 / 0 跳过**（含 3 条新增的真集群用例），
 `idgenerator` **6 通过 / 0 失败**（第十五轮 3 条 + 第十六轮 3 条），
@@ -2543,6 +2544,24 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 > ⚠️ **本节已更新到第十六轮**（下面第十五轮、第十四轮的内容仍然有效，
 > 但「验证基线」和「下一次该做什么」两节以第十六轮的为准）。
 
+> **✅ 会话已于 2026-10-30 收尾。** 收尾时复核过的状态：
+>
+> | 项 | 结果 |
+> |---|---|
+> | git | `main...origin/main`，**0 ahead / 0 behind**，工作区干净；最后一个提交 `cebb6ca` |
+> | CI | run #30 / #33 / #34 **全部 success**（含新加的 `check_syntax.sh` + `validate_libs.sh` 两步） |
+> | 测试 | bats **203/0**、`check_syntax` exit 0、`validate_libs` exit 0、`oms` **66/0/0 跳过**、`idgenerator` **6/0/0 跳过**、`rtdata-module` **14/0**；两个 reactor（44 / 13）全 SUCCESS |
+> | patch | `2026-10-29-unify-redis-util.patch` 反向校验 exit 0；往返校验 `checked=9 mismatches=0` |
+> | 容器 | `rc-redis-publish` / `rc-cpsweb-app` / `rc-cpsweb-node-a|b` **Up 24 小时 —— 没重启过**，所以 announce 的运行期改动**还在** |
+> | 集群 | `cluster_state:ok` / 16384 slots / 6 nodes / size 3（**2026-10-30 实测**） |
+>
+> **下一轮不需要重做第十六轮的任何一件事。** 剩下的全是需要**外部输入**或
+> **新设计**的活儿，见下面「四、下一次会话该做什么」。
+>
+> ⚠️ **唯一要留意的环境变化**：三个 master 现在是**空的**（820 万压测残留被第十六轮的
+> 变异检验误删了），三个 replica 的复制链路**是断的**、还留着 820 万陈旧 key。
+> 详见「三、环境现状」。
+
 ### 一、代码在哪、改了什么
 
 | 位置 | 说明 |
@@ -2664,14 +2683,17 @@ DoD2/3 那一段里**根本没有 "All 16384 slots covered" 这一行**（grep �
 ### 三、环境现状（2026-10-29 实测）
 
 ```
-rc-redis-publish    Up 3 hours       socat 转发器，把集群暴露到宿主机 127.0.0.1:16379-16384
-rc-cpsweb-app       Up 2 hours       上一轮留下的 consumer（跑的是 10/28 的新 jar）
-rc-cpsweb-node-a    Up 3 hours       Redis 集群 node-a（3 个 master）
-rc-cpsweb-node-b    Up 3 hours       Redis 集群 node-b（3 个 replica）
+rc-redis-publish    Up 24 hours      socat 转发器，把集群暴露到宿主机 127.0.0.1:16379-16384
+rc-cpsweb-app       Up 23 hours      上一轮留下的 consumer（跑的是 10/28 的新 jar）
+rc-cpsweb-node-a    Up 24 hours      Redis 集群 node-a（3 个 master）
+rc-cpsweb-node-b    Up 24 hours      Redis 集群 node-b（3 个 replica）
 ```
 
 **集群健康**：`cluster_state:ok` / `cluster_slots_assigned:16384` /
 `cluster_known_nodes:6` / `cluster_size:3`，密码 `CpsE2eClusterPw`。
+（**2026-10-30 会话收尾时复核过**：容器**没重启过** → announce 的运行期改动还在，
+集群仍然是 `state:ok`。**如果哪天这些容器重启了，集群会变 `cluster_state:fail`**
+—— 那就必须重跑 `%TEMP%\opencode\set-announce.sh`，见下面的「坑 11」。）
 
 > ⚠️ **⚠️ 第十六轮实测出的两个新情况，下一轮要知道**：
 >
@@ -2817,10 +2839,11 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
 **第七~十六轮都已提交并推送**（`git status -sb` 无 ahead/behind；`origin/main` 与 `main` 同步）。
 第十三轮已推送：`521f244..aadcbb9`；第十四轮：`80ad557` / `9b4f040` / `fdd3193` / `6e86496`；
 第十五轮：`54aa2e7`（修 `IdUtil` 的锁）+ `9be5aec`（CI 语法覆盖面）+ `c873d04`/`da93756`/`ba5b0f6`；
-第十六轮：合并两套 `RedisUtil` 的 patch + 文档。
+第十六轮：`389547b`（合并两套 `RedisUtil` 的代码 + patch + 文档）+ `cebb6ca`（文档数字更正）。
+**会话已于 2026-10-30 收尾**，收尾时的复核结果见「会话存档」一节开头。
 
 > **⭐ 当前状态、代码位置、环境、待办、踩过的坑，全部在上面的
-> 「会话存档（2026-10-29）」一节里 —— 下一次会话先读那一节。**
+> 「会话存档」一节里 —— 下一次会话先读那一节。**
 > 下面的内容是**历史记录**，保留供对照。
 
 ### 下一次会话从这里开始（第十六轮结束时）
