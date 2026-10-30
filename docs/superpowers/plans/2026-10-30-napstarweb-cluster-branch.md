@@ -664,7 +664,7 @@ Expected: 4 处匹配（2 个方法签名 + 2 个调用点）。
      * 顺序错了会**静默返回错位数据** —— 不报错，只是数据对不上。
      */
     @Test
-    void readSideReturnsEntriesInTheSameOrderAsTheKeys() {
+    void getAllHashesReturnsEntriesInTheSameOrderAsTheKeys() {
         withLiveCluster((template, pipeline) -> {
             Map<String, Map<String, String>> batch = new LinkedHashMap<>();
             for (int i = 0; i < 50; i++) {
@@ -733,7 +733,7 @@ Expected: 4 处匹配（2 个方法签名 + 2 个调用点）。
 
     /** 一个批次必须真的被分到多个 master —— 否则「分组」这件事根本没被验证。 */
     @Test
-    void readSideSpreadsTheBatchAcrossSeveralMasters() {
+    void readSideSpreadsTheBatchAcrossSeveralMastersWithoutAnyMovedRedirect() {
         withLiveCluster((template, pipeline) -> {
             Map<String, Map<String, String>> batch = new LinkedHashMap<>();
             for (int i = 0; i < 300; i++) {
@@ -790,10 +790,10 @@ Expected: 9 条全绿（原 4 + 新 5），`Skipped: 0`。
 
 | # | 变异 | 预期变红的用例 |
 |---|---|---|
-| M1 | 把 `readAll` 里的「按入参顺序回填」改成「按节点分组顺序回填」（即 `values[index]` 改成 `values[position++]`，忽略原下标） | `readSideReturnsEntriesInTheSameOrderAsTheKeys` + `getAllHashesReturnsOneEntryPerKeyInTheGivenOrder` |
+| M1 | 把 `readAll` 里的「按入参顺序回填」改成「按节点分组顺序回填」（即 `values[index]` 改成 `values[position++]`，忽略原下标） | `getAllHashesReturnsEntriesInTheSameOrderAsTheKeys` + `getAllHashesReturnsOneEntryPerKeyInTheGivenOrder` |
 | M2 | 把 `getAllHashes` 里的 `deserializeHash` 换成「直接返回原始 map，不反序列化」 | `readsEveryHashOfTheBatchBackUnchanged` |
 | M3 | 把 `deserializeHash` 的空 map 分支去掉（返回 `null`） | `readSideReturnsAnEmptyMapForAMissingKey` |
-| M4 | 把分组改成「所有 key 都塞给第一个节点」 | `readSideSpreadsTheBatchAcrossSeveralMasters` + `getAllHashesReturnsOneEntryPerKeyInTheGivenOrder` |
+| M4 | 把分组改成「所有 key 都塞给第一个节点」 | `readSideSpreadsTheBatchAcrossSeveralMastersWithoutAnyMovedRedirect` + `getAllHashesReturnsOneEntryPerKeyInTheGivenOrder` |
 | M5 | 把 `readOneKey` 的 `execute` 换成 `opsForHash().entries()`（形状变了：已反序列化） | `getAllHashesReadsPerKeyWhenThePipelineRejectsAKey` |
 
 ```powershell

@@ -2,6 +2,106 @@
 
 Unified-diff patches for the Java source trees that live **outside** this git repo.
 
+## 2026-10-30 — napstarweb cluster branch
+
+In Redis Cluster mode Spring Data Redis 2.7.18's `RedisTemplate.executePipelined(...)`
+throws `UnsupportedOperationException` **before the callback ever runs**, so not a
+single command reaches Redis. The probe (`scripts/probe-cluster-execute.sh`) pins
+that fact against a real cluster; this patch is the code that acts on it.
+
+Both Java trees are not git repositories, so these two patches are the **only**
+durable record of the change.
+
+### Which patch to use
+
+| Patch | Target root | Files |
+|---|---|---|
+| `2026-10-30-napstarweb-cluster-branch-platform-backend.patch` | `D:\javawork\1.2\cpscloud1.0\code\platform\backend` | 3 (all modified) |
+| `2026-10-30-napstarweb-cluster-branch-application-backend.patch` | `D:\javawork\1.2\cpscloud1.0\code\application\backend` | 9 (all modified) |
+
+No files were added or deleted in this round — every hunk is a modification.
+
+### What is in the platform-backend patch (3 files)
+
+`RedisClusterHashPipeline` is the new cluster-side reader: it groups the keys by
+slot owner, sends one pipeline per master, and **refills the results in the order
+the caller passed the keys in** (group order would silently return the right
+values in the wrong slots). The public surface is `getAllHashes(keys)` and
+`getAllValues(keys)`; everything else is private (`groupByOwner`, `runReadPipeline`,
+`readAll`, `readPerKey`, `readOneKey`, `deserializeHash`, `deserializeValue`).
+
+Alongside it sit the two test classes: `RedisClusterHashPipelineTest` (the unit
+suite, **41** cases) and `RedisClusterHashPipelineLiveTest` (the live-cluster
+suite, **9** cases).
+
+### What is in the application-backend patch (9 files)
+
+- `pom.xml` and `napstarweb/monitor/pom.xml` — the `oms` dependency and the
+  jedis/sdr versions the cluster path needs.
+- `SVGCacheServiceImpl`, `RTListener`, `SVGParseService`,
+  `CanvasMonitorServiceImpl`, `CalculateService`, `CalculateForCanvasService` —
+  each gained a `redisClusterHelper.isCluster()` branch. Under cluster mode the
+  batch goes through `RedisClusterHashPipeline`; under standalone mode it keeps
+  using `redisTemplate.executePipelined(...)`.
+- `GraphDataServiceImpl` — **comment only**, five lines of Chinese explaining
+  why the read-then-write in `fillBaseModelData` behaves differently in the two
+  modes. No code changed.
+
+### ⚠️ `GraphDataServiceImpl.java` and its missing baseline
+
+`GraphDataServiceImpl.java` was **not** in the Task-0 baseline snapshot: it was
+edited during this round but never appeared in the plan's file list. There was no
+pre-edit copy under `%TEMP%\opencode\`.
+
+A pristine copy was found elsewhere on the host —
+`D:\work\info\web\cpscloud1.0\code\application\backend\...\GraphDataServiceImpl.java`
+(same project, earlier date). It was verified to be a **faithful** pre-edit
+baseline: after removing the five added comment lines, the two files are
+**identical line for line** (274 lines each, every line equal). The patch
+therefore records that file's change like any other.
+
+### Applying
+
+```powershell
+cd D:\javawork\1.2\cpscloud1.0\code\platform\backend
+git -c core.autocrlf=false apply --reverse --check ..\..\..\..\work\rediscluterproject\docs\superpowers\patches\2026-10-30-napstarweb-cluster-branch-platform-backend.patch
+cd D:\javawork\1.2\cpscloud1.0\code\application\backend
+git -c core.autocrlf=false apply --reverse --check ..\..\..\..\work\rediscluterproject\docs\superpowers\patches\2026-10-30-napstarweb-cluster-branch-application-backend.patch
+```
+
+### Line endings
+
+The source files are **mixed**: `pom.xml` is LF, the `.java` files are CRLF. The
+patches were generated with `core.autocrlf=false` / `core.eol=lf` in the staging
+repository so the hunks match the bytes on disk exactly. Do **not** re-normalise
+these files, or the patches will stop applying.
+
+### Regenerating the patches
+
+Two things will silently produce a broken patch if you get them wrong:
+
+- **Do not pipe `git diff` through `Out-File -Encoding ascii`.** It mangles the
+  UTF-8 Chinese comments into `?` and the resulting patch is *corrupt*. Use
+  `git diff --output=<file>`, which writes the raw bytes.
+- **Delete the removed files from the work tree explicitly** before `git add -A`.
+  Copying only the files that still exist makes git see no change, and the
+  deletions vanish from the patch. (Not needed this round — nothing was deleted.)
+
+### Verification performed
+
+- Reverse-apply check against both live roots: exit `0` for
+  `platform-backend` and for `application-backend`.
+- Chinese text is intact: the platform patch carries **2226** CJK characters and
+  the application patch **1168**; every `?` in them is a genuine Java `<?>` or
+  ternary, verified codepoint by codepoint.
+- `oms` **84 tests** (0 failures / 0 errors / 0 skipped), `idgenerator`
+  **6 tests**, `rtdata-module` **14 tests**; backend reactor **44 modules**
+  SUCCESS, napstarweb reactor **13 modules** SUCCESS.
+- Repo side: bats **203 passed / 0 failed**, `check_syntax.sh` **TOTAL=46
+  FAIL=0**, `validate_libs.sh` **PASS=54 FAIL=0**, and the new
+  `validate_java_pipelines.sh` guard **PASS=21 FAIL=0**.
+- The probe: **PROBE PASSED** against the live e2e cluster at `127.0.0.1:16379`.
+
 ## 2026-10-29 — the two RedisUtil copies are now one
 
 There were **two** `RedisUtil` classes (the handoff said three — there is no

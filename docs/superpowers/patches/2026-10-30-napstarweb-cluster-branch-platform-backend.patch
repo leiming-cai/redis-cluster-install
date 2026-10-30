@@ -1,0 +1,1002 @@
+diff --git a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipeline.java b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipeline.java
+index 5ba374d..516d87a 100644
+--- a/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipeline.java
++++ b/realserver/common/oms/src/main/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipeline.java
+@@ -11,6 +11,7 @@ import java.util.Map;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicReference;
+ import java.util.concurrent.locks.ReentrantLock;
++import java.util.function.Predicate;
+ 
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -18,8 +19,10 @@ import org.springframework.data.redis.connection.RedisConnection;
+ import org.springframework.data.redis.connection.RedisConnectionFactory;
+ import org.springframework.data.redis.connection.jedis.JedisClusterConnection;
+ import org.springframework.data.redis.core.HashOperations;
++import org.springframework.data.redis.core.RedisCallback;
+ import org.springframework.data.redis.core.RedisTemplate;
+ import org.springframework.data.redis.serializer.RedisSerializer;
++import org.springframework.data.redis.serializer.SerializationUtils;
+ 
+ import redis.clients.jedis.Jedis;
+ import redis.clients.jedis.JedisCluster;
+@@ -31,16 +34,26 @@ import redis.clients.jedis.exceptions.JedisDataException;
+ import redis.clients.jedis.util.JedisClusterCRC16;
+ 
+ /**
+- * 集群模式下按节点 pipeline 写 hash。
++ * 集群模式下按节点 pipeline 读写（hash 与 string）。
+  * @Author: caileiming boboclmomi@163.com
+  * @Date: 2026-10-27
+- * @Description: 把「每 key 一次同步 HSET 往返」变成「每主节点一次 pipeline 往返」。
++ * @Description: 把「每 key 一次同步往返」变成「每主节点一次 pipeline 往返」。
+  *               槽位快照来自 CLUSTER SLOTS（host 在 Jedis 3.10 里是 byte[]）；
+  *               集群模式固定 db 0（Redis Cluster 不支持 SELECT）。
+- *               连接不是 Jedis 集群（单机/哨兵）时自动退化为逐 key 写入；
++ *               连接不是 Jedis 集群（单机/哨兵）时自动退化为逐 key 读写；
+  *               该判定按实例缓存且永久有效，不会被后续批次重新探测。
+  *               Pipeline.hset(byte[], Map) 发出的是多 field 的 HSET，要求 Redis >= 4.0
+  *               （旧路径用的是 HMSET）；目标镜像为 Redis 8.10。
++ *
++ *               ⚠️ <b>命名债</b>：本类名为 {@code RedisClusterHashPipeline}（写 hash），
++ *               但现在也承载 <b>hash 读</b>（{@link #getAllHashes(List)}）与
++ *               <b>string 读</b>（{@link #getAllValues(List)}）。<b>不改名的理由</b>：
++ *               改名会同时破坏 ① bean 名 {@code redisClusterHashPipeline}
++ *               （{@code RedisUtilConfig:336}）② 现有 32 条测试
++ *               （{@code RedisClusterHashPipelineTest} 28 条 +
++ *               {@code RedisClusterHashPipelineLiveTest} 4 条，其中 28 条直接引用
++ *               {@code RedisClusterHashPipeline.parseSlotSnapshot} 等包级静态成员）
++ *               ③ 7 份已留痕的 patch。收益（名字更准确）不抵成本。
+  */
+ public class RedisClusterHashPipeline {
+ 
+@@ -140,6 +153,60 @@ public class RedisClusterHashPipeline {
+         }
+     }
+ 
++    /**
++     * 分组结果：按槽属主分组的 key 下标，以及没有属主的 key 下标。
++     *
++     * <p>用<b>下标</b>而不是 key 本身分组，是为了让「同一个 key 在一批里出现多次」
++     * 也能正确回填 —— 读侧按下标回填，写侧按下标换回 key。
++     */
++    static final class OwnerGroups {
++        /** 属主 host:port -&gt; 该属主负责的 key 下标（保持传入顺序）。 */
++        final Map<String, List<Integer>> byNode;
++        /** 没有属主的 key 下标（槽位地图缺这一段）。 */
++        final List<Integer> unmapped;
++
++        OwnerGroups(Map<String, List<Integer>> byNode, List<Integer> unmapped) {
++            this.byNode = byNode;
++            this.unmapped = unmapped;
++        }
++    }
++
++    /**
++     * 把一批 key 按槽位属主分组 —— <b>写侧与读侧共用的唯一一份</b>槽位映射实现。
++     *
++     * <p>复制一份就是两套必然漂移的代码：写侧和读侧对「某个 key 属于哪个节点」的
++     * 判断必须完全一致，否则读到的和写进去的可能不是同一个节点上的数据。
++     *
++     * @param keys     待分组的 key（顺序即下标顺序）
++     * @param snapshot 槽位快照；为 null 时所有 key 都算「没有属主」
++     * @param filter   参与分组的过滤条件（写侧用它跳过空 hash；读侧不筛）
++     */
++    private OwnerGroups groupByOwner(List<String> keys, SlotSnapshot snapshot, Predicate<String> filter) {
++        Map<String, List<Integer>> byNode = new LinkedHashMap<String, List<Integer>>();
++        List<Integer> unmapped = new ArrayList<Integer>();
++        for (int i = 0; i < keys.size(); i++) {
++            String key = keys.get(i);
++            if (filter != null && !filter.test(key)) {
++                continue;
++            }
++            String owner = null;
++            if (snapshot != null) {
++                owner = snapshot.ownerOf(JedisClusterCRC16.getSlot(keyBytes(key)));
++            }
++            if (owner == null) {
++                unmapped.add(Integer.valueOf(i));
++                continue;
++            }
++            List<Integer> indices = byNode.get(owner);
++            if (indices == null) {
++                indices = new ArrayList<Integer>();
++                byNode.put(owner, indices);
++            }
++            indices.add(Integer.valueOf(i));
++        }
++        return new OwnerGroups(byNode, unmapped);
++    }
++
+     /**
+      * 把一批 key -> hash 的写入按 slot 属主归并，每个主节点一条 pipeline。
+      * 主节点不可达、pipeline 返回值与提交数不一致、或被服务端拒绝的 key，都会刷新拓扑后
+@@ -158,28 +225,27 @@ public class RedisClusterHashPipeline {
+         }
+ 
+         SlotSnapshot snapshot = snapshot(false);
++        // 分组算法只有一份（groupByOwner），写侧与读侧共用；写侧多一层「跳过空 hash」的过滤。
++        // keySet() 的迭代顺序与 entrySet() 一致，所以下标与原来的遍历顺序等价。
++        List<String> allKeys = new ArrayList<String>(keyedHashes.keySet());
++        OwnerGroups groups = groupByOwner(allKeys, snapshot, new Predicate<String>() {
++            @Override
++            public boolean test(String key) {
++                Map<String, ?> hash = keyedHashes.get(key);
++                return hash != null && !hash.isEmpty();
++            }
++        });
+         Map<String, List<String>> byNode = new LinkedHashMap<String, List<String>>();
+-        List<String> unmapped = new ArrayList<String>();
+-        if (snapshot == null) {
+-            unmapped.addAll(keyedHashes.keySet());
+-        } else {
+-            for (Map.Entry<String, ? extends Map<String, ?>> entry : keyedHashes.entrySet()) {
+-                if (entry.getValue() == null || entry.getValue().isEmpty()) {
+-                    continue;
+-                }
+-                int slot = JedisClusterCRC16.getSlot(keyBytes(entry.getKey()));
+-                String owner = snapshot.ownerOf(slot);
+-                if (owner == null) {
+-                    unmapped.add(entry.getKey());
+-                    continue;
+-                }
+-                List<String> keys = byNode.get(owner);
+-                if (keys == null) {
+-                    keys = new ArrayList<String>();
+-                    byNode.put(owner, keys);
+-                }
+-                keys.add(entry.getKey());
++        for (Map.Entry<String, List<Integer>> group : groups.byNode.entrySet()) {
++            List<String> keys = new ArrayList<String>(group.getValue().size());
++            for (Integer index : group.getValue()) {
++                keys.add(allKeys.get(index.intValue()));
+             }
++            byNode.put(group.getKey(), keys);
++        }
++        List<String> unmapped = new ArrayList<String>();
++        for (Integer index : groups.unmapped) {
++            unmapped.add(allKeys.get(index.intValue()));
+         }
+ 
+         List<String> failedKeys = new ArrayList<String>();
+@@ -226,6 +292,72 @@ public class RedisClusterHashPipeline {
+         }
+     }
+ 
++    /** 读操作的种类：hash（多 field）还是 string（单值）。 */
++    private enum ReadKind {
++        HASH, VALUE
++    }
++
++    /**
++     * 集群模式下按节点 pipeline 读一批 hash key。
++     *
++     * <p>返回列表与 {@code keys} <b>等长同序</b> —— 调用方常用「下标对齐」消费结果
++     * （napstarweb 的 {@code CalculateService.batchGetParam} 就是这样），
++     * 顺序错了会<b>静默返回错位数据</b>。
++     *
++     * <p>每个元素是该 key 的 hash（按 hashKeySerializer / hashValueSerializer 反序列化），
++     * key 不存在时是空 map。非集群部署（单机 / 哨兵）时退化为逐 key 读。
++     *
++     * <p>⚠️ 服务端回了<b>不是 map</b> 的东西（类型对不上）时：记一条 WARN
++     * （带 key 和实际形状），该元素降级成<b>空 map</b>，列表长度和顺序不变。
++     * 刻意不把它伪装成「key 不存在」 —— 那会把「读错了」静默变成「读到空 hash」。
++     */
++    public List<Map<String, Object>> getAllHashes(List<String> keys) {
++        List<ReadResult> raw = readAll(keys, ReadKind.HASH);
++        List<Map<String, Object>> result = new ArrayList<Map<String, Object>>(raw.size());
++        for (ReadResult item : raw) {
++            result.add(deserializeHash(asHashBytes(item)));
++        }
++        return result;
++    }
++
++    /**
++     * 集群模式下按节点 pipeline 读一批 string key。
++     *
++     * <p>返回列表与 {@code keys} <b>等长同序</b>；key 不存在时对应元素是 null。
++     * 值用 valueSerializer 反序列化 —— 与写侧
++     * （{@code valueSerializer.serialize(...)}）对称。
++     *
++     * <p>⚠️ 服务端回了<b>不是 byte[]</b> 的东西（类型对不上）时：记一条 WARN
++     * （带 key 和实际形状），该元素降级成 null，列表长度和顺序不变。
++     */
++    public List<Object> getAllValues(List<String> keys) {
++        List<ReadResult> raw = readAll(keys, ReadKind.VALUE);
++        List<Object> result = new ArrayList<Object>(raw.size());
++        RedisSerializer valueSerializer = redisTemplate.getValueSerializer();
++        for (ReadResult item : raw) {
++            result.add(deserializeValue(item, valueSerializer));
++        }
++        return result;
++    }
++
++    /**
++     * 取 string 读的原始回复，并做<b>显式类型检查</b>。
++     *
++     * <p>类型不对时（服务端回了别的形状）记一条 WARN（带上 key 和实际形状），
++     * 然后降级成 null —— 元素个数和顺序仍然保证（契约比单条数据更重要）。
++     */
++    private Object deserializeValue(ReadResult result, RedisSerializer valueSerializer) {
++        if (result == null || result.raw == null) {
++            return null;
++        }
++        if (!(result.raw instanceof byte[])) {
++            logger.warn("Value read of key {} returned {} instead of a byte array; treating it as a missing value",
++                    preview(result.key), result.raw.getClass().getName());
++            return null;
++        }
++        return valueSerializer.deserialize((byte[]) result.raw);
++    }
++
+     private JedisCluster clusterOrNull() {
+         if (nativeUnavailable) {
+             return null;
+@@ -463,6 +595,214 @@ public class RedisClusterHashPipeline {
+         }
+     }
+ 
++    /**
++     * 一个 key 的原始读结果：key 本身 + 服务端返回的原始字节。
++     *
++     * <p>带着 key 是为了<b>类型不匹配时能指名道姓地报错</b>：一个裸的
++     * {@code ClassCastException} 既不知道是哪个 key，也不知道期望什么形状。
++     */
++    private static final class ReadResult {
++        final String key;
++        /** HASH 读：Map&lt;byte[],byte[]&gt;；VALUE 读：byte[]；key 不存在时为 null。 */
++        final Object raw;
++
++        ReadResult(String key, Object raw) {
++            this.key = key;
++            this.raw = raw;
++        }
++    }
++
++    /**
++     * 按节点分组 pipeline 读一批 key。
++     *
++     * @return 与 keys 等长同序的<b>原始回复</b>（HASH 是 Map&lt;byte[],byte[]&gt;，
++     *         VALUE 是 byte[]，key 不存在时是 null）。
++     */
++    private List<ReadResult> readAll(List<String> keys, ReadKind kind) {
++        if (keys == null || keys.isEmpty()) {
++            return new ArrayList<ReadResult>();
++        }
++        JedisCluster jedisCluster = clusterOrNull();
++        if (jedisCluster == null) {
++            return readPerKey(keys, kind);
++        }
++
++        SlotSnapshot snapshot = snapshot(false);
++        // 与写侧共用同一份槽位映射实现（groupByOwner）；读侧不筛 key。
++        OwnerGroups groups = groupByOwner(keys, snapshot, null);
++        Map<String, List<Integer>> byNode = groups.byNode;
++        List<Integer> unmapped = groups.unmapped;
++
++        ReadResult[] values = new ReadResult[keys.size()];
++        boolean needsTopologyRefresh = false;
++        for (Map.Entry<String, List<Integer>> entry : byNode.entrySet()) {
++            JedisPool pool = poolFor(jedisCluster, entry.getKey());
++            if (pool == null) {
++                logger.warn("No JedisPool for {}; reading {} keys one by one",
++                        entry.getKey(), entry.getValue().size());
++                needsTopologyRefresh = true;
++                readPerKeyInto(keys, entry.getValue(), kind, values);
++                continue;
++            }
++            List<Object> replies;
++            try {
++                replies = runReadPipeline(pool, entry.getValue(), keys, kind);
++            } catch (JedisConnectionException e) {
++                logger.warn("Node {} unreachable ({}); refreshing topology and reading {} keys one by one",
++                        entry.getKey(), e.getMessage(), entry.getValue().size());
++                // 拓扑已经在下面统一刷新一次，这里不重复刷（写侧是同样的「本批结束时刷一次」）
++                needsTopologyRefresh = true;
++                readPerKeyInto(keys, entry.getValue(), kind, values);
++                continue;
++            }
++            if (replies == null || replies.size() != entry.getValue().size()) {
++                logger.warn("Read pipeline on node {} returned {} replies for {} keys (first key: {});"
++                                + " reading them one by one",
++                        entry.getKey(), replies == null ? 0 : replies.size(), entry.getValue().size(),
++                        preview(keys.get(entry.getValue().get(0).intValue())));
++                needsTopologyRefresh = true;
++                readPerKeyInto(keys, entry.getValue(), kind, values);
++                continue;
++            }
++            for (int i = 0; i < replies.size(); i++) {
++                Object reply = replies.get(i);
++                int index = entry.getValue().get(i).intValue();
++                if (reply instanceof JedisDataException) {
++                    // MOVED / ASK / WRONGTYPE … 是「返回值」不是异常
++                    if (!(reply instanceof JedisAskDataException)) {
++                        needsTopologyRefresh = true;
++                    }
++                    values[index] = readOneKey(keys.get(index), kind);
++                    continue;
++                }
++                values[index] = new ReadResult(keys.get(index), reply);
++            }
++        }
++        if (needsTopologyRefresh) {
++            refreshQuietly();
++        }
++        for (Integer index : unmapped) {
++            values[index.intValue()] = readOneKey(keys.get(index.intValue()), kind);
++        }
++
++        return toList(values);
++    }
++
++    /** 一条节点 pipeline：逐 key 发命令，返回原始回复。 */
++    private List<Object> runReadPipeline(JedisPool pool, List<Integer> indices, List<String> keys, ReadKind kind) {
++        Jedis jedis = pool.getResource();
++        Pipeline pipeline = null;
++        boolean synced = false;
++        try {
++            pipeline = jedis.pipelined();
++            for (Integer index : indices) {
++                byte[] rawKey = keyBytes(keys.get(index.intValue()));
++                if (kind == ReadKind.HASH) {
++                    pipeline.hgetAll(rawKey);
++                } else {
++                    pipeline.get(rawKey);
++                }
++            }
++            List<Object> replies = pipeline.syncAndReturnAll();
++            synced = true;
++            return replies;
++        } finally {
++            if (!synced && pipeline != null) {
++                // 构建期异常：先把已排队的命令刷出去，恢复协议对齐
++                try {
++                    pipeline.sync();
++                } catch (Exception e) {
++                    logger.warn("Failed to drain an aborted read pipeline: {}", e.getMessage());
++                }
++            }
++            jedis.close();
++        }
++    }
++
++    private List<ReadResult> readPerKey(List<String> keys, ReadKind kind) {
++        ReadResult[] values = new ReadResult[keys.size()];
++        List<Integer> all = new ArrayList<Integer>(keys.size());
++        for (int i = 0; i < keys.size(); i++) {
++            all.add(Integer.valueOf(i));
++        }
++        readPerKeyInto(keys, all, kind, values);
++        return toList(values);
++    }
++
++    private void readPerKeyInto(List<String> keys, List<Integer> indices, ReadKind kind, ReadResult[] values) {
++        for (Integer index : indices) {
++            values[index.intValue()] = readOneKey(keys.get(index.intValue()), kind);
++        }
++    }
++
++    /**
++     * 逐 key 读。用 redisTemplate.execute 而不是 opsForHash().entries()，
++     * 是为了拿到<b>原始字节</b> —— 与 pipeline 路径的返回形态一致，
++     * 反序列化只在一个地方做。
++     */
++    private ReadResult readOneKey(String key, ReadKind kind) {
++        if (kind == ReadKind.HASH) {
++            return new ReadResult(key, redisTemplate.execute((RedisCallback<Map<byte[], byte[]>>) connection ->
++                    connection.hGetAll(keyBytes(key))));
++        }
++        return new ReadResult(key, redisTemplate.execute((RedisCallback<byte[]>) connection ->
++                connection.get(keyBytes(key))));
++    }
++
++    /** 数组 -&gt; 列表。保留 null 元素（null 是「key 不存在」的合法结果）。 */
++    private static <T> List<T> toList(T[] values) {
++        List<T> list = new ArrayList<T>(values.length);
++        for (int i = 0; i < values.length; i++) {
++            list.add(values[i]);
++        }
++        return list;
++    }
++
++    /**
++     * 取 hash 读的原始回复，并做<b>显式类型检查</b>。
++     *
++     * <p>类型不对时（服务端回了别的形状）<b>不能</b>当成「key 不存在」：
++     * 那会把「读错了」静默伪装成「读到空 hash」，调用方拿到一个空 map 还以为
++     * key 真的没数据。所以这里记一条 WARN（带上 key 和实际形状），
++     * 然后降级成空 map —— 元素个数和顺序仍然保证（契约比单条数据更重要）。
++     *
++     * @return 原始 hash；key 不存在时为 null
++     */
++    @SuppressWarnings("unchecked")
++    private Map<byte[], byte[]> asHashBytes(ReadResult result) {
++        if (result == null || result.raw == null) {
++            return null;
++        }
++        if (!(result.raw instanceof Map)) {
++            logger.warn("Hash read of key {} returned {} instead of a map; treating it as an empty hash",
++                    preview(result.key), result.raw.getClass().getName());
++            return null;
++        }
++        return (Map<byte[], byte[]>) result.raw;
++    }
++
++    /**
++     * 反序列化 hash。
++     *
++     * <p>形状与 SDR 的 {@code deserializeMixedResults} 对齐：非空 hash 走
++     * {@code SerializationUtils.deserialize(raw, hashKeySerializer, hashValueSerializer)}
++     * → {@code LinkedHashMap<String,Object>}。
++     *
++     * <p>⚠️ SDR 对<b>空 hash</b> 有特例（{@code !isEmpty()} 判断落空 → 返回未反序列化的
++     * 原始 map）。本方法返回反序列化后的空 map —— <b>差异不可观测</b>
++     * （空 map 的 get 都返回 null），真集群测试会钉住这一点。
++     */
++    @SuppressWarnings("unchecked")
++    private Map<String, Object> deserializeHash(Map<byte[], byte[]> raw) {
++        if (raw == null || raw.isEmpty()) {
++            return new LinkedHashMap<String, Object>();
++        }
++        RedisSerializer hashKeySerializer = redisTemplate.getHashKeySerializer();
++        RedisSerializer hashValueSerializer = redisTemplate.getHashValueSerializer();
++        return (Map<String, Object>) SerializationUtils.deserialize(
++                raw, hashKeySerializer, hashValueSerializer);
++    }
++
+     @SuppressWarnings("rawtypes")
+     private byte[] keyBytes(String key) {
+         RedisSerializer serializer = redisTemplate.getKeySerializer();
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java
+index 2096275..29c707a 100644
+--- a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineLiveTest.java
+@@ -2,10 +2,13 @@ package com.sac.platform.realserver.oms.utils;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertNull;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ 
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.LinkedHashMap;
++import java.util.LinkedHashSet;
+ import java.util.List;
+ import java.util.Map;
+ 
+@@ -327,6 +330,196 @@ class RedisClusterHashPipelineLiveTest {
+         });
+     }
+ 
++    /**
++     * 读侧的核心契约：批量写进去的每一个 hash，都必须能被 getAllHashes 原样读回来。
++     *
++     * <p>这条断言同时覆盖：分组有没有算错 slot、有没有读到错误的 master、
++     * 以及**值序列化**是否与写路径一致（不一致的话读出来是乱码或类型不符）。
++     */
++    @Test
++    void readsEveryHashOfTheBatchBackUnchanged() {
++        withLiveCluster((template, pipeline) -> {
++            Map<String, Map<String, String>> batch = new LinkedHashMap<>();
++            for (int i = 0; i < 200; i++) {
++                String key = KEY_PREFIX + "readback:" + i;
++                Map<String, String> hash = new LinkedHashMap<>();
++                hash.put("Value", "12.34,171234567800" + (i % 10) + ",1");
++                hash.put("Quality", "1");
++                batch.put(key, hash);
++            }
++            pipeline.putAllHashes(batch);
++
++            List<String> keys = new ArrayList<>(batch.keySet());
++            List<Map<String, Object>> read = pipeline.getAllHashes(keys);
++
++            assertEquals(keys.size(), read.size());
++            for (int i = 0; i < keys.size(); i++) {
++                Map<String, Object> entry = read.get(i);
++                assertNotNull(entry, "hash was not read back: " + keys.get(i));
++                assertEquals(batch.get(keys.get(i)).size(), entry.size(),
++                        "hash size mismatch for " + keys.get(i));
++                for (Map.Entry<String, String> field : batch.get(keys.get(i)).entrySet()) {
++                    assertEquals(field.getValue(), String.valueOf(entry.get(field.getKey())),
++                            "value mismatch for " + keys.get(i) + " field " + field.getKey());
++                }
++            }
++        });
++    }
++
++    /**
++     * 读侧的顺序契约：返回列表必须与入参 key 顺序一致。
++     *
++     * <p>为什么这条必须钉死：napstarweb 的调用方是**按下标**对齐的
++     * （{@code results.get(svgIdList.indexOf(t))}），
++     * 顺序错了会**静默返回错位数据** —— 不报错，只是数据对不上。
++     *
++     * <p>命名说明：本类里还有一条 {@code readPathReturnsEntriesInTheSameOrderAsTheKeys}，
++     * 它走的是**旧路径** {@code RedisPipelineUtil.opsHashGetALLPipe}；
++     * 本条走的是**新路径** {@link RedisClusterHashPipeline#getAllHashes(List)}。
++     * 两条都断言「顺序」，所以名字必须能一眼分出是哪条路径。
++     */
++    @Test
++    void getAllHashesReturnsEntriesInTheSameOrderAsTheKeys() {
++        withLiveCluster((template, pipeline) -> {
++            Map<String, Map<String, String>> batch = new LinkedHashMap<>();
++            for (int i = 0; i < 50; i++) {
++                Map<String, String> hash = new LinkedHashMap<>();
++                hash.put("f", "value-" + i);
++                batch.put(KEY_PREFIX + "order:" + i, hash);
++            }
++            pipeline.putAllHashes(batch);
++
++            // 故意打乱成倒序，并插入一个不存在的 key
++            List<String> keys = new ArrayList<>(batch.keySet());
++            java.util.Collections.reverse(keys);
++            keys.add(KEY_PREFIX + "order:missing");
++
++            List<Map<String, Object>> read = pipeline.getAllHashes(keys);
++
++            assertEquals(keys.size(), read.size());
++            for (int i = 0; i < keys.size(); i++) {
++                assertNotNull(read.get(i), "no result at index " + i + " for key " + keys.get(i));
++                String expected = keys.get(i).endsWith(":missing")
++                        ? null : "value-" + keys.get(i).substring(keys.get(i).lastIndexOf(':') + 1);
++                if (expected == null) {
++                    assertTrue(read.get(i).isEmpty(),
++                            "a missing key must read back as an empty hash: " + keys.get(i));
++                } else {
++                    assertEquals(expected, String.valueOf(read.get(i).get("f")),
++                            "order mismatch at index " + i + " for " + keys.get(i));
++                }
++            }
++        });
++    }
++
++    /** 空 hash 的特例：SDR 的 deserializeMixedResults 对空 hash 返回未反序列化的原始 map，
++     *  本类返回反序列化后的空 map —— 差异必须不可观测。 */
++    @Test
++    void readSideReturnsAnEmptyMapForAMissingKey() {
++        withLiveCluster((template, pipeline) -> {
++            List<String> keys = Arrays.asList(KEY_PREFIX + "definitely-missing");
++            List<Map<String, Object>> read = pipeline.getAllHashes(keys);
++
++            assertEquals(1, read.size(), "result count mismatch; key " + keys.get(0));
++            assertNotNull(read.get(0), "no result for key " + keys.get(0));
++            assertTrue(read.get(0).isEmpty(), "a missing key must read back as an empty hash; key "
++                    + keys.get(0));
++            assertNull(read.get(0).get("anything"),
++                    "an empty hash must not expose any field; key " + keys.get(0));
++        });
++    }
++
++    /** string 读：值必须与写进去的一致。 */
++    @Test
++    void readsEveryValueOfTheBatchBackUnchanged() {
++        withLiveCluster((template, pipeline) -> {
++            List<String> keys = new ArrayList<>();
++            for (int i = 0; i < 50; i++) {
++                String key = KEY_PREFIX + "value:" + i;
++                template.opsForValue().set(key, "v-" + i);
++                keys.add(key);
++            }
++            List<Object> read = pipeline.getAllValues(keys);
++
++            assertEquals(keys.size(), read.size());
++            for (int i = 0; i < keys.size(); i++) {
++                assertEquals("v-" + keys.get(i).substring(keys.get(i).lastIndexOf(':') + 1),
++                        String.valueOf(read.get(i)), "value mismatch; key " + keys.get(i));
++            }
++        });
++    }
++
++    /**
++     * 一个批次必须真的被分到多个 master —— 否则「分组」这件事根本没被验证。
++     *
++     * <p>名字里的 {@code WithoutAnyMovedRedirect} 是**承重的那半句**：
++     * 分组坏掉时写和读都**照样成功**（MOVED 之后逐 key 兜底），
++     * 唯一能判定的信号是服务端收到的 MOVED 次数。
++     */
++    @Test
++    void readSideSpreadsTheBatchAcrossSeveralMastersWithoutAnyMovedRedirect() {
++        withLiveCluster((template, pipeline) -> {
++            Map<String, Map<String, String>> batch = new LinkedHashMap<>();
++            for (int i = 0; i < 300; i++) {
++                Map<String, String> hash = new LinkedHashMap<>();
++                hash.put("f", "v" + i);
++                // 读侧用**自己的** key 前缀：写侧那条用例也用 "spread:"，
++                // 而 cleanUp 把所有异常都吞了 —— 万一某次清理失败，
++                // 两个用例共用 key 就会互相顶替（一个用例的数据满足另一个的断言）。
++                batch.put(KEY_PREFIX + "readspread:" + i, hash);
++            }
++            pipeline.putAllHashes(batch);
++
++            List<String> keys = new ArrayList<>(batch.keySet());
++            // 这批 key 必须落在多个 master 上 —— 只扫第一个 master 的实现也必须被抓出来
++            Map<String, Integer> perMaster =
++                    RedisClusterTestSupport.countKeysPerMaster(template, new LinkedHashSet<>(keys));
++            int mastersWithKeys = 0;
++            for (Integer count : perMaster.values()) {
++                if (count != null && count > 0) {
++                    mastersWithKeys++;
++                }
++            }
++            assertTrue(mastersWithKeys > 1,
++                    "the batch must span several masters, but spanned " + mastersWithKeys
++                            + " (" + perMaster + ")");
++
++            // **读侧**的分组对不对，只能看服务端收到的 MOVED 次数：
++            // 分组正确时每个 key 都直接发给它的属主 master，一次 MOVED 都不该有；
++            // 分组坏掉时所有 key 挤到第一个 master，其中约 2/3 会被回 MOVED，
++            // 读侧再逐 key 兜底 —— **结果照样正确，但每个 key 多走一次往返**。
++            // 只断言「结果对」是抓不住这种坏掉的。
++            //
++            // ⚠️ 这条只证明「分组正确 ⇒ 服务端一次 MOVED 都不回」。
++            // 它**不能**证明读路径确实走了「每 master 一条 pipeline」——
++            // 兜底成逐 key 读时 JedisCluster 自己按槽路由，同样一次 MOVED 都不回。
++            // 「读路径确实用了 pipeline」由 Mockito 用例
++            // getAllHashesReturnsOneEntryPerKeyInTheGivenOrder 钉住。
++            //
++            // ⚠️ MOVED 计数是**整个集群累计**的计数器（errorstat_MOVED），
++            // 所以这里只能看**增量**；集群上有别的流量时增量会大于 0，
++            // 这条用例需要一台**没有别的读写流量**的集群。
++            long before = totalMovedErrors(template);
++            List<Map<String, Object>> read = pipeline.getAllHashes(keys);
++            long after = totalMovedErrors(template);
++
++            // MOVED 断言放在**前面**：结果条数不对时，先把重定向的证据摊开，
++            // 否则「条数不对」会把「分组坏了」这条更根本的证据盖掉。
++            assertEquals(0L, after - before,
++                    "the read batch was redirected " + (after - before)
++                            + " times; the read-side per-master grouping is broken"
++                            + " (every redirected key costs an extra round trip)"
++                            + " -- before=" + before + " after=" + after
++                            + " detail=[" + lastMovedDiag + "]");
++            assertEquals(keys.size(), read.size());
++            for (int i = 0; i < keys.size(); i++) {
++                assertNotNull(read.get(i), "no result at index " + i + " for key " + keys.get(i));
++                assertEquals("v" + i, String.valueOf(read.get(i).get("f")),
++                        "value mismatch at index " + i + " for key " + keys.get(i));
++            }
++        });
++    }
++
+     /**
+      * 写完立刻读（同一批次内）不能读到旧值；HSET 对同一 field 是幂等的，
+      * 所以重复写同一个 key 必须得到最后写的那个值。
+diff --git a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineTest.java b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineTest.java
+index 33d66de..f9dfa37 100644
+--- a/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineTest.java
++++ b/realserver/common/oms/src/test/java/com/sac/platform/realserver/oms/utils/RedisClusterHashPipelineTest.java
+@@ -2,6 +2,7 @@ package com.sac.platform.realserver.oms.utils;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
+ import static org.junit.jupiter.api.Assertions.assertNull;
+ import static org.junit.jupiter.api.Assertions.assertThrows;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+@@ -36,6 +37,7 @@ import org.springframework.data.redis.connection.RedisConnection;
+ import org.springframework.data.redis.connection.RedisConnectionFactory;
+ import org.springframework.data.redis.connection.jedis.JedisClusterConnection;
+ import org.springframework.data.redis.core.HashOperations;
++import org.springframework.data.redis.core.RedisCallback;
+ import org.springframework.data.redis.core.RedisTemplate;
+ import org.springframework.data.redis.serializer.RedisSerializer;
+ 
+@@ -536,6 +538,284 @@ class RedisClusterHashPipelineTest {
+         verify(f.hashes, times(2)).putAll(anyString(), anyMap());
+     }
+ 
++    // ---- Task 1: read side ----
++
++    @Test
++    void getAllHashesReturnsOneEntryPerKeyInTheGivenOrder() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getHashKeySerializer();
++        doReturn(utf8Codec()).when(f.template).getHashValueSerializer();
++
++        List<String> low = keysInRange(0, 8191, 1);        // -> node A (10.0.0.1:6379)
++        List<String> high = keysInRange(8192, 16383, 1);   // -> node B (10.0.0.2:6380)
++        List<String> keys = new ArrayList<String>();
++        keys.add(high.get(0));
++        keys.add(low.get(0));
++        keys.add(high.get(0));      // 同一个 key 出现两次：顺序不能塌成一格
++
++        Map<byte[], byte[]> replyA = new LinkedHashMap<byte[], byte[]>();
++        replyA.put("fieldA".getBytes(StandardCharsets.UTF_8), "valueA".getBytes(StandardCharsets.UTF_8));
++        Map<byte[], byte[]> replyB = new LinkedHashMap<byte[], byte[]>();
++        replyB.put("fieldB".getBytes(StandardCharsets.UTF_8), "valueB".getBytes(StandardCharsets.UTF_8));
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList(replyA));
++        when(f.pipelineB.syncAndReturnAll()).thenReturn(Arrays.<Object>asList(replyB, replyB));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Map<String, Object>> result = pipeline.getAllHashes(keys);
++
++        assertEquals(3, result.size());
++        assertEquals("valueB", result.get(0).get("fieldB"));
++        assertEquals("valueA", result.get(1).get("fieldA"));
++        assertEquals("valueB", result.get(2).get("fieldB"));
++    }
++
++    @Test
++    void getAllHashesReturnsAnEmptyMapForAMissingKey() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getHashKeySerializer();
++        doReturn(utf8Codec()).when(f.template).getHashValueSerializer();
++
++        List<String> keys = keysInRange(0, 8191, 1);
++        when(f.pipelineA.syncAndReturnAll())
++                .thenReturn(Arrays.<Object>asList(new LinkedHashMap<byte[], byte[]>()));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Map<String, Object>> result = pipeline.getAllHashes(keys);
++
++        assertEquals(1, result.size());
++        assertNotNull(result.get(0));
++        assertTrue(result.get(0).isEmpty());
++    }
++
++    @Test
++    void getAllHashesFallsBackToPerKeyReadsWhenTheConnectionIsNotAJedisCluster() {
++        RedisTemplate<String, Object> template = mock(RedisTemplate.class);
++        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
++        RedisConnection plainConnection = mock(RedisConnection.class);
++        doReturn(utf8Codec()).when(template).getKeySerializer();
++        doReturn(utf8Codec()).when(template).getHashKeySerializer();
++        doReturn(utf8Codec()).when(template).getHashValueSerializer();
++        when(factory.getConnection()).thenReturn(plainConnection);
++
++        Map<byte[], byte[]> raw = new LinkedHashMap<byte[], byte[]>();
++        raw.put("f".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8));
++        doReturn(raw).when(template).execute(any(RedisCallback.class));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(template, factory);
++        List<Map<String, Object>> result = pipeline.getAllHashes(Arrays.asList("k1"));
++
++        assertEquals(1, result.size());
++        assertEquals("v", result.get(0).get("f"));
++    }
++
++    @Test
++    void getAllHashesReadsPerKeyWhenThePipelineRejectsAKey() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getHashKeySerializer();
++        doReturn(utf8Codec()).when(f.template).getHashValueSerializer();
++
++        List<String> keys = keysInRange(0, 8191, 1);
++        // MOVED 是「返回值」不是异常
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList(
++                new JedisMovedDataException("MOVED 1 10.0.0.9:6379", new HostAndPort("10.0.0.9", 6379), 1)));
++        Map<byte[], byte[]> raw = new LinkedHashMap<byte[], byte[]>();
++        raw.put("f".getBytes(StandardCharsets.UTF_8), "fallback".getBytes(StandardCharsets.UTF_8));
++        doReturn(raw).when(f.template).execute(any(RedisCallback.class));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Map<String, Object>> result = pipeline.getAllHashes(keys);
++
++        assertEquals(1, result.size());
++        assertEquals("fallback", result.get(0).get("f"));
++    }
++
++    @Test
++    void getAllValuesReturnsOneEntryPerKeyInTheGivenOrder() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getValueSerializer();
++
++        List<String> low = keysInRange(0, 8191, 1);
++        List<String> high = keysInRange(8192, 16383, 1);
++        List<String> keys = new ArrayList<String>();
++        keys.add(high.get(0));
++        keys.add(low.get(0));
++
++        when(f.pipelineA.syncAndReturnAll())
++                .thenReturn(Arrays.<Object>asList("valueA".getBytes(StandardCharsets.UTF_8)));
++        when(f.pipelineB.syncAndReturnAll())
++                .thenReturn(Arrays.<Object>asList("valueB".getBytes(StandardCharsets.UTF_8)));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Object> result = pipeline.getAllValues(keys);
++
++        assertEquals(2, result.size());
++        assertEquals("valueB", result.get(0));
++        assertEquals("valueA", result.get(1));
++    }
++
++    @Test
++    void getAllHashesReturnsAnEmptyMapWhenTheRawReplyIsNull() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getHashKeySerializer();
++        doReturn(utf8Codec()).when(f.template).getHashValueSerializer();
++
++        List<String> keys = keysInRange(0, 8191, 1);
++        // 原始回复是 null（key 不存在）——必须得到「空 map」而不是 null，且列表长度不变
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList((Object) null));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Map<String, Object>> result = pipeline.getAllHashes(keys);
++
++        assertEquals(1, result.size());
++        assertNotNull(result.get(0));
++        assertTrue(result.get(0).isEmpty());
++    }
++
++    @Test
++    void getAllValuesReturnsNullWhenTheRawReplyIsNull() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getValueSerializer();
++
++        List<String> keys = keysInRange(0, 8191, 1);
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList((Object) null));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Object> result = pipeline.getAllValues(keys);
++
++        assertEquals(1, result.size());
++        assertNull(result.get(0));
++    }
++
++    @Test
++    void getAllHashesKeepsTheListShapeWhenTheRawReplyHasTheWrongType() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getHashKeySerializer();
++        doReturn(utf8Codec()).when(f.template).getHashValueSerializer();
++
++        List<String> keys = keysInRange(0, 8191, 1);
++        // 服务端回了不是 map 的东西：不能抛 ClassCastException，也不能缩列表
++        when(f.pipelineA.syncAndReturnAll())
++                .thenReturn(Arrays.<Object>asList("not-a-map".getBytes(StandardCharsets.UTF_8)));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Map<String, Object>> result = pipeline.getAllHashes(keys);
++
++        // 降级成空 map，但元素个数和顺序必须保持（契约 > 单条数据）
++        assertEquals(1, result.size());
++        assertNotNull(result.get(0));
++        assertTrue(result.get(0).isEmpty());
++    }
++
++    @Test
++    void getAllValuesKeepsTheListShapeWhenTheRawReplyHasTheWrongType() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getValueSerializer();
++
++        List<String> keys = keysInRange(0, 8191, 1);
++        // 服务端回了不是 byte[] 的东西
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList("not-bytes"));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Object> result = pipeline.getAllValues(keys);
++
++        assertEquals(1, result.size());
++        assertNull(result.get(0));
++    }
++
++    @Test
++    void getAllHashesFallsBackToPerKeyReadsWhenTheNodeIsUnreachable() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getHashKeySerializer();
++        doReturn(utf8Codec()).when(f.template).getHashValueSerializer();
++
++        List<String> keys = keysInRange(0, 8191, 1);
++        // 节点整台机器连不上
++        when(f.poolA.getResource()).thenThrow(new JedisConnectionException("node A is down"));
++        Map<byte[], byte[]> raw = new LinkedHashMap<byte[], byte[]>();
++        raw.put("f".getBytes(StandardCharsets.UTF_8), "fallback".getBytes(StandardCharsets.UTF_8));
++        doReturn(raw).when(f.template).execute(any(RedisCallback.class));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Map<String, Object>> result = pipeline.getAllHashes(keys);
++
++        assertEquals(1, result.size());
++        assertEquals("fallback", result.get(0).get("f"));
++        // 拓扑只刷新一次（批次结束时统一刷），不是「catch 里刷一次 + 批次末再刷一次」
++        verify(f.slotsJedis, times(2)).clusterSlots();
++    }
++
++    @Test
++    void getAllHashesFallsBackToPerKeyReadsWhenTheReplyCountIsWrong() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getHashKeySerializer();
++        doReturn(utf8Codec()).when(f.template).getHashValueSerializer();
++
++        List<String> keys = keysInRange(0, 8191, 2);
++        // 2 个 key 只有 1 条回复
++        when(f.pipelineA.syncAndReturnAll()).thenReturn(Arrays.<Object>asList(
++                new LinkedHashMap<byte[], byte[]>()));
++        Map<byte[], byte[]> raw = new LinkedHashMap<byte[], byte[]>();
++        raw.put("f".getBytes(StandardCharsets.UTF_8), "fallback".getBytes(StandardCharsets.UTF_8));
++        doReturn(raw).when(f.template).execute(any(RedisCallback.class));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Map<String, Object>> result = pipeline.getAllHashes(keys);
++
++        // 整批退回逐 key 读，长度和顺序都要对
++        assertEquals(2, result.size());
++        assertEquals("fallback", result.get(0).get("f"));
++        assertEquals("fallback", result.get(1).get("f"));
++    }
++
++    @Test
++    void getAllValuesFallsBackToPerKeyReadsWhenTheNodeIsUnreachable() {
++        Fixture f = new Fixture();
++        f.seedSlots();
++        doReturn(utf8Codec()).when(f.template).getValueSerializer();
++
++        List<String> keys = keysInRange(0, 8191, 1);
++        when(f.poolA.getResource()).thenThrow(new JedisConnectionException("node A is down"));
++        doReturn("fallback".getBytes(StandardCharsets.UTF_8))
++                .when(f.template).execute(any(RedisCallback.class));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Object> result = pipeline.getAllValues(keys);
++
++        assertEquals(1, result.size());
++        assertEquals("fallback", result.get(0));
++    }
++
++    @Test
++    void getAllHashesReadsKeysWithoutASlotOwnerOneByOne() {
++        Fixture f = new Fixture();
++        // 快照只覆盖 0..8191，高位槽位的 key 没有属主
++        f.seedSlotsForLowRangeOnly();
++        doReturn(utf8Codec()).when(f.template).getHashKeySerializer();
++        doReturn(utf8Codec()).when(f.template).getHashValueSerializer();
++
++        List<String> keys = keysInRange(8192, 16383, 1);
++        Map<byte[], byte[]> raw = new LinkedHashMap<byte[], byte[]>();
++        raw.put("f".getBytes(StandardCharsets.UTF_8), "unmapped".getBytes(StandardCharsets.UTF_8));
++        doReturn(raw).when(f.template).execute(any(RedisCallback.class));
++
++        RedisClusterHashPipeline pipeline = new RedisClusterHashPipeline(f.template, f.factory);
++        List<Map<String, Object>> result = pipeline.getAllHashes(keys);
++
++        assertEquals(1, result.size());
++        assertEquals("unmapped", result.get(0).get("f"));
++        verify(f.jedisB, never()).pipelined();
++    }
++
+     // ---- fixtures ----
+ 
+     private static final class Fixture {
+@@ -555,8 +835,11 @@ class RedisClusterHashPipelineTest {
+         final Map<String, JedisPool> nodes = new LinkedHashMap<String, JedisPool>();
+ 
+         Fixture() {
+-            // getKeySerializer() 返回 RedisSerializer<?>，ECJ 对通配符捕获后 thenReturn 不接受
+-            // RedisSerializer<Object>，这里与 RedisPipelineUtilTest 一致改用 doReturn。
++            // getKeySerializer() / getHashKeySerializer() / getHashValueSerializer() 都返回
++            // RedisSerializer<?>，ECJ 对通配符捕获后 thenReturn 不接受 RedisSerializer<Object>，
++            // 这里与 RedisPipelineUtilTest 一致改用 doReturn。
++            // 注意：utf8Serializer() 只 stub 了 serialize（写侧够用）；
++            // 读侧需要 deserialize，用例里改用 utf8Codec() 覆盖这三个 getter。
+             doReturn(utf8Serializer()).when(template).getKeySerializer();
+             doReturn(utf8Serializer()).when(template).getHashKeySerializer();
+             doReturn(utf8Serializer()).when(template).getHashValueSerializer();
+@@ -631,6 +914,17 @@ class RedisClusterHashPipelineTest {
+         return serializer;
+     }
+ 
++    /** 读路径用的 serializer：serialize 与 deserialize 都要能用。 */
++    @SuppressWarnings("unchecked")
++    private static RedisSerializer<Object> utf8Codec() {
++        RedisSerializer<Object> serializer = mock(RedisSerializer.class);
++        when(serializer.serialize(any())).thenAnswer(
++                invocation -> String.valueOf((Object) invocation.getArgument(0)).getBytes(StandardCharsets.UTF_8));
++        when(serializer.deserialize(any())).thenAnswer(
++                invocation -> new String((byte[]) invocation.getArgument(0), StandardCharsets.UTF_8));
++        return serializer;
++    }
++
+     private static List<String> keysInRange(int from, int to, int count) {
+         List<String> keys = new ArrayList<String>();
+         for (int i = 0; i < 1000000 && keys.size() < count; i++) {

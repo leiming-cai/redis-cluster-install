@@ -1,0 +1,549 @@
+diff --git a/napstarweb/monitor/pom.xml b/napstarweb/monitor/pom.xml
+index 57b3580..fd194bf 100644
+--- a/napstarweb/monitor/pom.xml
++++ b/napstarweb/monitor/pom.xml
+@@ -82,6 +82,10 @@
+ 			<groupId>com.sac.platform</groupId>
+ 			<artifactId>realserver-service</artifactId>
+ 		</dependency>
++		<dependency>
++			<groupId>com.sac.platform</groupId>
++			<artifactId>realserver-oms</artifactId>
++		</dependency>
+ 		<dependency>
+ 			<groupId>cn.hutool</groupId>
+ 			<artifactId>hutool-all</artifactId>
+diff --git a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/cimg/services/impl/CanvasMonitorServiceImpl.java b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/cimg/services/impl/CanvasMonitorServiceImpl.java
+index e5ca328..74de864 100644
+--- a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/cimg/services/impl/CanvasMonitorServiceImpl.java
++++ b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/cimg/services/impl/CanvasMonitorServiceImpl.java
+@@ -45,6 +45,8 @@ import com.sac.platform.modelserver.entity.DataObject;
+ import com.sac.platform.modelserver.entity.model.ObjectType;
+ import com.sac.platform.modelserver.service.BaseEntityDataService;
+ import com.sac.platform.modelserver.service.ModelDataService;
++import com.sac.platform.realserver.oms.utils.RedisClusterHashPipeline;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+ 
+ @Component
+ public class CanvasMonitorServiceImpl implements CanvasMonitorService {
+@@ -72,6 +74,10 @@ public class CanvasMonitorServiceImpl implements CanvasMonitorService {
+ 	private SymbolParseService symbolParseService;
+ 	@Autowired
+ 	private UseSymbolParseService useSymbolParseService;
++	@Autowired
++	private RedisClusterHelper redisClusterHelper;
++	@Autowired
++	private RedisClusterHashPipeline redisClusterHashPipeline;
+ 
+ 	public Map<String, UseDefinition> readCanvas(String graphId) throws Exception {
+ 		File file = new File(graphicsPath + File.separator + graphId + ConstantUtil.CIMG_FILE_SUFFIX);
+@@ -282,7 +288,7 @@ public class CanvasMonitorServiceImpl implements CanvasMonitorService {
+ 		// 存储当前图里所有间隔和相应的id
+ 		Map<String, BayEntity> bayEntityMap = new HashMap();
+ 
+-		redisTemplate.executePipelined(new RedisCallback<Object>() {
++		final RedisCallback<Object> callback = new RedisCallback<Object>() {
+ 			@Override
+ 			public Object doInRedis(RedisConnection redisConnection) throws DataAccessException {
+ 				long currenttime = System.currentTimeMillis();
+@@ -383,7 +389,19 @@ public class CanvasMonitorServiceImpl implements CanvasMonitorService {
+ 				// SVGSupervisor.getInstance().getRtobidMap().get(graphId));
+ 				return null;
+ 			}
+-		});
++		};
++		if (redisClusterHelper.isCluster()) {
++			// 集群模式下 SDR 的 pipeline 不可用（JedisClusterConnection.openPipeline 抛
++			// UnsupportedOperationException，回调体一次都不会执行）。
++			// 改用非 pipeline 的 execute：每条命令一次往返，但 JedisCluster 会按 slot 路由。
++			// 往返变多是可接受的：每条记录都夹着一次 DB 查询，Redis 不是瓶颈。
++			// ⚠️ 集群分支下 set/hSet 立即生效 → 同一批次后续迭代能读到前面刚写的值
++			//    （单机 pipeline 下命令攒到批次结束才落库，读不到）。
++			//    这是两种模式本来就有的差异，见设计文档风险 R2，本轮不修。
++			redisTemplate.execute(callback);
++		} else {
++			redisTemplate.executePipelined(callback);
++		}
+ 		return useDefinitionMap;
+ 	}
+ 
+@@ -396,16 +414,31 @@ public class CanvasMonitorServiceImpl implements CanvasMonitorService {
+ 	public Map batchGetSymbol(List<String> symbolIdList, Boolean useParallel) throws Exception {
+ 		long current = System.currentTimeMillis();
+ 
+-		List results = redisTemplate.executePipelined(new RedisCallback() {
+-			@Override
+-			public Object doInRedis(RedisConnection connection) throws DataAccessException {
+-				// StringRedisConnection stringRedisConn = (StringRedisConnection)connection;
+-				for (String symbolId : symbolIdList) {
+-					connection.get((RedisKey.BASE_SVG_SYMBOL + symbolId).getBytes());
++		// 先把 key 列表提出来（原来是在回调体里现拼的）：
++		// 集群分支需要整批 key 才能按 slot 分组，单机分支只是拿它当循环源。
++		final List<String> keys = new ArrayList<>();
++		for (String symbolId : symbolIdList) {
++			keys.add(RedisKey.BASE_SVG_SYMBOL + symbolId);
++		}
++
++		// raw：保持文件既有风格。集群分支返回与 keys 等长同序的列表，
++		// 调用方按下标对齐（results.get(symbolIdList.indexOf(t))）→ 顺序是承重的契约。
++		List results;
++		if (redisClusterHelper.isCluster()) {
++			// string 读：集群下 SDR 的 pipeline 不可用，改走 oms 的按 slot 分组读（每个 master 一条 pipeline）
++			results = redisClusterHashPipeline.getAllValues(keys);
++		} else {
++			results = redisTemplate.executePipelined(new RedisCallback() {
++				@Override
++				public Object doInRedis(RedisConnection connection) throws DataAccessException {
++					// StringRedisConnection stringRedisConn = (StringRedisConnection)connection;
++					for (String key : keys) {
++						connection.get(key.getBytes());
++					}
++					return null;
+ 				}
+-				return null;
+-			}
+-		});
++			});
++		}
+ 		if (null == results || results.size() == 0) {
+ 			return null;
+ 		}
+diff --git a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java
+index 8cf98d8..2ba75c4 100644
+--- a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java
++++ b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java
+@@ -20,6 +20,7 @@ import com.sac.application.napstarweb.monitor.services.SVGInitSupervisor;
+ import com.sac.platform.common.utils.ExceptionUtil;
+ import com.sac.platform.common.utils.SystemIDUtil;
+ import com.sac.platform.modelserver.entity.model.ObjectType;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ import org.springframework.beans.factory.annotation.Autowired;
+@@ -77,6 +78,9 @@ public class RTListener {
+     @Autowired
+     HangTagConfigService hangTagConfigService;
+ 
++    @Autowired
++    private RedisClusterHelper redisClusterHelper;
++
+     /**
+      * 消费量测数据
+      *
+@@ -92,7 +96,7 @@ public class RTListener {
+             return;
+         }
+         RedisSerializer valueSerializer = redisTemplate.getValueSerializer();
+-        redisTemplate.executePipelined(new RedisCallback<Object>() {
++        final RedisCallback<Object> callback = new RedisCallback<Object>() {
+             @Override
+             public Object doInRedis(RedisConnection redisConnection) throws DataAccessException {
+                 SVGInitSupervisor svgInitSupervisor = new SVGInitSupervisor();
+@@ -134,6 +138,18 @@ public class RTListener {
+                 }
+                 return null;
+             }
+-        });
++        };
++        if (redisClusterHelper.isCluster()) {
++            // 集群模式下 SDR 的 pipeline 不可用（JedisClusterConnection.openPipeline 抛
++            // UnsupportedOperationException，回调体一次都不会执行）。
++            // 改用非 pipeline 的 execute：每条命令一次往返，但 JedisCluster 会按 slot 路由。
++            // 往返变多是可接受的：每条记录都夹着一次 DB 查询，Redis 不是瓶颈。
++            // ⚠️ 集群分支下 hSet/hDel 立即生效 → 同一批次后续迭代能读到前面刚写的值
++            //    （单机 pipeline 下命令攒到批次结束才落库，读不到）。
++            //    这是两种模式本来就有的差异，见设计文档风险 R2，本轮不修。
++            redisTemplate.execute(callback);
++        } else {
++            redisTemplate.executePipelined(callback);
++        }
+     }
+ }
+diff --git a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateForCanvasService.java b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateForCanvasService.java
+index 7b646ac..e97fe3b 100644
+--- a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateForCanvasService.java
++++ b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateForCanvasService.java
+@@ -42,6 +42,8 @@ import com.sac.platform.modelserver.service.BaseEntityDataService;
+ import com.sac.platform.modelserver.service.ModelDataService;
+ import com.sac.platform.realserver.entity.RealAttribute;
+ import com.sac.platform.realserver.entity.RealData;
++import com.sac.platform.realserver.oms.utils.RedisClusterHashPipeline;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+ import com.sac.platform.realserver.oms.utils.RedisPipelineUtil;
+ import com.sac.platform.realserver.service.RealOpreateService;
+ 
+@@ -71,6 +73,11 @@ public class CalculateForCanvasService {
+ 	@Autowired
+ 	private ColorConfigService colorConfigService;
+ 
++	@Autowired
++	private RedisClusterHelper redisClusterHelper;
++	@Autowired
++	private RedisClusterHashPipeline redisClusterHashPipeline;
++
+ 	@Autowired
+ 	private TopoService topoService;
+ 	@Autowired
+@@ -685,15 +692,30 @@ public class CalculateForCanvasService {
+ 
+ 	// xusj 根据图号id从redis获取所有对应的连接线解析定义
+ 	public void batchConnectLineDefCache(List<String> svgIdList, SVGSupervisor svgSupervisor) throws Exception {
+-		List results = redisTemplate.executePipelined(new RedisCallback() {
+-			@Override
+-			public Object doInRedis(RedisConnection connection) throws DataAccessException {
+-				for (String svgId : svgIdList) {
+-					connection.hGetAll((RedisKey.BASE_SVG_CONNECTLINE + svgId).getBytes());
++		// 先把 key 列表提出来（原来是在回调体里现拼的）：
++		// 集群分支需要整批 key 才能按 slot 分组，单机分支只是拿它当循环源。
++		final List<String> keys = new ArrayList<>();
++		for (String svgId : svgIdList) {
++			keys.add(RedisKey.BASE_SVG_CONNECTLINE + svgId);
++		}
++
++		// raw：保持文件既有风格。集群分支返回与 keys 等长同序的列表，
++		// 调用方按下标对齐（results.get(svgIdList.indexOf(t))）→ 顺序是承重的契约。
++		List results;
++		if (redisClusterHelper.isCluster()) {
++			// hash 读：集群下 SDR 的 pipeline 不可用，改走 oms 的按 slot 分组读（每个 master 一条 pipeline）
++			results = redisClusterHashPipeline.getAllHashes(keys);
++		} else {
++			results = redisTemplate.executePipelined(new RedisCallback() {
++				@Override
++				public Object doInRedis(RedisConnection connection) throws DataAccessException {
++					for (String key : keys) {
++						connection.hGetAll(key.getBytes());
++					}
++					return null;
+ 				}
+-				return null;
+-			}
+-		});
++			});
++		}
+ 		if (svgIdList == null || results == null) {
+ 			return;
+ 		}
+@@ -717,16 +739,31 @@ public class CalculateForCanvasService {
+ 	public Map batchGetParam(String keyPrefix, List<String> paramList, Boolean useParallel) throws Exception {
+ 		RedisSerializer keySerializer = redisTemplate.getKeySerializer();
+ 		RedisSerializer valueSerializer = redisTemplate.getValueSerializer();
+-		List results = redisTemplate.executePipelined(new RedisCallback() {
+-			@Override
+-			public Object doInRedis(RedisConnection connection) throws DataAccessException {
+-				// StringRedisConnection stringRedisConn = (StringRedisConnection)connection;
+-				for (String param : paramList) {
+-					connection.hGetAll((keyPrefix + param + ":RT").getBytes());
++		// 先把 key 列表提出来（原来是在回调体里现拼的）：
++		// 集群分支需要整批 key 才能按 slot 分组，单机分支只是拿它当循环源。
++		final List<String> keys = new ArrayList<>();
++		for (String param : paramList) {
++			keys.add(keyPrefix + param + ":RT");
++		}
++
++		// raw：保持文件既有风格。集群分支返回与 keys 等长同序的列表，
++		// 调用方按下标对齐（results.get(paramList.indexOf(t))）→ 顺序是承重的契约。
++		List results;
++		if (redisClusterHelper.isCluster()) {
++			// hash 读：集群下 SDR 的 pipeline 不可用，改走 oms 的按 slot 分组读（每个 master 一条 pipeline）
++			results = redisClusterHashPipeline.getAllHashes(keys);
++		} else {
++			results = redisTemplate.executePipelined(new RedisCallback() {
++				@Override
++				public Object doInRedis(RedisConnection connection) throws DataAccessException {
++					// StringRedisConnection stringRedisConn = (StringRedisConnection)connection;
++					for (String key : keys) {
++						connection.hGetAll(key.getBytes());
++					}
++					return null;
+ 				}
+-				return null;
+-			}
+-		});
++			});
++		}
+ 		if (null == results || results.size() == 0) {
+ 			return null;
+ 		}
+diff --git a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateService.java b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateService.java
+index b843046..930f089 100644
+--- a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateService.java
++++ b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateService.java
+@@ -44,6 +44,8 @@ import com.sac.platform.modelserver.service.BaseEntityDataService;
+ import com.sac.platform.modelserver.service.ModelDataService;
+ import com.sac.platform.realserver.entity.RealAttribute;
+ import com.sac.platform.realserver.entity.RealData;
++import com.sac.platform.realserver.oms.utils.RedisClusterHashPipeline;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+ import com.sac.platform.realserver.oms.utils.RedisPipelineUtil;
+ import com.sac.platform.realserver.service.RealOpreateService;
+ 
+@@ -75,6 +77,11 @@ public class CalculateService {
+ 	@Autowired
+ 	private ColorConfigService colorConfigService;
+ 
++	@Autowired
++	private RedisClusterHelper redisClusterHelper;
++	@Autowired
++	private RedisClusterHashPipeline redisClusterHashPipeline;
++
+ 	@Autowired
+ 	private TopoService topoService;
+ 	@Autowired
+@@ -682,15 +689,30 @@ public class CalculateService {
+ 
+ 	// xusj 根据图号id从redis获取所有对应的连接线解析定义
+ 	public void batchConnectLineDefCache(List<String> svgIdList, SVGSupervisor svgSupervisor) throws Exception {
+-		List results = redisTemplate.executePipelined(new RedisCallback() {
+-			@Override
+-			public Object doInRedis(RedisConnection connection) throws DataAccessException {
+-				for (String svgId : svgIdList) {
+-					connection.hGetAll((RedisKey.BASE_SVG_CONNECTLINE + svgId).getBytes());
++		// 先把 key 列表提出来（原来是在回调体里现拼的）：
++		// 集群分支需要整批 key 才能按 slot 分组，单机分支只是拿它当循环源。
++		final List<String> keys = new ArrayList<>();
++		for (String svgId : svgIdList) {
++			keys.add(RedisKey.BASE_SVG_CONNECTLINE + svgId);
++		}
++
++		// raw：保持文件既有风格。集群分支返回与 keys 等长同序的列表，
++		// 调用方按下标对齐（results.get(svgIdList.indexOf(t))）→ 顺序是承重的契约。
++		List results;
++		if (redisClusterHelper.isCluster()) {
++			// hash 读：集群下 SDR 的 pipeline 不可用，改走 oms 的按 slot 分组读（每个 master 一条 pipeline）
++			results = redisClusterHashPipeline.getAllHashes(keys);
++		} else {
++			results = redisTemplate.executePipelined(new RedisCallback() {
++				@Override
++				public Object doInRedis(RedisConnection connection) throws DataAccessException {
++					for (String key : keys) {
++						connection.hGetAll(key.getBytes());
++					}
++					return null;
+ 				}
+-				return null;
+-			}
+-		});
++			});
++		}
+ 		if (svgIdList == null || results == null) {
+ 			return;
+ 		}
+@@ -714,16 +736,31 @@ public class CalculateService {
+ 	public Map batchGetParam(String keyPrefix, List<String> paramList, Boolean useParallel) throws Exception {
+ 		RedisSerializer keySerializer = redisTemplate.getKeySerializer();
+ 		RedisSerializer valueSerializer = redisTemplate.getValueSerializer();
+-		List results = redisTemplate.executePipelined(new RedisCallback() {
+-			@Override
+-			public Object doInRedis(RedisConnection connection) throws DataAccessException {
+-				// StringRedisConnection stringRedisConn = (StringRedisConnection)connection;
+-				for (String param : paramList) {
+-					connection.hGetAll((keyPrefix + param + ":RT").getBytes());
++		// 先把 key 列表提出来（原来是在回调体里现拼的）：
++		// 集群分支需要整批 key 才能按 slot 分组，单机分支只是拿它当循环源。
++		final List<String> keys = new ArrayList<>();
++		for (String param : paramList) {
++			keys.add(keyPrefix + param + ":RT");
++		}
++
++		// raw：保持文件既有风格。集群分支返回与 keys 等长同序的列表，
++		// 调用方按下标对齐（results.get(paramList.indexOf(t))）→ 顺序是承重的契约。
++		List results;
++		if (redisClusterHelper.isCluster()) {
++			// hash 读：集群下 SDR 的 pipeline 不可用，改走 oms 的按 slot 分组读（每个 master 一条 pipeline）
++			results = redisClusterHashPipeline.getAllHashes(keys);
++		} else {
++			results = redisTemplate.executePipelined(new RedisCallback() {
++				@Override
++				public Object doInRedis(RedisConnection connection) throws DataAccessException {
++					// StringRedisConnection stringRedisConn = (StringRedisConnection)connection;
++					for (String key : keys) {
++						connection.hGetAll(key.getBytes());
++					}
++					return null;
+ 				}
+-				return null;
+-			}
+-		});
++			});
++		}
+ 		if (null == results || results.size() == 0) {
+ 			return null;
+ 		}
+diff --git a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/SVGParseService.java b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/SVGParseService.java
+index 6c701c4..0013f43 100644
+--- a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/SVGParseService.java
++++ b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/SVGParseService.java
+@@ -18,6 +18,8 @@ import com.sac.platform.modelserver.service.BaseEntityDataService;
+ import com.sac.platform.modelserver.service.ModelDataService;
+ import com.sac.platform.modelserver.service.ParentWiringService;
+ import com.sac.platform.modelserver.service.WiringService;
++import com.sac.platform.realserver.oms.utils.RedisClusterHashPipeline;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+ import com.sac.platform.realserver.oms.utils.RedisPipelineUtil;
+ import dm.jdbc.util.StringUtil;
+ import org.apache.commons.lang3.StringUtils;
+@@ -83,6 +85,10 @@ public class SVGParseService {
+     private QlExpressUtil qlExpressUtil;
+     @Autowired
+     private RedisTemplate redisTemplate;
++    @Autowired
++    private RedisClusterHelper redisClusterHelper;
++    @Autowired
++    private RedisClusterHashPipeline redisClusterHashPipeline;
+     @Value("${svg.switch_symbols}")
+     private String[] switchSymbols;
+     @Value("${svg.handcart_symbols}")
+@@ -561,7 +567,7 @@ public class SVGParseService {
+                 }
+             }
+         }
+-        redisTemplate.executePipelined(new RedisCallback<Object>() {
++        final RedisCallback<Object> callback = new RedisCallback<Object>() {
+             @Override
+             public Object doInRedis(RedisConnection redisConnection) throws DataAccessException {
+                 long currenttime = System.currentTimeMillis();
+@@ -1581,7 +1587,19 @@ public class SVGParseService {
+                 // SVGSupervisor.getInstance().getRtobidMap().get(graphId));
+                 return null;
+             }
+-        });
++        };
++        if (redisClusterHelper.isCluster()) {
++            // 集群模式下 SDR 的 pipeline 不可用（JedisClusterConnection.openPipeline 抛
++            // UnsupportedOperationException，回调体一次都不会执行）。
++            // 改用非 pipeline 的 execute：每条命令一次往返，但 JedisCluster 会按 slot 路由。
++            // 往返变多是可接受的：每条记录都夹着一次 DB 查询，Redis 不是瓶颈。
++            // ⚠️ 集群分支下 set/hSet 立即生效 → 同一批次后续迭代能读到前面刚写的值
++            //    （单机 pipeline 下命令攒到批次结束才落库，读不到）。
++            //    这是两种模式本来就有的差异，见设计文档风险 R2，本轮不修。
++            redisTemplate.execute(callback);
++        } else {
++            redisTemplate.executePipelined(callback);
++        }
+         return useDefinitionMap;
+     }
+ 
+@@ -1861,16 +1879,31 @@ public class SVGParseService {
+      */
+     public Map batchGetSymbol(List<String> symbolIdList, Boolean useParallel)
+             throws Exception {
+-        List results = redisTemplate.executePipelined(new RedisCallback() {
+-            @Override
+-            public Object doInRedis(RedisConnection connection) throws DataAccessException {
+-                // StringRedisConnection stringRedisConn = (StringRedisConnection)connection;
+-                for (String symbolId : symbolIdList) {
+-                    connection.get((RedisKey.BASE_SVG_SYMBOL + symbolId).getBytes());
++        // 先把 key 列表提出来（原来是在回调体里现拼的）：
++        // 集群分支需要整批 key 才能按 slot 分组，单机分支只是拿它当循环源。
++        final List<String> keys = new ArrayList<>();
++        for (String symbolId : symbolIdList) {
++            keys.add(RedisKey.BASE_SVG_SYMBOL + symbolId);
++        }
++
++        // raw：保持文件既有风格。集群分支返回与 keys 等长同序的列表，
++        // 调用方按下标对齐（results.get(symbolIdList.indexOf(t))）→ 顺序是承重的契约。
++        List results;
++        if (redisClusterHelper.isCluster()) {
++            // string 读：集群下 SDR 的 pipeline 不可用，改走 oms 的按 slot 分组读（每个 master 一条 pipeline）
++            results = redisClusterHashPipeline.getAllValues(keys);
++        } else {
++            results = redisTemplate.executePipelined(new RedisCallback() {
++                @Override
++                public Object doInRedis(RedisConnection connection) throws DataAccessException {
++                    // StringRedisConnection stringRedisConn = (StringRedisConnection)connection;
++                    for (String key : keys) {
++                        connection.get(key.getBytes());
++                    }
++                    return null;
+                 }
+-                return null;
+-            }
+-        });
++            });
++        }
+         if (null == results || results.size() == 0) {
+             return null;
+         }
+diff --git a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/GraphDataServiceImpl.java b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/GraphDataServiceImpl.java
+index 1b8e6fe..3e60246 100644
+--- a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/GraphDataServiceImpl.java
++++ b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/GraphDataServiceImpl.java
+@@ -221,6 +221,11 @@ public class GraphDataServiceImpl implements GraphDataService {
+                                     break;
+                                 }
+                                 // 最终指向的obid存入redis,若redis已存在则增加，若不存在则新建
++                                // 注意：这里的 opsForHash().get() 走的是【另一条连接】，不是传进来的
++                                // redisConnection。集群分支（非 pipeline）下下面的 hSet 立即生效 →
++                                // 同一批次的后续迭代能读到前面迭代刚写的值；单机 pipeline 分支下
++                                // hSet 攒到批次结束才落库，读到的仍是批次前状态。
++                                // 这是两种模式本来就有的差异（见设计文档风险 R2），本轮不修。
+                                 if (redisTemplate.opsForHash().hasKey(RedisKey.BASE_SVG_DATA, preObid.toString())) {
+                                     HashMap<String, Object> finalEntityMap = (HashMap<String, Object>) redisTemplate
+                                             .opsForHash().get(RedisKey.BASE_SVG_DATA, preObid.toString());
+diff --git a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.java b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.java
+index b3e1048..1cf76f2 100644
+--- a/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.java
++++ b/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.java
+@@ -7,6 +7,7 @@ import com.sac.platform.common.constant.Constants;
+ import com.sac.platform.modelserver.entity.model.ObjectAttribute;
+ import com.sac.platform.modelserver.entity.model.ObjectType;
+ import com.sac.platform.modelserver.service.ModelDataService;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
+ import org.springframework.beans.factory.annotation.Autowired;
+ import org.springframework.beans.factory.annotation.Value;
+ import org.springframework.dao.DataAccessException;
+@@ -29,6 +30,8 @@ public class SVGCacheServiceImpl implements SVGCacheService {
+ 
+     @Autowired
+     private KafkaBusConfiguration kafkaBusConfiguration;
++    @Autowired
++    private RedisClusterHelper redisClusterHelper;
+ 
+     @Override
+     public void loadRTConfigKafka() {
+@@ -36,7 +39,7 @@ public class SVGCacheServiceImpl implements SVGCacheService {
+         RedisSerializer valueSerializer = redisTemplate.getValueSerializer();
+         Set keys = redisTemplate.keys(RedisKey.BASE_SVG_REALSCOPE + "*");
+         redisTemplate.delete(keys);
+-        redisTemplate.executePipelined(new RedisCallback<Object>() {
++        final RedisCallback<Object> callback = new RedisCallback<Object>() {
+             @Override
+             public Object doInRedis(RedisConnection redisConnection) throws DataAccessException {
+                 for (KafkaBusConfiguration.KafkaBusConfig kafkaBusConfig : kafkaBusConfiguration.getConfig()) {
+@@ -67,7 +70,19 @@ public class SVGCacheServiceImpl implements SVGCacheService {
+                 }
+                 return null;
+             }
+-        });
++        };
++        if (redisClusterHelper.isCluster()) {
++            // 集群模式下 SDR 的 pipeline 不可用（JedisClusterConnection.openPipeline 抛
++            // UnsupportedOperationException，回调体一次都不会执行）。
++            // 改用非 pipeline 的 execute：每条命令一次往返，但 JedisCluster 会按 slot 路由。
++            // 往返变多是可接受的：每条记录都夹着一次 DB 查询，Redis 不是瓶颈。
++            // ⚠️ 集群分支下 hSet 立即生效 → 同一批次后续迭代能读到前面刚写的值
++            //    （单机 pipeline 下 hSet 攒到批次结束才落库，读不到）。
++            //    这是两种模式本来就有的差异，见设计文档风险 R2，本轮不修。
++            redisTemplate.execute(callback);
++        } else {
++            redisTemplate.executePipelined(callback);
++        }
+ 
+     }
+ 
+diff --git a/pom.xml b/pom.xml
+index 2e55f9a..ea5e4cf 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -388,6 +388,11 @@
+ 				<artifactId>realserver-service</artifactId>
+ 				<version>${platform.version}</version>
+ 			</dependency>
++			<dependency>
++				<groupId>com.sac.platform</groupId>
++				<artifactId>realserver-oms</artifactId>
++				<version>${platform.version}</version>
++			</dependency>
+ 			<dependency>
+ 				<groupId>com.sac.platform</groupId>
+ 				<artifactId>authentication</artifactId>

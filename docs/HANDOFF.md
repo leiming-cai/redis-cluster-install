@@ -782,14 +782,15 @@ SDR 2.7.18 的 `JedisClusterConnection.openPipeline()` 直接抛
 |---|---|
 | 设计文档 | `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md` |
 | 实施计划 | `docs/superpowers/plans/2026-10-30-napstarweb-cluster-branch.md` |
-| patch | **Task 14 生成**（本轮写作时还不存在）：<br>`docs/superpowers/patches/2026-10-30-napstarweb-cluster-branch-platform-backend.patch`<br>`docs/superpowers/patches/2026-10-30-napstarweb-cluster-branch-application-backend.patch` |
+| patch | ✅ **已生成**（Task 14）：<br>`docs/superpowers/patches/2026-10-30-napstarweb-cluster-branch-platform-backend.patch`<br>`docs/superpowers/patches/2026-10-30-napstarweb-cluster-branch-application-backend.patch` |
 | 探针 | `tests/probes/cluster-execute-probe.java` + `scripts/probe-cluster-execute.sh` |
 | 守卫 | `tests/validate_java_pipelines.sh`（用法见 `docs/OPERATIONS.md` §6.3） |
 | 操作手册 | `docs/OPERATIONS.md` §4.5（切集群前必读）+ §6.3（守卫） |
 
 > ⚠️ **两棵 Java 树不是 git 仓库** —— 改动只以 patch 形式留痕。
-> **Task 14 会生成那两份 patch**；在本轮写这份记录时它们**还不存在**，
-> 别把「计划里写了」当成「文件已经有了」。
+> 那两份 patch **现在已经在仓库里了**（Task 14 生成，两棵树各自 reverse-apply
+> 检查 exit 0）。细节见 `docs/superpowers/patches/README.md` 的
+> 「2026-10-30 — napstarweb cluster branch」一节。
 
 > 📌 **跑探针的完整命令（Windows + Git Bash）** —— 本轮实测通过的：
 >
