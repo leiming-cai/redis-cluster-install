@@ -4,6 +4,11 @@
 设计草案见 `docs/superpowers/specs/2026-07-07-redis-cluster-install-design.md`，
 其中部分描述已过时（见文末「与设计文档的差异」）。
 
+> 📖 **要照着做一整套部署（脚本组网 → YAML 配置 → 程序启动 → 验证），
+> 请看 [`docs/OPERATIONS.md`](OPERATIONS.md)。**
+> 本文档是**脚本的逐参数参考**；`OPERATIONS.md` 是**按任务组织的端到端手册**，
+> 还覆盖了 ZooKeeper/Kafka 集群、程序侧配置与启动。
+
 ---
 
 ## 1. 这是什么

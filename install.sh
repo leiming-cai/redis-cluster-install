@@ -3,8 +3,12 @@
 #
 # Usage:
 #   bash install.sh                       # interactive (default)
-#   bash install.sh --yes                 # non-interactive: re-use cached state if any
 #   bash install.sh --uninstall           # same as running uninstall.sh --force
+#
+# NOTE: --yes is NOT implemented. The flag is accepted but the run stops
+#   immediately with "--yes mode requires credentials via env: ...". That
+#   message is misleading: no environment variable is ever read for it. Use
+#   the interactive mode, or drive the cluster with cluster-config.sh instead.
 #
 # Requires: bash 4+, sshpass, redis-cli (optional, for create step), openssh-client.
 

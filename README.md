@@ -8,6 +8,11 @@
 
 **作者**:[leiming-cai](https://github.com/leiming-cai) · 邮箱 boboclmomi@163.com
 
+> 📖 **[`docs/OPERATIONS.md`](docs/OPERATIONS.md) — 端到端操作手册**：
+> 两台已有 Redis 的机器如何用脚本组网、ZooKeeper/Kafka 怎么配集群、
+> 程序的 `oms:` / `spring.kafka.*` YAML 怎么配、程序怎么构建启动与验证。
+> 本 README 是**速查**，手册是**照着做的那一份**。
+
 ## 前提条件
 
 **控制机**(运行这些脚本的机器):
