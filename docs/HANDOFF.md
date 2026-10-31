@@ -17,6 +17,9 @@
 **`dde7c52`**（**补上 Kafka 集群在 YAML 里的配置**）；
 **第十九轮推了 `1fe06ae`**（守卫扩展：也抓 `execute(cb, exposeConnection, pipeline=true)`）
 + **本轮的审计报告**（华盾 napstar2.0 那棵树的 Redis 集群读写审计，见「第十九轮」）。
+**第二十轮（2026-10-31）**复核并**在原位更正**了那份审计的 4 条被实测推翻的结论，
+新增第十章（生产 Nacos 真值 + 7 个还没修的生产缺陷），并在被审计的树上做了 **2 处编译修复**（两个 reactor 重建通过）——
+**详见「第二十轮」**。
 当前 bats **203 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0），
 `oms` **66 通过 / 0 失败 / 0 跳过**（含 3 条新增的真集群用例），
 `idgenerator` **6 通过 / 0 失败**（第十五轮 3 条 + 第十六轮 3 条），
@@ -232,12 +235,16 @@ SDR 2.7.18 大多**不抛**，而是**静默降级**成非原子的客户端实�
 （命令行可以完全不传配置），并修掉脚本里三个会「让正确的运行变红」的缺陷。
 详见下文「第十一轮」。
 
-**下一步**（第十九轮结束后，详见「会话存档（2026-10-30）」与「第十九轮」）：
-⓪ ⭐⭐ **（新）另一棵 Java 树（华盾 napstar2.0）也要查** ——
+**下一步**（第二十轮结束后，详见「会话存档（2026-10-30）」与「第十九轮」「第二十轮」）：
+⓪ ⭐⭐ **（新）另一棵 Java 树（华盾 napstar2.0）也查过了** ——
 `D:\work\info\web\extendsystem\华盾-napstar2.0\code\` 是**同一个产品家族的旧版本**，
-**24 处集群不安全的调用点、零集群感知**；但它**今天进不了集群模式**（`oms:` 全注释 + 没有连接工厂 bean）。
+**43 处 `executePipelined` 原始命中（外加 8 处 `execute(cb,…)`、3 处 `scan()`）、零集群感知**；
+但它**今天进不了集群模式**（`oms.redisMode` 全树 0 命中 → 走 standalone）。
 **审计报告在 `docs/superpowers/specs/2026-10-31-napstar2.0-redis-cluster-audit.md`** ——
-⚠️ **动手前先读它的「§八 查不出来的事」**（Nacos 上的真实模式 / `realserver-oms` 版本 / 哪个 template bean 赢）；
+⚠️ **第二十轮复核推翻了初版的 4 条结论**，并新增了第十章 F1–F7：
+**生产 Nacos 真值找到了**（在安装包里）、**发现一个真的连错 Redis 的生产缺陷**（`OmsConfig` 硬编码 `10.137.220.191`）、
+**发现生产其实是两个独立单机 Redis（6379 + 6389）而不是集群**、**两个应用现在就起不来** ——
+**动手前先读那 7 个还没修的缺陷（§十 F7）**；
 ① ⭐⭐ napstarweb 的 10 处 `executePipelined` 必须先加集群分支 ——
 SDR 2.7.18 在集群模式下**必然抛 `UnsupportedOperationException`**，回调体一次都不执行。
 不修就切集群 → **启动初始化被中断（应用起得来但功能是残的）** +
@@ -722,9 +729,9 @@ QUERYRESPONSE / REALALARM），**不含** `COMMITDATAINCRE` —— 而 realserve
 
 | 项 | 结果 |
 |---|---|
-| 集群不安全的调用点 | **24 处**（16 处裸 `executePipelined` + 8 处裸 `execute(cb, exposeConnection, pipeline=true)`） |
+| 集群不安全的调用点 | **24 处**（16 处裸 `executePipelined` + 8 处裸 `execute(cb, exposeConnection, pipeline=true)`）—— ⚠️ **这个数已被第二十轮推翻，见「七」** |
 | 集群感知 | **零** —— 全树 1792 个 `.java` 里 grep `RedisClusterConfiguration\|RedisClusterHelper\|RedisClusterHashPipeline\|isCluster` → **0 命中** |
-| **今天能不能进集群模式** | ⛔ **不能** —— 每个 `oms:` 块都**整段注释掉**；**全树没有任何 `RedisConnectionFactory` bean**（工厂只能来自 Spring Boot 自动装配 → 只产 standalone/sentinel）；内置的 `realserver-oms-1.0.11.jar` **没有** `RedisClusterHelper` / `RedisClusterHashPipeline` |
+| **今天能不能进集群模式** | ⛔ **不能** —— 每个 `oms:` 块都**整段注释掉**；**全树没有任何 `RedisConnectionFactory` bean**（工厂只能来自 Spring Boot 自动装配 → 只产 standalone/sentinel）；内置的 `realserver-oms-1.0.11.jar` **没有** `RedisClusterHelper` / `RedisClusterHashPipeline` —— ⚠️ **这行的两条理由都被第二十轮推翻（结论仍成立，理由变了），见「七」** |
 | ⛔ **真正的危险** | **Redis 拓扑在 Nacos 上（`node1:18848`，group `NAPSTARWEB_GROUP`），不在仓库里** → 改配置**不用改代码、不用重新编译**，改完重启就是**静默丢数据**，且**应用侧一个错误都不报** |
 
 ### 二、⭐ 三个「不看源码就会搞错」的点
@@ -783,6 +790,79 @@ QUERYRESPONSE / REALALARM），**不含** `COMMITDATAINCRE` —— 而 realserve
 > ⚠️ **这一轮没有生成任何 patch** —— **没有改任何 Java 代码**。
 > 与第十八轮不同，**这不是遗漏**。
 > 被审计的树**不是 git 仓库**，所以那棵树上的任何改动都**只能以 patch 形式留痕**（第十八轮的规则）。
+> （**第二十轮**在那棵树上改了 2 处编译修复 —— 详见「第二十轮」。）
+
+---
+
+## 第二十轮（2026-10-31）：复核并更正第十九轮的审计结论
+
+**这一轮同样没有做集群改造。** 做的是三件事：
+① 把第十九轮审计里**被实测推翻**的结论在**原位**改正；
+② **找到了生产 Nacos 的真值**（在安装包里，不在仓库里）→ 因此发现了**一个真的连错 Redis 的生产缺陷**；
+③ 在被审计的树上做了 **2 处编译修复**（照抄兄弟树已有 patch），**两个 reactor 重新构建通过**。
+
+> 📌 **完整的更正、证据与逐条引用都在审计报告里**：
+> `docs/superpowers/specs/2026-10-31-napstar2.0-redis-cluster-audit.md`
+> （新增第十章「补充核查：基线产物与生产 Nacos 配置」F1–F7，§一.4 列了被推翻的 5 条）。
+> **本节只记交接用的要点。**
+
+### 一、第十九轮里被推翻的 5 条（结论大多没变，**理由变了**）
+
+| # | 第十九轮的说法 | 实测 | 怎么推翻的 |
+|---|---|---|---|
+| A | 「全树没有任何 `RedisConnectionFactory` bean」 | ❌ **错** —— oms **1.0.11 就有一个**，在**嵌套类** `oms.config.b$b`（standalone 分支），条件 `@ConditionalOnProperty(name="iscluster", havingValue="0", matchIfMissing=true)` | `javap -v realserver-oms-1.0.11.jar` —— **`javap` 不列嵌套类的方法**，必须 `javap -v '…config.b$b'` |
+| B | 「1.0.11 的 `RedisUtilConfig` 不造 `RedisConnectionFactory`」 | ❌ **错** —— 同上 | 同上 |
+| C | 「升级到 `realserver-oms` 1.0.14 **有启动风险**」 | ⛔ **反了** —— **1.0.11 才是启动就炸的那一版**（`@Bean` 无 name → bean 名 `redisConfigProperties` → 与树里 3 份本地副本 + `OmsConfig` 重名 → `BeanDefinitionOverrideException`）；**1.0.14 改名成 `@Bean("omsRedisConfigProperties")` → 冲突消失** | `javap -v` 1.0.11 `config.a` vs 1.0.14 `config.a` |
+| D | 「进不了集群模式，因为**没有一条代码路径**能造出 `JedisClusterConnection`」 | ⚠️ **结论对，理由错** —— oms **1.0.14 有集群分支**（`RedisClusterConfig`）；进不去是因为**配置没打开它**：`oms.redisMode` 在**全树 yml 与所有生产 Nacos dataId 里都是 0 命中** → `parseMode(null)` → `STANDALONE` | grep 全树 `*.yml/*.yaml/*.properties` → **0 命中** |
+| E | 「集群下 pipeline 抛 `RedisPipelineException`」「带 oms **26** 处 / `hisData*` **17** 处」「`redis.conf` → **6379**」 | ❌ **三处技术断言全对不上** —— ① 抛的是 **`UnsupportedOperationException`**（`closePipeline()` 只**声明** `throws RedisPipelineException`）；② `sche-viewer-server` 实为 **19** 处、`hisData*` 实为 **16** 处 `executePipelined` ＋ **3** 处 `connection.scan()`；③ **端口反了** —— `redis.conf:139` = **6389**、`redismaster.conf:139` = **6379** | SDR 2.7.18 `JedisClusterConnection.java:847-859`；逐文件点数；安装包 `env/redis/*.conf:139` |
+
+**没被推翻的三条核心结论**（复核后全部成立）：
+**43 处** `executePipelined` 原始命中（两个会被构建的 reactor）／**全树零守卫**／**生产是单机不是集群**。
+
+> 📌 **数字口径也更正了**（来件口径 26 / 17 → 实测 27 / 16，另 3 处 `connection.scan()` 另计）：
+> `sche-viewer-server` 实际 **19** 处（不是 18）；`connection.scan()` 的**活站点是 3 处**（不是 1 处）。
+> **两种口径的总数都是 43**（43 = `executePipelined` 原始命中），差在哪已逐条写在报告的 §十 F5。
+
+### 二、这一轮动过的代码（**只有 2 处编译修复**，没有集群改造）
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | `platform/backend/modelserver/services/.../impl/NapstarOaTransformerServiceImpl.java` | `import com.sac.platform.common.utils.redis.RedisUtil;` → `import com.sac.platform.realserver.oms.utils.RedisUtil;`（改后在 `:72`） |
+| 2 | `platform/backend/modelserver/services/pom.xml:47-50` | 加 `realserver-oms` 依赖（不写版本，继承 `platform/backend/pom.xml:691-695` 的 `${platform.version}` = `[1.0.0,2.0.0)`） |
+
+**两处都照抄兄弟树自己的 `docs/superpowers/patches/2026-10-29-unify-redis-util.patch`。**
+
+**构建结果**：`platform/backend` **18 个模块 BUILD SUCCESS**、`application/backend` **16 个模块 BUILD SUCCESS**；
+新打的 fat jar 里是 **`realserver-oms-1.0.14.jar`**（不再是 1.0.11）；
+**没有 oms 的**：`hisDataProducer-3.2.3.jar`、`hisDataSend-3.2.3.jar`、`realalarmproducer-3.0.0.jar`。
+
+> ⛔ **被审计的树不是 git 仓库 → 这 2 处改动没有 patch 留痕**（来源 patch 见上表）。
+
+### 三、⭐ 还没修的 7 个生产缺陷（**这一轮发现的，按严重度**）
+
+| # | 缺陷 | 严重度 |
+|---|---|---|
+| 1 | **`realalarmconsumer` 起不来** —— Nacos 的 `napstarweb-realalarm-consumer.yaml` **没有 `oms:`** → `oms.hostname` 空 → `RedisUtilConfig.java:275` 抛 | 🔴 起不来 |
+| 2 | **`transformNapstarModel` 起不来** —— **安装包里连它的 dataId 都没有** | 🔴 起不来 |
+| 3 | 🔴 **`realserver` controller 连错 Redis** —— `OmsConfig.java:18-25` **硬编码 `10.137.220.191`**，而 hosts 里 `node1` 是 **`10.137.220.201`**（数字转置）→ **Nacos 改不动，必须改代码** | 🔴 现在就在错 |
+| 4 | 建议：把 `oms.redisMode: standalone` **显式写进**每一个有 `oms:` 块的 dataId | 🟡 预防 |
+| 5 | 建议：给 `icms-commitDataIncreProducer.yaml` **补 `oms:` 块**（它现在**只靠自己的 `bootstrap.yml:36-41`**活着） | 🟡 脆 |
+| 6 | ⚠️ **陷阱**：`hisDataProducer`/`hisDataSend` 的 `oms:` 说 db0、`spring.redis` 说 db1 —— 一旦给它们加 oms，**悄悄从 db1 变成 db0** | 🟡 陷阱 |
+| 7 | **已记录的决定（2026-10-31）**：DM 库 → **PostgreSQL**（`kingbase_install/sqls/**` 用的是 PG 兼容的 `ksql` → 方言迁移最小） | 📌 决策 |
+
+**另外两个新事实**（改变了「集群化」这件事的性质）：
+
+- ⛔ **生产拓扑是「两个独立单机 Redis」（6379 + 6389），不是集群** ——
+  安装包 `bin/1start_env.sh` 起的是两个普通 `redis-server`（`env/redis/redis.conf` = **6389**、`redismaster.conf` = **6379**），
+  `cluster-enabled yes` **全是注释掉的** → **集群化是一次重构，不是一次配置切换**。
+- ⛔ **`connection.scan()` 在集群下照样抛**（`JedisClusterKeyCommands.scan` → `InvalidDataAccessApiUsageException`），
+  而它的 `execute` **不是** pipeline 形态 → **守卫脚本看不见这一类**。活代码里 3 处（但都没有活着的调用者 → 是隐患不是活跃缺陷）。
+
+### 四、下一步（不变）
+
+**先修上面 ①–⑤，再做第十九轮那张优先级表里的 ①（让失败变响）和 ②（配置期断言）。**
+**集群化排在最后** —— 因为它需要动构建图（没有共享 `oms` 模块可以安放 `RedisClusterHelper`），
+而且生产本来就是两个独立单机 Redis。**`backend-gd` 与 `sche-viewer-server` 的两个老坑仍然要一起算。**
 
 ---
 
