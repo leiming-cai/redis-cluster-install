@@ -47,6 +47,56 @@
 | **集群总线端口** | 业务端口 + 10000（6379 → 16379）。节点**之间**通信用，必须放行 |
 | **Nacos** | 配置中心。生产上端口/密码/连接串的真值都在这里，不在代码仓库里 |
 
+### 0.4 Docker 环境的命名契约（**两套产品线并存**）
+
+> ⚠️ **这台机器上有两套互不相关的 Docker 环境。**
+> **门户那套后续还要继续用** —— 不要动它。
+
+| | **门户（cpsweb）** | **华盾 napstar2.0（hd-*）** |
+|---|---|---|
+| 镜像 | `cpsweb-env:1.0` | `hd-napstar-env:1.0` |
+| 容器 | `cpsweb` | `hd-node1`、`hd-node2` |
+| Docker 网络 | 默认 `bridge` | `hd-net` |
+| 卷 | （无） | `hd-app-jars`、`hd-pgdata`、`hd-mwdata` |
+| PG 库 | `cpspg`（平台自己的，36 表）+ `napstar` | `napstar`（napstar2.0 自己的，独立容器） |
+| Redis | 容器内 6379 单实例 | 容器内 6379 + 6389 双实例 |
+| Nacos | 容器内 18848 → 宿主 **18848** | 容器内 18848 → 宿主 **18849** |
+| PG 宿主端口 | **5432** | **15432** |
+| 源码树 | `D:\javawork\1.2\cpscloud1.0\code` | `D:\work\info\web\extendsystem\华盾-napstar2.0\code` |
+
+**纪律**：
+
+| 规则 | 说明 |
+|---|---|
+| 新建的 Docker 对象**一律带 `hd-` 前缀** | 镜像 / 容器 / 网络 / 卷 |
+| **`docker` 命令必须带过滤** | `docker ps --filter "name=hd-"`、`docker rm -f hd-node1`。**禁止**不带 `--filter` 的 `rm` / `stop` / `kill` |
+| **禁止 `docker exec` 打进 `cpsweb`** | 除只读的「证明我没动它」检查外 |
+| **`pkill -f` 必须用字符类** | `pkill -f '[r]ealalarmconsumer'` —— 自匹配会误杀别的进程 |
+| 脚本/产物/备份目录带 `hd-` | `scripts/deploy-hd-napstar.sh`、`%TEMP%\opencode\hd-*` |
+
+**「没动门户」怎么证明**（前后各跑一次，逐项比对）：
+
+```bash
+# 1) 容器还在，且没被重启过（Up 时长不小于快照）
+docker ps --filter "name=^/cpsweb$" --format "{{.Names}} {{.Status}}"
+
+# 2) 平台库没被动
+docker exec cpsweb psql -U postgres -d cpspg -Atc \
+  "select count(*) from information_schema.tables where table_schema='info'"   # 期望 36
+
+# 3) Redis 没被动
+docker exec cpsweb redis-cli -p 6379 -a sac888 --no-auth-warning PING             # 期望 PONG
+
+# 4) Nacos config 数没变
+curl -s "http://127.0.0.1:18848/nacos/v1/cs/configs?search=accurate&pageNo=1&pageSize=100" \
+  | head -c 300
+
+# 5) 镜像没被重新 build（ID 不变）
+docker images cpsweb-env:1.0 --format "{{.ID}}"
+```
+
+> 详见 [`docs/superpowers/specs/2026-11-01-hd-napstar-docker-deploy-design.md`](superpowers/specs/2026-11-01-hd-napstar-docker-deploy-design.md) §1.3。
+
 ---
 
 ## 1. 全链路总览
