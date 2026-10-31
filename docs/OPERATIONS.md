@@ -1477,7 +1477,7 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 | `find tests -name '*.bats' -print0 \| xargs -0 bats` | 同上，CI 的调用方式 | bats |
 | `bash tests/check_syntax.sh` | 语法检查（`TOTAL=46`，其中 29 个是真做的 `bash -n`） | bash |
 | `bash tests/validate_libs.sh` | `lib/` 里的纯函数单测（`PASS=54`） | bash |
-| `bash tests/validate_java_pipelines.sh <app-backend> [platform-backend]` | **静态守卫**：napstarweb 树里出现裸 `executePipelined` 就失败（集群模式下 pipeline 必炸 → 实时数据静默丢失），见 §6.3 | bash |
+| `bash tests/validate_java_pipelines.sh <app-backend> [platform-backend]` | **静态守卫**：树里出现**集群不安全的 Redis 调用**（`executePipelined(...)` 或 `execute(cb, X, true)`）就失败（集群模式下 pipeline 必炸 → 实时数据静默丢失），见 §6.3 | bash |
 | `bash scripts/check-bash-compat.sh` | 在 **bash 4.3** 上跑整套 bats —— 唯一能看见那类 bug 的地方 | docker |
 | `bash scripts/e2e-cluster-config.sh` | `cluster-config.sh` 的 Docker 双节点 E2E（断言 A0–A6 + DoD1–DoD7） | docker |
 | `bash scripts/e2e-cpsweb-nodes.sh` | 在 **CPS Web 环境镜像**派生的节点上部署集群并跑消费者写入测试 | docker + `cpsweb-env:1.0` |
@@ -1501,7 +1501,14 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 ### 6.3 静态守卫：napstarweb 的 Redis pipeline
 
 `tests/validate_java_pipelines.sh` 是一道**静态守卫**，专门防一件事：
-**napstarweb 树里出现裸的 `redisTemplate.executePipelined(...)`**。
+**napstarweb 树里出现集群不安全的 Redis 调用**。
+
+它查**两种**写法：
+
+| # | 写法 | 为什么集群不安全 |
+|---|---|---|
+| **A** | `redisTemplate.executePipelined(...)` | `RedisTemplate` 内部调 `connToUse.openPipeline()` |
+| **B** | `redisTemplate.execute(<callback>, <exposeConnection>, true)` | 第三个参数是 pipeline 标志；为 `true` 时同样调 `connToUse.openPipeline()`（`RedisTemplate.java:220`） |
 
 > ⛔ **为什么这件事严重**：
 > SDR 2.7.18 在 Redis Cluster 模式下**不支持 pipeline** ——
@@ -1513,6 +1520,32 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 >   跳过这条消息并**提交 offset** → 实时数据增量**静默丢失**。
 >
 > 正确的形状是：**pipeline 在非集群（`else`）分支里，集群分支用不带 pipeline 的 `execute`**。
+>
+> ⚠️ **写法 B 容易被漏掉**：它跟写法 A 长得完全不一样（`execute` 而不是
+> `executePipelined`），而且**经常跨多行** ——
+> `execute(` 在第一行，`}, true, true)` 在好几行之后。
+> 写代码的人**不会**把它当成「用了 pipeline」，
+> 所以光靠「搜 `executePipelined`」是搜不出来的。
+
+#### 怎么认出写法 B（避免误报）
+
+守卫要求**三个条件同时满足**才算写法 B：
+
+1. 接收者**像**一个 redis template —— 名字里含 `redis`
+   （`redisTemplate` / `realRedisTemplate` / `stringRedisTemplate`），
+   或者就叫 `template`；
+2. 正好 **3** 个参数，且第三个是 `true`；
+3. 第一个参数**像**一个 redis 回调 —— 显式写了 `RedisCallback` / `SessionCallback`，
+   或者是个 lambda、参数名叫 `redisConnection` / `connection`。
+
+条件 2 排除了这些**安全**的写法：`execute(callback)`、
+`execute(callback, true)`（只有 exposeConnection，pipeline 默认 false）、
+`execute(callback, false, false)`。
+
+条件 1 + 3 是为了**不误报**非 redis 的 `execute` —— napstarweb 里有一大堆同名的：
+QLExpress 的 `InstructionSetRunner.execute` / `runner.execute` / `instruction.execute` /
+`op.execute` / `macro.execute` / `set.execute`，还有 JDBC 的 `stmt.execute`。
+只靠参数形状会误报，只靠名字也会误报 —— **两条一起看**才稳。
 
 #### 用法
 
@@ -1540,23 +1573,36 @@ VERBOSE=1 bash tests/validate_java_pipelines.sh <app-backend> [platform-backend]
 |---|---|---|
 | **0** | 通过 | — |
 | **1** | **有违规**：出现了裸调用，或者 pipeline 落在了**集群分支**里 | 按打印出来的 `file:line` 改代码，把 pipeline 挪到 `else` 分支 |
-| **2** | 用法/环境错误：路径不存在、参数缺失、**或者被扫的树和基线对不上** | 看 `ERROR:` 那几行。最常见的是「调用点数量变了」—— 那是**有意的改动**，确认无误后更新脚本里的 `NAPSTAR_BASELINE` / `PB_BASELINE` |
+| **2** | 用法/环境错误：路径不存在、参数缺失、**或者被扫的树和基线对不上** | 看 `ERROR:` 那几行。最常见的是「调用点数量变了」—— 那是**有意的改动**，确认无误后更新脚本里的 `NAPSTAR_PIPELINED_BASELINE` / `NAPSTAR_EXECUTE3_BASELINE` / `PB_PIPELINED_BASELINE` / `PB_EXECUTE3_BASELINE` |
 
 > ⚠️ **退出码 2 不是「跳过」** —— 空树、路径写错、调用点数量对不上，都会是 2。
 > 这是刻意的：**一个从不失败的断言等于没有断言**。宁可吵闹，也不要静默放过。
 >
 > ⚠️ **违规优先于基线**：真有裸调用时先报违规（1），基线不符（2）排在后面 ——
 > 「新增了一个裸调用」会同时触发「数量对不上」，那时候要说的是「这里有裸调用」。
+>
+> ⚠️ **基线是按 API 分开记的**（写法 A 一个、写法 B 一个），
+> 所以报错消息会明确说是**哪个 API** 的数量对不上。
 
 #### 它查什么
 
-| 树 | 判据 | 现状 |
+| 树 | 判据 | 现状（固定树） |
 |---|---|---|
-| `napstarweb` | **结构 + 极性**：调用必须在守卫的 `if/else` 里面，**且在非集群（`else`）分支里** | 10 处调用，全部有守卫 |
-| `sche-viewer-server` | **只报告，不判失败** —— 它的模块在 `application/backend/pom.xml` 里是注释掉的（不参与构建），`oms:` 块也整段注释（standalone） | 15 处调用，**切集群前必须一并处理** |
-| `platform`（realserver / modelserver） | **位置**：调用上面 40 行内有个 `isCluster` 标记（那边的守卫是早返回 / 拆方法，判不了极性） | 11 处调用，全部有守卫 |
+| `napstarweb` | **结构 + 极性**：调用必须在守卫的 `if/else` 里面，**且在非集群（`else`）分支里** | 写法 A 10 处（全部有守卫）、写法 B **0** 处 |
+| `sche-viewer-server` | **只报告，不判失败** —— 它的模块在 `application/backend/pom.xml` 里是注释掉的（不参与构建），`oms:` 块也整段注释（standalone） | 写法 A 15 处，**切集群前必须一并处理** |
+| `platform`（realserver / modelserver） | **位置**：调用上面 40 行内有个 `isCluster` 标记（那边的守卫是早返回 / 拆方法，判不了极性） | 写法 A 11 处、写法 B 4 处（在 `modelserver/services` 的 `CacheServiceImpl.java`，都在 `else` 分支里），全部有守卫 |
 
 注释掉的调用不算活调用（`//` 行注释、`/* … */` 块注释、行尾注释、字符串字面量里的内容都不算）。
+
+> ⚠️ **platform 树有个已知盲区**：它用的是位置判据，**分不出分支** ——
+> 那 4 处写法 B 要是被挪进**集群分支**，位置判据看不出来。
+> 这一点写在脚本的头注释里，别假装没有。
+>
+> ⚠️ **这个守卫是按「固定树」配基线的**：基线描述的是
+> `D:\javawork\1.2\cpscloud1.0\code` 这棵树。
+> 拿它去扫**别的树**（比如华盾 napstar2.0）会退出 2 并说明
+> 「哪个 API 的数量对不上」—— 那是**预期行为**：
+> 那棵树本来就不是基线树，它的调用点数量不同。
 
 ---
 
