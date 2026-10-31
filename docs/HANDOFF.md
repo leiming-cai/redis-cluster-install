@@ -804,6 +804,70 @@ QUERYRESPONSE / REALALARM），**不含** `COMMITDATAINCRE` —— 而 realserve
 > 📌 **完整的更正、证据与逐条引用都在审计报告里**：
 > `docs/superpowers/specs/2026-10-31-napstar2.0-redis-cluster-audit.md`
 > （新增第十章「补充核查：基线产物与生产 Nacos 配置」F1–F7，§一.4 列了被推翻的 5 条）。
+
+---
+
+## 第二十一轮（2026-11-01）：修华盾树的 `oms:` 契约与 mapper 的 PG 方言
+
+**接着第二十轮**：F7 里剩下的、用户点名要做的两件（**#3 `OmsConfig` 硬编码按要求排除**），
+外加数据库从达梦迁到 PostgreSQL。
+
+### 一、做了什么
+
+| # | 改动 | 位置 |
+|---|---|---|
+| 1 | **补 `oms:` 块**（`redisMode: standalone` + `database/hostname/port/password/timeout`） | Nacos 的 `napstarweb-realalarm-consumer.yaml`（**DM 导出与 PG 导出两份都补** —— `oms:` 指向 Redis，与选哪个库无关） |
+| 2 | 同上，写进**本地 `application.yml`**（本地兜底；那文件原本整份是注释的） | `napstarweb/plugins/realalarmconsumer/src/main/resources/application.yml` |
+| 3 | 同上 + **三个 datasource 从 DM 改成 PG**（`info`/`sac`/`cmt` → `currentSchema=`，驱动换 `org.postgresql.Driver`） | `platform/backend/modelserver/plugins/transformNapstarModel/src/main/resources/application.yml`（**它没有 dataId**，只能写本地） |
+| 4 | **`mappings/his/postgresql/` 改成真正的 PG 方言** —— ⚠️ **它之前是 `default/` 与 `kingbase/` 的逐字节副本**（`HisData.xml` 三者 MD5 都是 `94A57351E98A4838…`）＝ **MySQL 方言，从没适配过** | 基线 `platform/backend/hisserver/dao/src/main/resources/mappings/his/postgresql/`（4 个文件） |
+| 5 | **方言中立的 mapper**：`LIMIT 0,n` → `LIMIT n OFFSET 0`（MySQL/PG/Kingbase/DM 都支持）；`TO_DATE(TO_CHAR(TIME,…))` → `TO_CHAR(TIME,'…')` | 华盾 `napstarweb/{alarmreal,napstar-app,curve}`（+ `backend-gd` 同款） |
+
+**没动**：`mappings/his/{dm,default,hangao,kingbase,mysql,oracle}/`（别的方言的产品线在用）、
+`OmsConfig`（用户明确排除）。
+
+### 二、实测
+
+```
+*** Using Redis Standalone at node1:6379 (connectTimeout=5000ms, readTimeout=5000ms, maxWait=5000ms)
+*** Redis mode detected: STANDALONE ***
+Started RealAlarmConsumer in 20.553 seconds
+```
+
+`connectTimeout=5000ms` 说明 **`oms.timeout: 5000` 真的生效了** ——
+硬编码 bean 那条路径会退回 2000/3000（第二十轮 §F2 的 A/B 对照）。
+
+改后的 SQL **真的发到 PG 了**（PG 服务端语句日志）：
+```
+hds@napstar LOG:  execute <unnamed>: select OBJECTID, TIME, FRACTION, VALUE, …
+    from H33_179_202611 WHERE TIME >= $1 AND TIME <= $2 AND OBJECTID IN ( $3 )
+    AND MOD(CAST(TRUNC(EXTRACT(EPOCH FROM TIME)) AS BIGINT), $4) = 0 order by TIME
+```
+应用连接上 **0 个 PG ERROR**；两个接口 HTTP 200。
+
+三个 reactor 全绿（基线 44 / 华盾 18 / 华盾 16）；真 MyBatis 打真库
+**改前 6 OK/12 FAIL → 改后 30 OK/0 FAIL**。
+
+### 三、顺手修掉的两个静默 bug
+
+1. **曲线的 5 分钟/60 分钟过滤一直是空操作** —— PG 的 `to_date(text,fmt)` 返回 **date**
+   （丢掉时分秒）→ `TO_CHAR(TO_DATE(…),'MI')` 恒为 `'00'`。改成 `TO_CHAR(A.TIME,'MI')` 才生效。
+2. **`TO_TIMESTAMP('…','SYYYY-MM-DD HH24:MI:SS')`** 里的 `SYYYY` 是 Oracle/Kingbase 掩码，
+   **PG 不报错但年份变成 0022** —— 7 个文件 56 处。已在 PG 版建库脚本里改成 `YYYY`。
+
+### 四、PG 迁移（不是方言移植 —— 这条产品线本来就支持 PG）
+
+安装包里有 `postgresql_install` 脚本，且 Kingbase 与 PG 共用「`cpspg` 库 + `info` 用户 + `info` schema」模型。
+**新建** `napstar` 库（`info`/`cmt`/`sac`/`hds` 四个 schema），**平台自己的 `cpspg` 一张表没动**；
+`REVOKE CONNECT ON DATABASE cpspg FROM PUBLIC` → `cmt/sac/hds` 进不去平台库，平台用的 `info` 是超管 → 不受影响。
+**新建** `env/nacos/nacos_config_export_postgresql-napstar2.0/`（15 个文件），**DM 导出原封不动**。
+
+### 五、还剩什么
+
+`sac`/`cmt`/`hds` 的**建表 DDL 不在这个安装包里** → `transformNapstarModel` 仍然起不来
+（`relation "modelversion" does not exist`）。详见审计报告 §七。
+
+> 📌 **本轮会话存档**（含全部证据与环境陷阱）：
+> `docs/superpowers/sessions/2026-11-01-napstarweb-cluster-branch-impl-session.md`
 > **本节只记交接用的要点。**
 
 ### 一、第十九轮里被推翻的 5 条（结论大多没变，**理由变了**）
