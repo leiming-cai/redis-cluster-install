@@ -14,7 +14,9 @@
 **第十七轮推了 `18f81a0`**（操作手册的设计）、
 **`22f8fdb`**（设计补 ZK/Kafka 章）、
 **`e84a9c8`**（**新增 `docs/OPERATIONS.md`（1297 行）+ README/USAGE 互链 + 修 `install.sh --yes` 的假帮助文本**）、
-**`dde7c52`**（**补上 Kafka 集群在 YAML 里的配置**）。
+**`dde7c52`**（**补上 Kafka 集群在 YAML 里的配置**）；
+**第十九轮推了 `1fe06ae`**（守卫扩展：也抓 `execute(cb, exposeConnection, pipeline=true)`）
++ **本轮的审计报告**（华盾 napstar2.0 那棵树的 Redis 集群读写审计，见「第十九轮」）。
 当前 bats **203 通过 / 0 失败**，E2E `E2E PASSED`（退出码 0），
 `oms` **66 通过 / 0 失败 / 0 跳过**（含 3 条新增的真集群用例），
 `idgenerator` **6 通过 / 0 失败**（第十五轮 3 条 + 第十六轮 3 条），
@@ -230,8 +232,13 @@ SDR 2.7.18 大多**不抛**，而是**静默降级**成非原子的客户端实�
 （命令行可以完全不传配置），并修掉脚本里三个会「让正确的运行变红」的缺陷。
 详见下文「第十一轮」。
 
-**下一步**（第十八轮结束后，详见「会话存档（2026-10-30）」）：
-① ⭐⭐ **（新，最高优先级）napstarweb 的 10 处 `executePipelined` 必须先加集群分支** ——
+**下一步**（第十九轮结束后，详见「会话存档（2026-10-30）」与「第十九轮」）：
+⓪ ⭐⭐ **（新）另一棵 Java 树（华盾 napstar2.0）也要查** ——
+`D:\work\info\web\extendsystem\华盾-napstar2.0\code\` 是**同一个产品家族的旧版本**，
+**24 处集群不安全的调用点、零集群感知**；但它**今天进不了集群模式**（`oms:` 全注释 + 没有连接工厂 bean）。
+**审计报告在 `docs/superpowers/specs/2026-10-31-napstar2.0-redis-cluster-audit.md`** ——
+⚠️ **动手前先读它的「§八 查不出来的事」**（Nacos 上的真实模式 / `realserver-oms` 版本 / 哪个 template bean 赢）；
+① ⭐⭐ napstarweb 的 10 处 `executePipelined` 必须先加集群分支 ——
 SDR 2.7.18 在集群模式下**必然抛 `UnsupportedOperationException`**，回调体一次都不执行。
 不修就切集群 → **启动初始化被中断（应用起得来但功能是残的）** +
 **`COMMITDATAINCRE` 增量静默丢失**。
@@ -698,6 +705,84 @@ QUERYRESPONSE / REALALARM），**不含** `COMMITDATAINCRE` —— 而 realserve
 > 已用 `git reset --soft` + `git checkout dde7c52 -- docs/OPERATIONS.md` 恢复，
 > 并确认 `git diff dde7c52 HEAD -- docs/OPERATIONS.md` **为 0 行**（逐字节相同）。
 > **下次改这份手册前，先在 VS Code 里关掉或重新载入它。**
+
+---
+
+## 第十九轮（2026-10-31）：审计另一棵 Java 树（华盾 napstar2.0）的 Redis 集群读写
+
+**这一轮一行 Java 代码都没改**（被审计的树不是 git 仓库，也不该由这一轮改）。
+产出的是**一份审计报告** + **守卫脚本的一次扩展**。
+
+### 一、结论先行（30 秒版）
+
+**被审计的树**：`D:\work\info\web\extendsystem\华盾-napstar2.0\code\`
+（`application/backend` + `application/backend-gd` + `platform/backend`）——
+**同一个产品家族的旧版本**，兄弟树 `D:\javawork\1.2\cpscloud1.0\code\` 已在第十八轮做完集群改造，
+**这一棵没做**。
+
+| 项 | 结果 |
+|---|---|
+| 集群不安全的调用点 | **24 处**（16 处裸 `executePipelined` + 8 处裸 `execute(cb, exposeConnection, pipeline=true)`） |
+| 集群感知 | **零** —— 全树 1792 个 `.java` 里 grep `RedisClusterConfiguration\|RedisClusterHelper\|RedisClusterHashPipeline\|isCluster` → **0 命中** |
+| **今天能不能进集群模式** | ⛔ **不能** —— 每个 `oms:` 块都**整段注释掉**；**全树没有任何 `RedisConnectionFactory` bean**（工厂只能来自 Spring Boot 自动装配 → 只产 standalone/sentinel）；内置的 `realserver-oms-1.0.11.jar` **没有** `RedisClusterHelper` / `RedisClusterHashPipeline` |
+| ⛔ **真正的危险** | **Redis 拓扑在 Nacos 上（`node1:18848`，group `NAPSTARWEB_GROUP`），不在仓库里** → 改配置**不用改代码、不用重新编译**，改完重启就是**静默丢数据**，且**应用侧一个错误都不报** |
+
+### 二、⭐ 三个「不看源码就会搞错」的点
+
+| # | 点 | 说明 |
+|---|---|---|
+| 1 | ⚠️ **`sche-viewer-server` 在这棵树里是活的部署面** | `application/backend/pom.xml:23` = `<module>sche-viewer-server</module>` —— **没注释掉**（兄弟树同一行是注释掉的），而且真的构建出了 **171 MB** 的 fat jar。第十八轮把它列成非目标 N1 的理由「不参与构建」**在本树不成立**。它有 **15 处**裸 `executePipelined` |
+| 2 | ⛔ **`application/backend-gd` 是个陷阱** | 从未被构建（全树没有它的 `target/*.jar`），但它带着**同样的 6 + 15 处**调用点，**而且用的是同一个 Nacos group**（`NAPSTARWEB_GROUP`，`node1:18848`）→ **改一个就是改两个** |
+| 3 | ⚠️ **有 8 处集群不安全调用，是只 grep `executePipelined` 的守卫看不见的** | 形态是 `redisTemplate.execute(cb, true, true)` —— SDR 的 `RedisTemplate.java:220` 同样调 `openPipeline()` → 集群下一样炸。这 8 处在 `hisDataSend/.../RedisPipelineUtil.java`（3）、`modelserver/services/.../CacheServiceImpl.java`（4）、`rtdata-module/.../OmsWriteByKafkaServiceImpl.java`（1） |
+
+### 三、这一轮改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `docs/superpowers/specs/2026-10-31-napstar2.0-redis-cluster-audit.md`（**新**） | **审计报告**（12 章）：调用点清单、配置现实、与兄弟树的逐项对照、处置建议、查不出来的事 |
+| `tests/validate_java_pipelines.sh`（提交 `1fe06ae`） | 守卫**同时**抓两种形态；基线改成「每棵树 × 每个 API」；`sche-viewer-server` 的 advisory **改成去查 aggregator**，不再断言「它没被构建」 |
+
+> 📌 **守卫为什么必须改**：
+> 上一版只认 `executePipelined` —— 把那 **8 处**全漏了。
+> 而且旧的 sche 提示语「It is not built …」**对兄弟树是真的、对这棵树是假的** ——
+> **一条会骗人的断言比没有断言更糟**。
+> 第二种形态的判别器是**实测出来的**（接收者像 redis template + 正好 3 个参数 + 第三个是 `true` + 第一个像 redis 回调），
+> 在四棵树上**命中 4 + 8 个真实站点、零误报**（napstarweb 里那 16 处 QLExpress 的 `execute(...)` 和 JDBC 的 `stmt.execute(...)` 都没被误报）。
+
+### 四、下一步（按这棵树的实际情况，不是按兄弟树的做法）
+
+⛔ **先不要把兄弟树的做法整体搬过来** —— 这棵树**没有共享 `oms` 模块**可以安放 `RedisClusterHelper`
+（`platform/backend/realserver/pom.xml:18-20` 没有 `common/oms`；`platform/backend/pom.xml:25` 的 `common/util` 是注释掉的）
+→ **那是构建图变更，不是复制粘贴**；而且 `RedisUtilConfig` 1.0.14 要的是 `oms.redisMode` + `oms.clusters`，
+这棵树发布的是 `oms.hostname` / `oms.port` → **5 个以上应用的 yml 要重写**。
+
+| 优先级 | 事项 | 代价 |
+|---|---|---|
+| ① | **让失败变响** —— `StartupRunner.java:68` 别静默吞掉初始化异常；三个 `@KafkaListener`（napstarweb `RTListener.java:95`；rtdata-module `RTListener.java:58`、`:80`）配显式 `DefaultErrorHandler`，**失败不提交 offset** | **~1 天**，风险低。⚠️ **今天在 standalone 模式下，一次瞬时 Redis 故障就已经会丢数据** —— **这是一个活着的 bug，与切不切集群无关** |
+| ② | **加配置期断言** —— 一个最小的 `RedisClusterHelper`（查 `JedisConnectionFactory.getClusterConfiguration() != null`）+ `@PostConstruct` 里发现是集群工厂就 **fail 启动**。**~30 行** | **~1 天**，风险低，价值高 |
+| ③ | 只有当集群模式真的要上，才按「napstarweb 6 → execute(cb,true,true) 8 → platform 10 → sche 15 → `scan()`/`KEYS` 风险」的顺序移植，**用兄弟树的 `isCluster()` 形态**（守卫的基线要为这棵树重定：napstarweb 6、platform 10、sche 15） | ~3–5 天 + 一个 `realserver-oms` 1.0.15 + yml 契约变更 + 测试 |
+| ④ | **`backend-gd` 要么一起修，要么删掉** | — |
+| ⑤ | **动手前先解决 `realserver-oms` 的版本问题**（见下） | — |
+
+### 五、⭐ 动手之前必须先解决的三件事
+
+| # | 事情 | 为什么 |
+|---|---|---|
+| 1 | ⛔ **实际的运行时 Redis 模式** | 生效的 `spring.redis.*` 在 **Nacos**（`node1:18848` / `NAPSTARWEB_GROUP` / `MODELSERVER_GROUP`），**不在仓库里** → 读那些 dataId，找 `spring.redis.cluster.*` 或 `oms.redisMode`。**审计里其它所有结论都挂在这件事上** |
+| 2 | ⛔ **`realserver-oms` 会解析到哪个版本** | 声明区间是 **`[1.0.0,2.0.0)`**（`application/backend/pom.xml:75`、`platform/backend/pom.xml:38`），而本地仓库**已经有到 1.0.14** → **一次全新构建会解析到比现网 jar 里那个 1.0.11 更高的版本**。**拿到 1.0.14 会在「`oms.redisMode` 没给」这件事上启动失败，而不是静默地行为异常 → ⇒ 全新构建的行为会与已部署的 jar 不同。** 查法：`mvn dependency:tree` |
+| 3 | ⚠️ **到底是哪个 `RedisTemplate` bean 赢** | `hisDataSend/config/RedisConfig.java:16-27` **自己**建了一个 template（`@Autowired` 一个工厂 + 手工 `afterPropertiesSet()`），`realserver-oms` 的 `RedisUtilConfig` 也定义 `redisTemplate`，而 `rtdata-consumer` 的 yml 里有 `spring.main.allow-bean-definition-overriding: true` → **允许覆盖，光看源码定不了**。⛔ **修法的形状取决于到底是哪个 template 在起作用** |
+
+### 六、留痕
+
+| 东西 | 位置 |
+|---|---|
+| **审计报告** | `docs/superpowers/specs/2026-10-31-napstar2.0-redis-cluster-audit.md`（12 章） |
+| 守卫扩展 | `tests/validate_java_pipelines.sh`（提交 `1fe06ae`） |
+| 对照基准（兄弟树的设计） | `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md` |
+
+> ⚠️ **这一轮没有生成任何 patch** —— **没有改任何 Java 代码**。
+> 与第十八轮不同，**这不是遗漏**。
+> 被审计的树**不是 git 仓库**，所以那棵树上的任何改动都**只能以 patch 形式留痕**（第十八轮的规则）。
 
 ---
 
