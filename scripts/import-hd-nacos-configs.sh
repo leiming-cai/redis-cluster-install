@@ -145,10 +145,30 @@ read_cfg "ext_base" "DEFAULT_GROUP" > /tmp/hd-ext-base-src.yaml 2>/dev/null || t
 post "DEFAULT_GROUP" "ext_base.yaml" /tmp/hd-ext_base.yaml
 
 # ---- hisdataSend-ext.yaml ----
-# hisDataSend 与 hisDataProducer 共用一套 hisdata 扩展配置
-read_cfg "hisdataproducer-ext.yaml" "DEFAULT_GROUP" > /tmp/hd-hisdataSend-ext.yaml 2>/dev/null || true
-if [ ! -s /tmp/hd-hisdataSend-ext.yaml ]; then
-  cat > /tmp/hd-hisdataSend-ext.yaml <<'EOF'
+# hisDataSend 与 hisDataProducer 共用一套 hisdata 配置，但**键名不同**：
+# bootstrap.yml 读的是 `hisDataSend.thread-pool-size`，
+# 所以两个键都要有（实测：只给 hisdataproducer 会报
+#   Could not resolve placeholder 'hisDataSend.thread-pool-size'）。
+cat > /tmp/hd-hisdataSend-ext.yaml <<'EOF'
+hisDataSend:
+  partition-path: /home
+  diskcheck-interval-minutes: 5
+  threshold-percentage: 95
+  low-threshold-percentage: 90
+  delete-nums: 300
+  disk-check-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/out/
+  csv-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/
+  history-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/history/
+  history-time-minutes: 259200
+  core-pool-size: 16
+  queue-capacity: 200
+  parase-data-queue-size: 100
+  process-count: 4
+  page-size: 500000
+  # ⚠️ hisDataSend 独有（源码 JsonDataSendServiceImpl 读 ${hisDataSend.thread-pool-size}）
+  #    hisdataproducer 那份没有这个键 -> 少了它就
+  #    "Could not resolve placeholder 'hisDataSend.thread-pool-size'"
+  thread-pool-size: 16
 hisdataproducer:
   partition-path: /home
   diskcheck-interval-minutes: 5
@@ -164,8 +184,8 @@ hisdataproducer:
   parase-data-queue-size: 100
   process-count: 4
   page-size: 500000
+  thread-pool-size: 16
 EOF
-fi
 post "DEFAULT_GROUP" "hisdataSend-ext.yaml" /tmp/hd-hisdataSend-ext.yaml
 
 echo "=== final count ==="

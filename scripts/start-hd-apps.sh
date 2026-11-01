@@ -27,7 +27,18 @@ start_one() {
   if [ ! -f "$APP_DIR/$jar" ]; then echo "  SKIP $name (no $jar)"; return; fi
   echo "  starting $name ($jar)"
   cd "$APP_DIR" || return
-  nohup "$JAVA" $JAVA_OPTS -jar "$jar" > "$LOG_DIR/$name.log" 2>&1 &
+  # ⚠️ transformNapstarModel 的 application.yml（**打进了 jar 里**）把 sac/cmt
+  #    两个 datasource 写成 node2:5432，但 PG 只跑在 hd-node1 ->
+  #    "Connection to node2:5432 refused"。用命令行覆盖（Spring Boot 优先于 jar 内配置）。
+  local extra=""
+  case "$name" in
+    transformNapstarModel)
+      extra="--spring.datasource.sac.url=jdbc:postgresql://node1:5432/napstar?currentSchema=sac&stringtype=unspecified&characterEncoding=UTF-8
+             --spring.datasource.cmt.url=jdbc:postgresql://node1:5432/napstar?currentSchema=cmt&stringtype=unspecified&characterEncoding=UTF-8"
+      ;;
+  esac
+  # shellcheck disable=SC2086
+  nohup "$JAVA" $JAVA_OPTS -jar "$jar" $extra > "$LOG_DIR/$name.log" 2>&1 &
   echo "$!" > "$LOG_DIR/$name.pid"
   sleep 3
 }
