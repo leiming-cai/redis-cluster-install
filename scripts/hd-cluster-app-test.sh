@@ -353,9 +353,26 @@ check_cluster_mode() {
 #    - 一条 grep 的**并集**（`-E` + `|`）：**一行只算一次**，
 #      只命中一种写法的行也照样算进来，两种都命中的行也只算一次。
 #      这正好是「异常行数」这个语义。
+#
+# ⚠️⚠️ **「应用没起来」不等于「没有异常」** ——
+#    日志里没有异常行，有两种完全不同的可能：
+#      ① 应用跑起来了，异常确实没发生         -> 可以判 PASS
+#      ② 应用**根本没跑起来**（日志还是空的）    -> **不能**判 PASS
+#    早先的版本不区分这两者：应用没起来时读到 0 个异常就报 PASS，
+#    而这恰恰是「读早了」的典型症状 ——
+#    `start-hd-apps.sh` 固定 sleep 60，而 web-controller 要 67～72 秒，
+#    于是日志可能还是空的，判据说「没有异常」，**跟真相正好相反**。
+#    所以这里先要求「应用确实起来了」（由调用方通过 wait_started 保证，
+#    并用日志里的 `Started` 行来复核），否则直接判 FAIL。
 check_no_pipeline_exception() {
-  local name="$1" log="$2"
+  local name="$1" log="$2" appcls="$3"
   [ -f "$log" ] || { bad "$name 没有日志文件 $log"; return 1; }
+  # 先确认应用确实起来了 —— 没有 `Started` 行就不能拿「0 个异常」当通过。
+  if ! grep -aq "Started $appcls in " "$log" 2>/dev/null; then
+    bad "$name 没有 'Started $appcls in ' —— 应用没起来，"
+    echo "        「日志里没有异常」**不能**当成「没有异常」（这次判据无法进行）"
+    return 1
+  fi
   local n n_fqn n_sdr
   n=$(grep -ac -E 'java\.lang\.UnsupportedOperationException|not supported for JedisClusterConnection' "$log" 2>/dev/null)
   # 下面两个只**展示**用（让人一眼看出是哪种写法在刷屏），不参与判定。
@@ -376,7 +393,17 @@ check_fatal() {
   chk "$name 致命错误数" "${n:-0}" "0"
 }
 
+# ---------------------------------------------------------------
 # 应用是否起来了
+#
+# ⚠️ 应用类名只有**这一个**来源（下面的 APP_CLS_* 变量）。
+#    wait_started() 和 check_started() 都用它 —— 免得两处各写一份、
+#    改了一处忘了另一处（那种不一致会让「等 Started」等的是另一个类，
+#    于是永远等不到，或者等到了却不检查）。
+APP_CLS_WEB="NapstarWebRestApplication"
+APP_CLS_MODEL="ModelserverRestApplication"
+APP_CLS_RTDATA="PointtabproducerApplication"
+
 check_started() {
   local name="$1" log="$2" appcls="$3"
   if grep -aq "Started $appcls in " "$log" 2>/dev/null; then
@@ -388,13 +415,96 @@ check_started() {
 }
 
 # ---------------------------------------------------------------
+# 等应用**真的起来**，然后让它稳定下来。
+#
+# ⚠️⚠️ **为什么必须等**：`start-hd-apps.sh` 里面是**固定 sleep 60**，
+#    不是「等到 Started 出现」。web-controller 实测要 **67～72 秒**
+#    才打完 `Started` —— 也就是说 `start-hd-apps.sh` 返回的时候，
+#    应用的日志**可能还什么都没有**。
+#    这时去读日志找 `UnsupportedOperationException`，读到的是 0，
+#    判据说「没有异常」—— **正好把要检的那个缺陷判成了 PASS**。
+#
+# ⚠️ **为什么等 Started 还不够**：`StartupRunner` 是
+#    `ApplicationRunner`，它在 **Spring 打完之后**才跑
+#    （`SpringApplication.callRunners` 在 `Started ... in ... seconds`
+#    **之后**）。实测：web-controller 的 `Started` 在第 271 行，
+#    第一条 UOE 在第 **278** 行（晚 7 行）；
+#    `head -n 271`（到 Started 为止）里 UOE 行数 = **0**。
+#    ⇒ 光等 Started 仍然会漏掉**第一批**异常，必须再给它一点时间。
+#
+# 用法：wait_started <名字> <日志> <应用类名>
+wait_started() {
+  local name="$1" log="$2" appcls="$3" i waited=0
+  for i in $(seq 1 40); do
+    if [ -f "$log" ] && grep -aq "Started $appcls in " "$log" 2>/dev/null; then
+      waited=$((i*5))
+      break
+    fi
+    sleep 5
+  done
+  if [ "$waited" -gt 0 ]; then
+    echo "    （$name 已出现 'Started $appcls in '，等了 ${waited} 秒）"
+  else
+    echo "    （$name 等了 200 秒还是没出现 'Started $appcls in ' —— 下面的判据会如实报 FAIL）"
+  fi
+  # 让 ApplicationRunner（StartupRunner 等）把异常刷出来。
+  # 这段等待是**必需**的，不是保险起见 —— 见上面「为什么等 Started 还不够」。
+  sleep 10
+}
+
+# ---------------------------------------------------------------
 # 起一批应用（走 start-hd-apps.sh 自己的批次机制）。
 # ⚠️ 绝对不能 pkill -f java —— 那会杀掉 Nacos/Kafka/ZK。
 # ⚠️ 宿主只有 ~3.9GB 内存，一次只能跑一批。
+#
+# ⚠️ 起批**之前**先把「上一次留下的日志状态」记下来：
+#    `check_cluster_mode` 里那条「日志里没有 Standalone 那行」的判据
+#    依赖 `start-hd-apps.sh` 用 `>`（**截断**）写日志。
+#    以前这里只是**注释**说明这个依赖；现在把它**断言**出来 ——
+#    截断没发生时（有人改成 `>>`，或者上一次运行残留了单机模式的行），
+#    那条判据就不成立，必须当场报出来，不能让它悄悄给出错误的结论。
+#
+# ⚠️ **只扫本脚本自己要读的那三个日志**
+#    （web-controller / model-controller / rtdata-consumer）。
+#    `$LOG_DIR` 下还有别的日志（`cd-a.log`、`mc-a.log`、`realserver.log`、
+#    `model-controller-nofix.log` 等）—— 那些**不是**本脚本起的应用，
+#    `start-hd-apps.sh` 也**不会**去截断它们，
+#    扫进来只会得到一堆「起批前后都有」的噪音，掩盖真正要看的那三个。
+TRACKED_LOGS="$LOG_DIR/web-controller.log $LOG_DIR/model-controller.log $LOG_DIR/rtdata-consumer.log"
+
 start_batch() {
   local batch="$1"
   echo "--- 起批次 $batch（HD_REDIS_CLUSTER=1）---"
+  # 记录起批前日志里有没有 Standalone 行（起批后应该被截断掉）
+  PRE_STANDALONE=""
+  local l
+  for l in $TRACKED_LOGS; do
+    [ -f "$l" ] || continue
+    if grep -aqE '\*\*\* Using Redis Standalone at [^)]*\)' "$l" 2>/dev/null; then
+      PRE_STANDALONE="$PRE_STANDALONE $(basename "$l")"
+    fi
+  done
+  if [ -n "$PRE_STANDALONE" ]; then
+    echo "    （起批前这些日志里有 Standalone 行：$PRE_STANDALONE"
+    echo "      —— start-hd-apps.sh 会用 > 截断它们，所以不影响本次判据）"
+  fi
   HD_REDIS_CLUSTER=1 bash /opt/hd/start-hd-apps.sh "$batch" 2>&1 | tail -14
+  # 截断的**实证**：起批后，日志里不该再有起批前的 Standalone 行。
+  # 判据本身在 check_cluster_mode 里；这里只把「截断确实发生了」记下来。
+  POST_STANDALONE=""
+  for l in $TRACKED_LOGS; do
+    [ -f "$l" ] || continue
+    if grep -aqE '\*\*\* Using Redis Standalone at [^)]*\)' "$l" 2>/dev/null; then
+      POST_STANDALONE="$POST_STANDALONE $(basename "$l")"
+    fi
+  done
+  if [ -n "$PRE_STANDALONE" ] && [ -z "$POST_STANDALONE" ]; then
+    echo "    （实证：起批前的 Standalone 行已被截断掉 -> 「模式唯一」判据的前提成立）"
+  elif [ -n "$POST_STANDALONE" ]; then
+    echo "    ⚠️ 起批后仍有日志含 Standalone 行：$POST_STANDALONE"
+    echo "       -> 日志**没有**被截断（或者应用又跑了一次单机模式），"
+    echo "          「模式唯一」那条判据的前提**不成立**，会如实报出来"
+  fi
 }
 
 # ---------------------------------------------------------------
@@ -511,7 +621,12 @@ start_batch 1
 echo
 echo "=== 判据 A1：日志那行 + 模式 ==="
 A_LOG="$LOG_DIR/web-controller.log"
-check_started "web-controller" "$A_LOG" "NapstarWebRestApplication"
+# ⚠️ **必须等应用真的起来**再去读日志（见 wait_started 的注释）：
+#    start-hd-apps.sh 固定 sleep 60，而 web-controller 要 67～72 秒。
+#    不等就等于在一个**空日志**上找异常 -> 读到 0 -> 报假 PASS。
+echo "--- 等 web-controller 起来 ---"
+wait_started "web-controller" "$A_LOG" "$APP_CLS_WEB"
+check_started "web-controller" "$A_LOG" "$APP_CLS_WEB"
 check_fatal "web-controller" "$A_LOG"
 check_cluster_mode "web-controller" "$A_LOG"
 echo
@@ -587,7 +702,9 @@ echo "=== 判据 A3：JVM 层的 UnsupportedOperationException ==="
 #    而那些异常是 SDR 在 `openPipeline()` 里抛的，
 #    发生在 hSet 之前 —— 跟元数据表空不空**无关**。
 #    所以 A3 依然是有效的回归判据。
-check_no_pipeline_exception "web-controller" "$A_LOG"
+#    （也正因为它有效，这里**必须**在应用起来之后才读日志 ——
+#      读早了会得到一个「0 个异常」的假 PASS。）
+check_no_pipeline_exception "web-controller" "$A_LOG" "$APP_CLS_WEB"
 
 echo
 echo "############ B — model-controller（modelserver）############"
@@ -595,7 +712,9 @@ start_batch 1b
 echo
 echo "=== 判据 B1：日志那行 + 模式 ==="
 B_LOG="$LOG_DIR/model-controller.log"
-check_started "model-controller" "$B_LOG" "ModelserverRestApplication"
+echo "--- 等 model-controller 起来 ---"
+wait_started "model-controller" "$B_LOG" "$APP_CLS_MODEL"
+check_started "model-controller" "$B_LOG" "$APP_CLS_MODEL"
 check_fatal "model-controller" "$B_LOG"
 check_cluster_mode "model-controller" "$B_LOG"
 echo
@@ -679,7 +798,7 @@ else
 fi
 echo
 echo "=== 判据 B3：JVM 层的 UnsupportedOperationException ==="
-check_no_pipeline_exception "model-controller" "$B_LOG"
+check_no_pipeline_exception "model-controller" "$B_LOG" "$APP_CLS_MODEL"
 
 echo
 echo "############ C — rtdata-consumer（realserver）############"
@@ -687,7 +806,9 @@ start_batch 1
 echo
 echo "=== 判据 C1：日志那行 + 模式 ==="
 C_LOG="$LOG_DIR/rtdata-consumer.log"
-check_started "rtdata-consumer" "$C_LOG" "PointtabproducerApplication"
+echo "--- 等 rtdata-consumer 起来 ---"
+wait_started "rtdata-consumer" "$C_LOG" "$APP_CLS_RTDATA"
+check_started "rtdata-consumer" "$C_LOG" "$APP_CLS_RTDATA"
 check_fatal "rtdata-consumer" "$C_LOG"
 check_cluster_mode "rtdata-consumer" "$C_LOG"
 echo
@@ -736,7 +857,7 @@ if assert_app_key_present "C2" "$C_KEY" "$C_LOG"; then
 fi
 echo
 echo "=== 判据 C3：JVM 层的 UnsupportedOperationException ==="
-check_no_pipeline_exception "rtdata-consumer" "$C_LOG"
+check_no_pipeline_exception "rtdata-consumer" "$C_LOG" "$APP_CLS_RTDATA"
 
 echo
 echo "############ D — 分片分布（key 确实散到多个 master 上）############"
@@ -819,13 +940,23 @@ CLEAN_KEYS=()
 #    （scripts/hd-cluster-verify.sh）的 `hd:test:cluster:spread*` /
 #    `hd:test:cluster:pipe*` 一起删掉，把别的脚本的现场给毁了。
 #    现在只清 `hd:test:apptest:*`（本脚本专属）。
+#
+# 📌 **这条是「按前缀」的局部检查，不是「集群干净了」的判据**。
+#    一般的净账由**下面那条 DBSIZE 增量断言**负责
+#    （基线 -> 现在，增量必须是 0）——
+#    它覆盖「本脚本写了什么、又删了什么」的全部净效果，
+#    包括那些不在 `hd:test:apptest:` 前缀下的 key
+#    （比如判据 B2 让 model-controller 写的 `model:enumdicts:folder:user_sex`）。
+#    ⚠️ 所以**不要**把这条的前缀改窄（会漏掉本脚本自己的残留），
+#    也**不要**把它改宽（会撞上 Task 2 的 `hd:test:cluster:*`），
+#    更**不要**以为「前缀检查 0」就等于「集群干净了」。
 left=0
 for p in $P1 $P2 $P3; do
   n=$(r "$p" KEYS 'hd:test:apptest:*' | grep -c 'hd:test:apptest:')
   echo "    $p 残留 $n 个测试 key"
   left=$((left+n))
 done
-chk "E 清理后无残留测试 key" "$left" "0"
+chk "E 清理后无残留测试 key（限本脚本前缀；总账见下面的 DBSIZE 增量）" "$left" "0"
 
 echo "  --- 三个 master 现在的 DBSIZE（跟基线比）---"
 DBSIZE_NOW=$(dbsize_snapshot)

@@ -648,13 +648,24 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 
    - 查**调用点**（更直接，能挡住「树根本没打补丁」这种情况）。
      ⚠️ **必须限定范围**：整棵树里用 `executePipelined` 的文件有 **41** 个，
-     分布在 6 个模块组里 ——
-     `backend-gd/napstarweb` ×4、`backend-gd/sche-viewer-server` ×10、
-     `backend/napstarweb` ×4、`backend/sche-viewer-server` ×10、
-     `modelserver` ×12、`realserver` ×1。
-     其中 `sche-viewer-server`、`backend-gd` 副本、
-     以及 `hisDataProducer`/`hisDataSend`（按 D1 **明确不改**）**都不在本次范围内**。
+     全部落在下面这 **6 个模块组**里（加起来正好 41）：
+
+     | 模块组 | 文件数 | 本次是否在范围内 |
+     |---|---|---|
+     | `application/backend-gd/napstarweb` | 4 | ❌ `backend-gd` 是副本目录，不参与发版 |
+     | `application/backend-gd/sche-viewer-server` | 10 | ❌ 同上 |
+     | `application/backend/napstarweb` | 4 | ⚠️ 其中 `monitor` 的 4 个**在范围内**（见下面） |
+     | `application/backend/sche-viewer-server` | 10 | ❌ 该模块不切集群模式 |
+     | `platform/backend/modelserver` | 12 | ❌ 不切集群模式（其中含 D1 里明确不改的 `hisDataProducer` / `hisDataSend`） |
+     | `platform/backend/realserver` | 1 | ✅ `rtdata-module` 的那 1 个**在范围内** |
+     | **合计** | **41** | |
+
+     （`hisDataProducer` / `hisDataSend` 是 `modelserver` 那 12 个里的，
+     **不是**第 7 组 —— 它们按 D1 明确不改，所以整组都不在范围内。）
+
      一个第一天就报 41 条的门禁会被无视、然后被整体加白 —— 那就白设了。
+     真正要查的只有 **5 个文件**（`napstarweb/monitor` 的 4 个 +
+     `rtdata-module` 的 1 个）。
 
      ```bash
      # 只查集群模式下发版的那两个模块
