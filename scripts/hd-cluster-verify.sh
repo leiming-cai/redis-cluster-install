@@ -36,13 +36,57 @@ rc() { timeout "$TMO" "$RC" -c -h "$IP" -p "$1" -a "$PASS" --no-auth-warning "${
 #    200 个候选 key = 200 × 5s = 1000s，脚本看上去像挂死了。
 #    批量版本只有一次 timeout。
 #
+# ⚠️ 编号必须在**过滤之前**做（`nl -ba` 在前，`grep` 在后）。
+#    反过来的话，一旦中间某条 CLUSTER KEYSLOT 失败，grep 会把那一行滤掉，
+#    后面的行序号全部前移 —— key 和 slot 就**错位配对**了，
+#    而且是静默的（不会报错，只会算出一个错的槽）。
+#    这里先用 nl 编号，再过滤数值行，序号永远对应原始命令的位置。
+#
 # 用法：keyslots <prefix> <count> -> 每行一个 "key slot"
+# 返回码：0 = 结果条数与命令数一致（配对可信）；1 = 有命令失败，输出不可信。
 keyslots() {
-  local prefix="$1" count="$2" i
+  local prefix="$1" count="$2" i tmp
+  tmp=$(mktemp)
   for i in $(seq 1 "$count"); do
     echo "CLUSTER KEYSLOT $prefix$i"
   done | timeout "$TMO" "$RC" -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning 2>&1 \
-    | grep -E '^[0-9]+$' | nl -ba | awk '{print "'"$prefix"'" $1, $2}'
+    | nl -ba > "$tmp"
+  # 期望 count 行（每条命令一行响应），且每行第 2 列都是槽号。
+  local got
+  got=$(awk '$2 ~ /^[0-9]+$/' "$tmp" | wc -l)
+  if [ "$got" -ne "$count" ]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  awk -v p="$prefix" '$2 ~ /^[0-9]+$/ {print p $1, $2}' "$tmp"
+  rm -f "$tmp"
+  return 0
+}
+
+# ---------------------------------------------------------------
+# 在「一组槽区间」里找一个落在其中的 key。
+#
+# ⚠️ 区间集合可能不止一个（例如某 master 拥有 "0-5460 10923-16383"）。
+#    早先的写法 own_lo=${own_ranges%%-*}; own_hi=${own_ranges##*-} 会把它
+#    展开成 0..16383 —— **横跨了本节点并不拥有的槽**，
+#    于是「本节点对照组」的 key 可能落到别人的槽里，
+#    对照组就会假失败。这里老老实实按区间逐个比对。
+#
+# 用法：find_key_in_ranges <prefix> <count> <ranges...>
+#   ranges 是**空格分隔**的区间列表，形如 "0-5460 10923-16383"
+#   （awk 的 split 用 " " 切分 —— 换行/制表符也算分隔符，
+#     但调用方统一用空格分隔，免得两处约定不一致。）
+#   输出: "<key> <slot>"（第一个命中的）；没命中则输出空。
+#   返回码: 0 = 成功；1 = 批量 KEYSLOT 有命令失败（配对不可信）。
+find_key_in_ranges() {
+  local prefix="$1" count="$2"; shift 2
+  local ranges="$*"
+  local pairs
+  pairs=$(keyslots "$prefix" "$count") || return 1
+  echo "$pairs" | awk -v r="$ranges" '
+    BEGIN { n=split(r, a, " "); for (i=1;i<=n;i++) { split(a[i], b, "-");
+             if (b[2] == "") { lo[i]=b[1]; hi[i]=b[1] } else { lo[i]=b[1]; hi[i]=b[2] } } }
+    { for (i=1;i<=n;i++) if ($2 >= lo[i] && $2 <= hi[i]) { print $1" "$2; exit } }'
 }
 
 # ---------------------------------------------------------------
@@ -78,9 +122,22 @@ cleanup() {
   done
   [ "${#cmds[@]}" -gt 0 ] && batch_cmds "${cmds[@]}" >/dev/null
 }
-# 无论中途怎么退出（含 Ctrl-C / 报错），都要清理掉自己写的 key。
-# SUMMARY 在正常路径末尾打印；trap 只负责兜底清理，异常退出时才补打 SUMMARY。
-# ⚠️ 退出码变量叫 _rc_ 而不是 rc —— rc 是本脚本的 redis-cli 包装函数。
+# 兜底清理：脚本退出时把自己写的 key 删掉。
+#
+# 这个 EXIT trap **覆盖什么、不覆盖什么**（实测结论，别再想当然）：
+#   - 正常退出 / 报错退出        -> 触发
+#   - SIGTERM (kill -TERM)       -> 触发，且是**立刻**触发（不等前台子进程）
+#   - SIGINT  (kill -INT)       -> **被推迟**：bash 正在等前台子进程时，
+#                                  SIGINT 会排队等到子进程结束才处理。
+#                                  所以 Ctrl-C 实际上会让脚本**跑完**，
+#                                  清理在正常退出时发生，而不是中途。
+#   - SIGKILL (kill -9)          -> 捕不到（内核直接杀），残留无法避免。
+#
+# 所以「Ctrl-C 之后一定没有残留」这个说法只在脚本正常跑完时成立；
+# kill -9 之后可能留残留，需要手工再跑一次本脚本（或手工 DEL）。
+#
+# SUMMARY 在正常路径末尾打印；trap 只在异常退出时补打一份。
+# ⚠️ 退出码变量叫 _e_ 而不是 rc —— rc 是本脚本的 redis-cli 包装函数。
 DONE=0
 trap '_e=$?; cleanup; if [ "$DONE" -eq 0 ]; then echo; echo "SUMMARY: PASS=$P FAIL=$F"; fi; exit $_e' EXIT
 
@@ -135,13 +192,19 @@ ranges=$(echo "$shards" | awk '
   want==1   { printf "%s %s\n", s, $1; want=0 }
 ')
 n_ranges=$(echo "$ranges" | grep -c . )
-chk "L2 槽位区间数" "$n_ranges" "3"
-# 各区间起点排序后应为 0 / 5461 / 10923
+chk "L2 槽位区间数（3 个 master 各一段）" "$n_ranges" "3"
+# ⚠️ 这里**不能**写死 "0 5461 10923" / "5460 10922 16383"。
+#    规格只要求「3 个 master 各分到槽位，覆盖 0-16383」——
+#    至于怎么切（比如 0-5460/5461-10922/10923-16383 还是别的切法）
+#    是**实现细节**，换一个同样合法的 rebalance 就不该挂。
+#    所以下面查的是**结构**（几段、覆盖全不全、有没有缝/重叠、头尾对不对），
+#    具体边界只打印出来给人看。
+echo "    实际槽区间（仅供参考，不作为判据）:"
+echo "$ranges" | sort -n -k1,1 | awk '{printf "      %s - %s\n", $1, $2}'
 starts=$(echo "$ranges" | awk '{print $1}' | sort -n | tr '\n' ' ')
-chk "L2 各区间起点" "$starts" "0 5461 10923 "
-# 各区间终点排序后应为 5460 / 10922 / 16383
 ends=$(echo "$ranges" | awk '{print $2}' | sort -n | tr '\n' ' ')
-chk "L2 各区间终点" "$ends" "5460 10922 16383 "
+echo "    各区间起点: $starts"
+echo "    各区间终点: $ends"
 # 区间总数必须覆盖 16384 且互不重叠（起点 == 上一个终点 + 1）
 covered=$(echo "$ranges" | awk '{s+=$2-$1+1} END{print s+0}')
 chk "L2 槽位覆盖总数" "$covered" "16384"
@@ -150,7 +213,12 @@ chk "L2 槽位覆盖总数" "$covered" "16384"
 contig=$(echo "$ranges" | sort -n -k1,1 | awk '
   { if (NR>1 && $1 != prev+1) { bad=1; print "gap"; exit } prev=$2 }
   END { if (bad != 1) print "contig" }')
-chk "L2 区间连续无重叠" "$contig" "contig"
+chk "L2 区间连续无重叠（无缝隙）" "$contig" "contig"
+# 头尾必须正好卡住 0 和 16383（这是「覆盖 0-16383」的结构性判据）
+first_start=$(echo "$ranges" | sort -n -k1,1 | head -1 | awk '{print $1}')
+last_end=$(echo "$ranges" | sort -n -k1,1 | tail -1 | awk '{print $2}')
+chk "L2 第一个区间从 0 开始" "$first_start" "0"
+chk "L2 最后一个区间到 16383 结束" "$last_end" "16383"
 
 # 交叉验证：CLUSTER NODES 里每个 master 的槽区间也要对得上。
 nodes=$(r $P1 CLUSTER NODES | tr -d '\r')
@@ -171,6 +239,15 @@ chk "L2 CLUSTER NODES 的槽区间数" "$n_node_ranges" "3"
 s1=$(echo "$ranges"       | awk '{print $1"-"$2}' | sort | tr '\n' ',')
 s2=$(echo "$node_ranges" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ',')
 chk "L2 SHARDS 与 NODES 的槽区间一致" "$s1" "$s2"
+# 三个 master 必须是**不同的**节点（不能三个区间都归到同一个 master 上）
+n_distinct_master=$(echo "$nodes" | grep 'master' | awk '{print $2}' | sort -u | wc -l)
+chk "L2 三个 master 是三个不同的节点" "$n_distinct_master" "3"
+
+# CLUSTER SLOTS —— 人读视图（槽 -> master 地址 的经典列表）。
+# ⚠️ 这里的行数/块数随节点数变，**不能**按行号去解析它；
+#    判据一律用上面的 CLUSTER SHARDS / CLUSTER NODES。
+echo "    (CLUSTER SLOTS —— 人读视图，仅供参考)"
+r $P1 CLUSTER SLOTS | sed 's/^/      /'
 
 echo
 echo "############ L3 — 跨槽读写（-c 模式）############"
@@ -201,7 +278,9 @@ echo "############ L4 — MOVED 重定向（不加 -c）############"
 # ⚠️ 必须挑一个**确实不在 16379 上**的 key，否则测不到 MOVED。
 #    做法：先算出 16379 自己拥有的槽区间，再从 CLUSTER NODES 里找出
 #    别的 master 的槽区间，用一个落在那个区间里的 key 来测。
-own_ranges=$(echo "$nodes" | grep "myself,master" | awk '{f=0; for(i=1;i<=NF;i++) if ($i=="connected") f=1; else if (f && $i ~ /^[0-9]+(-[0-9]+)?$/) print $i}')
+# ⚠️ 用 printf " " 而不是 print：own_ranges 要跟 node_ranges 一样是
+#    **空格分隔**的一串区间（find_key_in_ranges 按空格切分）。
+own_ranges=$(echo "$nodes" | grep "myself,master" | awk '{f=0; for(i=1;i<=NF;i++) if ($i=="connected") f=1; else if (f && $i ~ /^[0-9]+(-[0-9]+)?$/) printf "%s ", $i}')
 echo "    16379 拥有: $own_ranges"
 # 别人的第一个槽区间（区间和地址取自**同一行**，保证配对正确）
 other_range=""
@@ -216,17 +295,22 @@ echo "    别人的节点: $other_ip  槽区间: $other_range"
 # 找一个 slot 落在 other_range 里的 key（一次连接批量算，避免 N 次往返）
 MOVED_KEY=""
 MOVED_SLOT=""
+slots_failed=0
 if [ -n "$other_range" ]; then
-  # other_range 形如 "5461-10922"
-  lo=${other_range%%-*}; hi=${other_range##*-}
-  hit=$(keyslots "hd:test:cluster:m" 200 | awk -v lo="$lo" -v hi="$hi" '$2>=lo && $2<=hi {print $1" "$2; exit}')
-  if [ -n "$hit" ]; then
+  hit=$(find_key_in_ranges "hd:test:cluster:m" 200 "$other_range")
+  rc_find=$?
+  # rc_find 非 0 = 批量 KEYSLOT 里有命令失败了。这时候 key↔slot 的配对不可信
+  # （keyslots 会拒绝输出），不能硬着头皮拿一个错的槽去测 MOVED。
+  if [ "$rc_find" -ne 0 ]; then
+    bad "L4 批量 CLUSTER KEYSLOT 有命令失败，key↔slot 配对不可信"
+    slots_failed=1
+  elif [ -n "$hit" ]; then
     MOVED_KEY=${hit% *}; MOVED_SLOT=${hit##* }
   fi
 fi
-if [ -z "$MOVED_KEY" ]; then
+if [ -z "$MOVED_KEY" ] && [ "$slots_failed" -eq 0 ]; then
   bad "L4 找不到落在 $other_range 槽区间的 key"
-else
+elif [ -n "$MOVED_KEY" ]; then
   CLEAN_KEYS+=("$MOVED_KEY")
   echo "    测试 key: $MOVED_KEY (slot $MOVED_SLOT, 应属于 $other_ip)"
   # 先用 -c 写进去（-c 会跟随重定向）
@@ -295,66 +379,154 @@ chk "L5 各 master 上的 key 数之和" "$((r1+r2+r3))" "$NK"
 
 echo
 echo "############ L6 — pipeline 在集群下的行为 ############"
-# 背景：Spring Data Redis 2.7.18 的 JedisClusterConnection.openPipeline()
-# 直接抛 UnsupportedOperationException —— callback 体一次都不跑，
-# 一条 Redis 命令都发不出去。所以 HD 代码在集群模式下必须改用
-# redisTemplate.execute(cb)（RedisClusterHelper.isCluster() 分支）。
-# 这个 L6 就是把那个限制**在真实集群上复现出来**。
+# 这个 L6 能证明什么、不能证明什么 —— 先说清楚，免得误读：
 #
-# 实测（redis-cli 8.10）：--pipe 在集群模式下**不跟随重定向**：
-#   - 目标 key 落在本节点槽上   -> errors: 0, replies: N（能跑通）
-#   - 目标 key 落在别的节点槽上 -> 每条都返回 MOVED，errors: N
-# 找一个 16379 自己拥有的槽（这样 pipeline 才有成功的对照组）
-own_lo=${own_ranges%%-*}; own_hi=${own_ranges##*-}
+# 【它证明的是】在集群模式下，一个**不做槽感知**的客户端把多条命令打包
+# 一次性发给**单个节点**时，跨槽的那几条会拿到 MOVED 错误 ——
+# 因为整个 pipeline 只落在那一个节点上，而它只能服务自己名下的槽。
+#
+# 【它不能证明的是】Spring Data Redis 2.7.18 的
+# JedisClusterConnection.openPipeline() 抛 UnsupportedOperationException。
+# 那是**客户端库**的行为（callback 体一次都不跑），命令行层面复现不了。
+# JVM 层面的那个异常由 Task 5（应用层）验证。
+# 本测试是那个限制的**协议层原因**：集群不会替你在 pipeline 里做重定向，
+# 所以客户端库干脆不给你开这个口子。
+#
+# ⚠️ redis-cli 的 **--pipe 会忽略 -c**（实测：加不加 -c，输出完全一样）。
+#    -c 只对「一条命令一次往返」的调用有意义。所以这里刻意**不加** -c，
+#    测的正是「单节点、无槽感知」的 pipeline 行为。
+#    （早先的版本在这里加了 -c，那个标志是**空转**的，等于没加。）
+#
+# ⚠️ --pipe 的 MOVED 是**按槽算**的，跟 key 存不存在无关。
+#    所以这里先把 key **真的写进去**并断言能读回来，
+#    这样 pipeline 的失败才是「一条真实数据的 pipeline 失败了」，
+#    而不是「槽算术算出了个 MOVED」。
+
+# --- 准备一个本节点槽内的 key（对照组） ---
+# ⚠️ own_ranges 可能有**多个**区间（例如 "0-5460 10923-16383"）。
+#    早先的 own_lo=${own_ranges%%-*}; own_hi=${own_ranges##*-} 会展开成
+#    0..16383 —— 横跨了本节点并不拥有的槽，对照组的 key 就可能落到
+#    别人的槽里，对照组假失败。这里用 find_key_in_ranges 逐区间比对。
 local_key=""
 local_slot=""
-if [ -n "$own_lo" ]; then
-  hit=$(keyslots "hd:test:cluster:pipe" 200 | awk -v lo="$own_lo" -v hi="$own_hi" '$2>=lo && $2<=hi {print $1" "$2; exit}')
-  if [ -n "$hit" ]; then
+local_slots_failed=0
+if [ -n "$own_ranges" ]; then
+  hit=$(find_key_in_ranges "hd:test:cluster:pipe" 200 "$own_ranges")
+  if [ $? -ne 0 ]; then
+    bad "L6 批量 CLUSTER KEYSLOT 有命令失败，key↔slot 配对不可信"
+    local_slots_failed=1
+  elif [ -n "$hit" ]; then
     local_key=${hit% *}; local_slot=${hit##* }
   fi
 fi
-if [ -z "$local_key" ]; then
+if [ -z "$local_key" ] && [ "$local_slots_failed" -eq 0 ]; then
   bad "L6 找不到落在本节点槽（$own_ranges）里的 key"
+fi
+if [ -z "$local_key" ]; then
   local_key="hd:test:cluster:pipe-fallback"
+else
+  echo "    对照组 key: $local_key (slot $local_slot，本节点槽内)"
 fi
 CLEAN_KEYS+=("$local_key")
-echo "    对照组 key: $local_key (slot $local_slot，本节点槽内)"
 
-pipe_local=$(timeout "$TMO" "$RC" -c -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning --pipe <<EOF 2>&1
+# --- 准备一个跨槽的 key，并且**真的写进去** ---
+cross_key=""
+cross_slot=""
+cross_slots_failed=0
+if [ -n "$other_range" ]; then
+  hit=$(find_key_in_ranges "hd:test:cluster:pipex" 200 "$other_range")
+  if [ $? -ne 0 ]; then
+    bad "L6 批量 CLUSTER KEYSLOT 有命令失败，key↔slot 配对不可信"
+    cross_slots_failed=1
+  elif [ -n "$hit" ]; then
+    cross_key=${hit% *}; cross_slot=${hit##* }
+  fi
+fi
+if [ -z "$cross_key" ] && [ "$cross_slots_failed" -eq 0 ]; then
+  bad "L6 找不到落在别的 master 槽（$other_range）里的 key"
+fi
+if [ -n "$cross_key" ]; then
+  CLEAN_KEYS+=("$cross_key")
+  echo "    跨节点槽 key: $cross_key (slot $cross_slot，应属于 $other_ip)"
+  # ⚠️ 必须先写进去并确认能读回来 —— 否则 pipeline 的 MOVED 只是槽算术，
+  #    证明不了「对真实数据的 pipeline 会失败」。
+  rc $P1 SET "$cross_key" xv >/dev/null
+  chk "L6 跨节点槽的 key 事先写入且能读回" "$(rc $P1 GET "$cross_key")" "xv"
+fi
+
+# --- 对照组：多条命令**全部**落在本节点槽内 -> 必须一条错都没有 ---
+pipe_local=$(timeout "$TMO" "$RC" -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning --pipe <<EOF 2>&1
 SET $local_key pv1
+GET $local_key
+SET $local_key pv2
 GET $local_key
 EOF
 )
-echo "    本节点槽的 --pipe 输出:"
+echo "    对照组（4 条命令全在本节点槽）的 --pipe 输出:"
 echo "$pipe_local" | sed 's/^/      /'
 if echo "$pipe_local" | grep -q 'errors: 0'; then
-  ok "L6 本节点槽上的 pipeline 可以跑通（对照组）"
+  ok "L6 对照组：本节点槽内的多条命令 pipeline 全部成功（errors: 0）"
 else
-  bad "L6 本节点槽上的 pipeline 居然失败"
+  bad "L6 对照组：本节点槽内的 pipeline 居然有错误"
 fi
+# ⚠️ --pipe 只打印出错的回复，成功的回复被吞掉；
+#    所以对照组也要看**回复数** = 发出的命令数，才说明 4 条都回来了。
+rep_local=$(echo "$pipe_local" | grep -oP 'replies: \K[0-9]+')
+chk "L6 对照组的回复数 = 发出的命令数" "${rep_local:-0}" "4"
 
-# 现在换一个落在别的 master 槽上的 key —— pipeline 必须失败（返回 MOVED）
-cross_key="$MOVED_KEY"
+# --- 主体：多条命令里**混进跨槽**的 -> 跨槽的那几条必须报 MOVED ---
 if [ -n "$cross_key" ]; then
-  pipe_cross=$(timeout "$TMO" "$RC" -c -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning --pipe <<EOF 2>&1
-SET $cross_key pv2
+  pipe_cross=$(timeout "$TMO" "$RC" -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning --pipe <<EOF 2>&1
+GET $local_key
+GET $cross_key
+GET $local_key
 GET $cross_key
 EOF
 )
-  echo "    跨节点槽的 --pipe 输出:"
+  echo "    混合（2 本地 + 2 跨槽）的 --pipe 输出:"
   echo "$pipe_cross" | sed 's/^/      /'
-  if echo "$pipe_cross" | grep -qE 'MOVED' && echo "$pipe_cross" | grep -qE 'errors: [1-9]'; then
-    ok "L6 跨节点槽的 pipeline 按预期失败（MOVED）→ 应用必须用 execute(cb)，不能用 executePipelined"
+  n_moved=$(echo "$pipe_cross" | grep -c 'MOVED')
+  err_line=$(echo "$pipe_cross" | grep -oP 'errors: \K[0-9]+')
+  err_line=${err_line:-0}
+  rep_line=$(echo "$pipe_cross" | grep -oP 'replies: \K[0-9]+')
+  rep_line=${rep_line:-0}
+  chk "L6 跨槽命令返回 MOVED 的条数" "$n_moved" "2"
+  if [ "${err_line:-0}" -gt 0 ]; then
+    ok "L6 跨槽 pipeline 的 errors 计数 > 0（$err_line）"
   else
-    bad "L6 期望跨节点槽 pipeline 报 MOVED 错误，实得: $(echo "$pipe_cross" | tr '\n' '|')"
+    bad "L6 跨槽 pipeline 的 errors 计数应为 > 0，实得 '$err_line'"
   fi
+  # ⚠️ redis-cli --pipe **只打印出错的回复**，成功的回复被吞掉了。
+  #    所以「本节点槽的那两条成功了」不能靠看到值来判断，
+  #    要靠回复数：发了 4 条，收到 4 条回复，其中只有 2 条是错误
+  #    —— 另外 2 条（本地槽的）就是成功的。
+  chk "L6 混合 pipeline 的回复数 = 发出的命令数" "$rep_line" "4"
+  if [ "$rep_line" -eq 4 ] && [ "${err_line:-0}" -eq 2 ]; then
+    ok "L6 同一条 pipeline 里本节点槽的命令成功了（4 条命令 - 2 个错误 = 2 条成功）"
+  else
+    bad "L6 同一条 pipeline 里本节点槽的命令应该成功（replies=$rep_line errors=$err_line）"
+  fi
+  if [ "$n_moved" -gt 0 ] && [ "${err_line:-0}" -gt 0 ]; then
+    ok "L6 结论：集群模式下不做槽感知的 pipeline，跨槽命令必失败（MOVED）→ 应用必须用 execute(cb)，不能用 executePipelined"
+  else
+    bad "L6 跨槽 pipeline 未按预期失败"
+  fi
+  echo "    注：JedisClusterConnection.openPipeline() 抛 UnsupportedOperationException"
+  echo "        属于客户端库行为，本命令行测试复现不了；"
+  echo "        那个 JVM 层面的异常由 Task 5（应用层）验证。"
 else
   bad "L6 没有可用的跨节点槽 key（沿用 L4 的失败）"
 fi
 
-# 单条命令（execute(cb) 走的就是这条路）必须仍然可用
-chk "L6 单条命令仍可用" "$(rc $P1 GET "$local_key")" "pv1"
+# 单条命令（execute(cb) 走的就是这条路）必须仍然可用。
+# ⚠️ 用**独立的 key**，不要复用 $local_key ——
+#    $local_key 的值是被上面的 pipeline 改过的（pv1 -> pv2），
+#    复用会让这条断言依赖前面的 pipeline 成功，前面的检查一挂，
+#    这里就跟着报一个看不懂的错。
+single_key="hd:test:cluster:pipe-single"
+CLEAN_KEYS+=("$single_key")
+rc $P1 SET "$single_key" single-ok >/dev/null
+chk "L6 单条命令仍可用" "$(rc $P1 GET "$single_key")" "single-ok"
 
 echo
 echo "############ 清理 ############"
