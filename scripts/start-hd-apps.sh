@@ -39,6 +39,28 @@ start_one() {
              --spring.datasource.cmt.url=jdbc:postgresql://node1:5432/napstar?currentSchema=cmt&stringtype=unspecified&characterEncoding=UTF-8"
       ;;
   esac
+
+  # ⚠️ Redis 集群模式（HD_REDIS_CLUSTER=1 时生效）
+  #
+  # 📌 为什么用命令行覆盖，**不写 Nacos**：
+  #    实测（docs/superpowers/specs/2026-11-01-hd-redis-cluster-test-design.md §2.2）：
+  #      命令行 --oms.*      赢
+  #      jar 内 application.yml  赢过 Nacos
+  #      Nacos 的 oms:          输
+  #    jar 内 application.yml 硬编码了 oms.redisMode=cluster + clusters:[127.0.0.1:6379]
+  #    → Nacos 里的 oms 根本压不过它 → 只能走命令行。
+  #    判据：启动日志那行 *** Using Redis Cluster with nodes: <列表> ***，列表就是生效值。
+  if [ "${HD_REDIS_CLUSTER:-0}" = "1" ]; then
+    # ⚠️ 不能用 `hostname -i` —— 它返回空格分隔的多个值
+    local cip="${HD_CLUSTER_IP:-$(getent hosts node1 | awk '{print $1}')}"
+    local cpw="${HD_CLUSTER_PASS:-HdClusterPw2026}"
+    extra="$extra --oms.redisMode=cluster
+            --oms.clusters[0]=$cip:16379
+            --oms.clusters[1]=$cip:16380
+            --oms.clusters[2]=$cip:16381
+            --oms.password=$cpw"
+  fi
+
   # shellcheck disable=SC2086
   nohup "$JAVA" $JAVA_OPTS -jar "$jar" $extra > "$LOG_DIR/$name.log" 2>&1 &
   echo "$!" > "$LOG_DIR/$name.pid"
