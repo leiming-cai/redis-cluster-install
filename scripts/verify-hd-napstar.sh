@@ -213,11 +213,21 @@ chk "B9 HD info 表数" "${n:-0}" "30"
 #    所以这里：捕获它的输出 + 退出码，把它的 PASS/FAIL **加到外层的
 #    $PASS / $FAIL 上**，它自己的 SUMMARY 行**过滤掉**（不显示、也不计数）。
 #
-# ⚠️ 取**最后一行** SUMMARY，不是第一行：hd-cluster-verify.sh 在
-#    「L0 探活失败提前退出」的路径上也会打一行 SUMMARY，
-#    而它的 EXIT trap 在异常退出时还会**再补打一行**。
-#    只有最后一行是最终结论。
+# 📌 计数合并的**具体逻辑**在 scripts/hd-cluster-summary.sh 里（单独一个文件），
+#    这样它可以被 `source`、可以被测试直接跑
+#    （scripts/test-hd-cluster-summary.sh source 的是**那个文件本身**，
+#      不是它的复制品）。
+#    改逻辑请先跑那个测试。
 # ---------------------------------------------------------------
+HD_CLUSTER_SUMMARY_HELPER=/opt/hd/hd-cluster-summary.sh
+if [ -f "$HD_CLUSTER_SUMMARY_HELPER" ]; then
+  # shellcheck source=/dev/null
+  . "$HD_CLUSTER_SUMMARY_HELPER"
+else
+  echo "!! 找不到 $HD_CLUSTER_SUMMARY_HELPER —— 计数合并逻辑缺失" >&2
+  exit 3
+fi
+
 if [ -x /opt/hd/hd-redis-cluster.sh ] || [ -f /opt/hd/hd-redis-cluster.sh ]; then
   if bash /opt/hd/hd-redis-cluster.sh status >/dev/null 2>&1; then
     echo
@@ -235,20 +245,16 @@ if [ -x /opt/hd/hd-redis-cluster.sh ] || [ -f /opt/hd/hd-redis-cluster.sh ]; the
     CV_P=$(echo "$CV_SUM" | grep -oP 'PASS=\K[0-9]+' || true)
     CV_F=$(echo "$CV_SUM" | grep -oP 'FAIL=\K[0-9]+' || true)
     CV_P=${CV_P:-0}; CV_F=${CV_F:-0}
-    if [ -z "$CV_SUM" ]; then
-      # 脚本崩了 / 没来得及打 SUMMARY —— 不能当成「0 个失败」。
-      bad "C 集群验证没有产出 SUMMARY（退出码 $CV_RC）—— 集群验证本身异常"
-    else
-      PASS=$((PASS + CV_P))
-      FAIL=$((FAIL + CV_F))
-      echo "  (集群验证已并入本轮计数: PASS +$CV_P, FAIL +$CV_F)"
-      # ⚠️ 退出码与它自己的 FAIL 计数不一致时要点名 ——
-      #    「计数说 0 个失败，但退出码非 0」意味着它的判定逻辑和它的输出打架了，
-      #    这时候不能只信计数。
-      if [ "$CV_RC" -ne 0 ] && [ "$CV_F" -eq 0 ]; then
-        bad "C 集群验证退出码非 0（$CV_RC）但它自己报 FAIL=0 —— 计数与退出码不一致"
-      fi
+    # 计数合并（逻辑在 hd-cluster-summary.sh 里，可被测试 source）。
+    # ⚠️ merge_cluster_summary 自己会把异常**计入 $FAIL**，
+    #    并把说明写进 $CLUSTER_SUMMARY_NOTES ——
+    #    这里**只打印**，不能再调 bad()（那会重复计数）。
+    CLUSTER_SUMMARY_NOTES=""
+    merge_cluster_summary "$CV_OUT" "$CV_RC"
+    if [ -n "$CLUSTER_SUMMARY_NOTES" ]; then
+      echo "$CLUSTER_SUMMARY_NOTES" | sed '/^$/d; s/^/  FAIL  /'
     fi
+    echo "  (集群验证已并入本轮计数: PASS +$CV_P, FAIL +$CV_F)"
     rm -f "$CV_OUT" 2>/dev/null
   else
     echo

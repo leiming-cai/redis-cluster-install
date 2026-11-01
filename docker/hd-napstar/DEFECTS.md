@@ -163,10 +163,43 @@ jmxUrl: {}          ← 来自 icms-controller.yaml 的 dashboard.jmx
   正确做法是：**要么改华盾树的 `bootstrap.yml` 不引用它们，
   要么在安装包里补上真正的这两个文件**（内容应对齐 `icms-controller.yaml`）。
 
-> 📌 本轮**仍未定**：这两个 dataId 到底该
-> (a) 从 `bootstrap.yml` 里去掉引用（改代码），还是
-> (b) 在安装包里补上正确内容（改交付物）？
-> 需要产品/交付方确认。
+### ✅ 实测更新（2026-11-01 下午）：**选项 (a) 已经实施了** —— 而且**做在了错误的树上**
+
+> ⚠️ 下面这段取代了原先那句「本轮仍未定」—— 那句话**已经不成立了**。
+
+**选项 (a)（从 `bootstrap.yml` 里去掉引用）已经实施**，实施细节：
+
+| 项 | 值 |
+|---|---|
+| 实施在哪棵树 | **门户树** `D:\javawork\1.2\cpscloud1.0\code`（**不是**华盾交付树） |
+| 改的文件 | `platform/backend/modelserver/controller/src/main/resources/bootstrap.yml` |
+| 改的内容 | `shared-configs: []`（不再引用 `share_base.yaml` / `ext_base.yaml`），只留 `napstarmappingconfig.yaml` |
+| mtime | **2026-11-01 14:49:35** |
+| 怎么部署的 | 从**门户树**重新编译 `model-controller` → `target/model-controller-1.0.14.jar`（mtime **2026-11-01 15:15:32**）→ 拷进容器 `/opt/napstar_app/model-controller-3.0.0.jar`（mtime **2026-11-01 15:15**） |
+
+**逐字节证据**：门户树那个产物的 md5 = `c41735d81db324e1a69dc4aa3e47ada2`
+= 容器里部署的那份 jar 的 md5，**完全一致**。
+
+> 🔴 **代价：这次「改 A 树、编 B 树的 jar」把门户树的 `application.yml` 一起带进来了。**
+>
+> | 树 | `application.yml` mtime | `oms:` 块 |
+> |---|---|---|
+> | **门户树** | 2026-10-28 14:40 | **没被注释** —— `redisMode: cluster` + `clusters: [127.0.0.1:6379]` + `password: ""`（**集群占位符**） |
+> | **华盾交付树** | 2025-06-27 | **被注释** —— `# oms:` + `hostname: 10.137.220.191` + `password: sac888` |
+>
+> ⇒ 容器里那个 jar 的 `oms:` 块来自**门户树**，不是华盾交付树。
+> ⇒ 后果 = **D8**：`model-controller` 在 standalone 模式下**起不来**（NOAUTH）。
+>
+> 📌 **教训**：**不要从另一棵树编译交付物。**
+> 改 `bootstrap.yml` 改的是**门户树**的，但编译出来的 jar 带着门户树的
+> `application.yml` —— 而那个文件里的 `oms:` 是**集群占位符**，不是华盾的部署配置。
+> 改配置要改**真正被部署的那棵树**（华盾交付树），否则编出来的东西带着别处的配置。
+>
+> 📌 **现状**：D2 本身（dataId 名对不上）**已经被 (a) 解决了**（在门户树里）。
+> 但那份 jar **没有留在交付树** —— 交付树的 `bootstrap.yml` 仍然是引用那两个
+> 不存在的 dataId 的状态。
+> ⇒ **D2 在华盾交付树里还没修**（选项 (a) 要在交付树上重做一遍），
+>    **但绝不能直接拿门户树编出来的 jar 去部署**（那就是 D8 的成因）。
 
 ---
 
@@ -799,6 +832,54 @@ D7-b 让这个失效**连日志都不留**。只修 D7-a 不修 D7-b，
 > **不修它，回归矩阵就有 2 条恒定 FAIL（`A2 model-controller` / `A2b model-controller`）**，
 > 而那 2 条 FAIL 会**永久掩盖**真正的回归。
 
+### 谁换的、为什么换 —— **实施 D2 选项 (a) 时的副作用**
+
+**根因链（逐字节核实过）**：
+
+```
+D2 决定用选项 (a)：把 bootstrap.yml 里对 share_base.yaml / ext_base.yaml 的引用去掉
+   ↓
+但改的是**门户树**的 bootstrap.yml（D:\javawork\1.2\cpscloud1.0\code\...\bootstrap.yml，mtime 2026-11-01 14:49:35）
+   —— 不是华盾交付树
+   ↓
+从门户树重新编译 model-controller
+   ↓
+编译产物把**门户树的 application.yml 一起打进 jar**了
+   （门户树的 mtime 2026-10-28 14:40，`oms:` 块是**没被注释的集群占位符**：
+     redisMode: cluster / clusters: [127.0.0.1:6379] / password: ""
+    而华盾交付树的 application.yml（mtime 2025-06-27）里 `oms:` 是**被注释**的：
+     # oms: / hostname: 10.137.220.191 / password: sac888）
+   ↓
+那个 jar 在 2026-11-01 15:15 被拷进容器 /opt/napstar_app/model-controller-3.0.0.jar
+   ↓
+容器里的 model-controller 从此只能以集群模式启动（HD_REDIS_CLUSTER=1 用命令行覆盖掉占位符）
+   ↓
+⇒ 回归矩阵的 A 段：model-controller 起不来 → A2 / A2b 恒定 FAIL
+```
+
+**逐字节证据**：
+
+| 东西 | md5 | mtime |
+|---|---|---|
+| 门户树 `target/model-controller-1.0.14.jar` | `c41735d81db324e1a69dc4aa3e47ada2` | 2026-11-01 **15:15:32** |
+| 容器里 `/opt/napstar_app/model-controller-3.0.0.jar` | `c41735d81db324e1a69dc4aa3e47ada2` | 2026-11-01 **15:15** |
+| D2 备份的 jar（= 基线部署的那份） | `064ba5fa05266dcf5b2e14c594abbfed` | 2026-11-01 00:16 |
+
+⇒ **容器里那份 jar 就是门户树编出来的**（md5 完全一致，不是「像」，是**逐字节相同**）。
+
+> 📌 **交叉引用 D2** —— 见上面 D2 的「✅ 实测更新」一节：
+> 那次实施在**门户树**里、编译产物**带着门户树的 `application.yml`**。
+> **D8 是 D2 那次操作的直接后果**，不是两件独立的事。
+>
+> 📌 **两条通用教训**（比这个具体的 jar 更重要）：
+> 1. **不要从另一棵树编译交付物。**
+>    改配置要改**真正被部署的那棵树**。门户树的 `application.yml` 里的
+>    `oms:` 是**集群占位符**（给门户那套集群部署用的），
+>    拿它编 HD 的 jar 等于把占位符当成真配置发出去。
+> 2. **「重新编译一个 jar」不是局部操作。**
+>    它会把**那棵树此刻的每一个配置文件**一起固化进产物。
+>    交付物和它的配置必须**成套**、**同源**。
+
 ### 现象
 
 Task 6 跑回归矩阵（`scripts/verify-hd-napstar.sh`），只起批次 1：
@@ -817,8 +898,8 @@ SUMMARY: PASS=84 FAIL=2 SKIP=3
 
 | jar | md5 | mtime | `BOOT-INF/classes/application.yml` 里的 `oms:` 块 |
 |---|---|---|---|
-| **当前部署的** | `c41735d81db324e1a69dc4aa3e47ada2` | Nov 1 **15:15** | **没被注释** —— `redisMode: cluster` + `clusters: [127.0.0.1:6379]` + `password: ""` |
-| **D2 备份的** | `064ba5fa05266dcf5b2e14c594abbfed` | Nov 1 00:16 | **被注释掉了** —— 只有一行 `# oms:` |
+| **当前部署的**（= 门户树编的） | `c41735d81db324e1a69dc4aa3e47ada2` | Nov 1 **15:15** | **没被注释** —— `redisMode: cluster` + `clusters: [127.0.0.1:6379]` + `password: ""` |
+| **D2 备份的**（= 华盾交付树编的） | `064ba5fa05266dcf5b2e14c594abbfed` | Nov 1 00:16 | **被注释掉了** —— 只有一行 `# oms:` |
 
 两份 jar 的 `oms:` 块差的就是**一个注释符**。后果：
 
@@ -878,16 +959,7 @@ awk '/^oms:/{f=1} f&&/^[a-zA-Z]/&&!/^oms:/{exit} f' mcyml/BOOT-INF/classes/appli
 
 > ⚠️ **对照实验已完全还原**：jar 文件的 md5 已改回 `c41735d81db324e1a69dc4aa3e47ada2`，
 > 宿主侧留有 `mc-current-jar-backup.jar` 副本。
->
-> ⚠️ **但有个 JVM 层面的残留要说清楚**：把 jar 文件换回去**不等于**把
-> 已经跑起来的 JVM 换回去 —— JVM 启动时就把 jar 里的 class 读进内存了，
-> 之后改磁盘上的 jar 对**已在运行的进程**没有任何影响。
-> ⇒ 所以「jar 已还原」之后，`model-controller` 那个进程**仍然是**用
-> `064ba5fa` 那份起的（它的日志里还是 `Using Redis Standalone at node1:6379`）。
-> ⇒ **下次重启 `model-controller` 时，它会重新读当前那份 `c41735d8` 的 jar，
-> 就会又变成「起不来」。** 这不是回归，是 D8 本身。
-> ⇒ **在 D8 修掉之前，任何一轮回归都必须显式确认 model-controller 是怎么起来的**
-> （用哪份 jar、有没有 `HD_REDIS_CLUSTER=1`），否则 A 段的数字不可比。
+> （⚠️ 但**运行中的 JVM** 没换回来 —— 见下面的「一个必须记住的操作残留」。）
 
 ### 影响面
 
@@ -901,13 +973,64 @@ awk '/^oms:/{f=1} f&&/^[a-zA-Z]/&&!/^oms:/{exit} f' mcyml/BOOT-INF/classes/appli
 
 ### 修法（**本轮不做**，Task 7 决定）
 
-1. **正解**：把 jar 里 `oms:` 块的占位符换成**真配置**（或直接注释掉，让它回落读 Nacos），
-   重新打包。这样 `model-controller` 在两种模式下都能起来，验证矩阵的判据也不用改。
+1. **正解**：**从华盾交付树重新编译** `model-controller`（那份树的 `application.yml`
+   里 `oms:` 是注释掉的、`password: sac888`），并把 D2 选项 (a) 的改动
+   （`bootstrap.yml` 里去掉 `shared-configs` 对那两个 dataId 的引用）
+   **做在交付树里** —— 而不是像现在这样「改门户树、编门户树的 jar」。
+   ⇒ **一次改动同时解决 D2（在交付树里没修）和 D8（jar 带着别处的配置）。**
+   ⇒ 编之前**先核对** `target/classes/application.yml` 里的 `oms:` 块跟
+   交付树源文件一致 —— 这是「jar 里的配置跟树对得上」的最小检查。
 2. **临时绕过**：跑回归前把 `/opt/hd/jar-backup-d2/model-controller-3.0.0.jar` 拷回去
    （**注意：这会让 `model-controller` 用旧二进制**，D7 说的「集群补丁没进交付树」依然成立）。
 3. **改判据**：让 A2/A2b 接受「STANDALONE 或 CLUSTER」——
    ⚠️ **不推荐**：A2 的本意是「**走对了配置路径**」（`node1:6379` + `timeout=5000`），
    放宽成「两种都行」就把「意外走了硬编码 `10.137.220.191`」这条真正的失败判据一起放松了。
+
+### ⚠️ 一个**必须记住**的操作残留
+
+把 jar 文件换回去**不等于**把已经跑起来的 JVM 换回去 ——
+JVM 启动时就把 jar 里的 class 读进内存了，之后改磁盘上的 jar
+对**已在运行的进程**没有任何影响。
+
+⇒ Task 6 做对照实验时：`model-controller` 那个进程**仍然是**用
+`064ba5fa` 那份起的（它的日志里还是 `Using Redis Standalone at node1:6379`），
+即使 jar 文件已经换回 `c41735d8`。
+⇒ **下次重启 `model-controller` 时，它会重新读当前那份 `c41735d8` 的 jar，
+就会又变成「起不来」。** 这不是回归，是 D8 本身。
+⇒ **在 D8 修掉之前，任何一轮回归都必须显式确认 model-controller 是怎么起来的**
+（用哪份 jar、有没有 `HD_REDIS_CLUSTER=1`），否则 A 段的数字不可比。
+
+### 📌 备注：门户 Redis 的 DBSIZE 从 4 变成 0（**与本轮无关**，但门禁脚本要知道）
+
+`scripts/compare-hd-portal-baseline.sh` 原来把门户 Redis 的 DBSIZE
+**硬编码成 4**（2026-11-01 会话文档里的基线值）——
+但那个 4 **永远不可能再成立**：
+
+```
+$ redis-check-rdb /opt/software/redis-8.10.0/bin/dump.rdb
+[info] 4 keys read
+[info] 4 expires
+[info] 4 already expired      ← 保存时就已经全部过期
+```
+
+那 4 个 key 全是**带 TTL 的模型元数据缓存**
+（`model:objecttypes:*` / `model:attributetypes:*`），
+而**门户自己的 Nacos 在 2026-11-01 01:10 被宿主机 OOM killer 杀了**
+（这一条在 2026-11-01 会话文档 §六 里已经记着）
+→ 没人再去续期 → 它们自然过期 → 现在恒为 0。
+
+⇒ 硬编码 4 = 让门禁脚本**永远**报一条 DIFF = 让它的结论行
+（「逐项一致」）**永远不可达** = 一个只会说「有问题」的门禁。
+⇒ 现在改成：判据是「**门户 Redis 的 keyspace 读得到**」，
+DBSIZE=0 记为**已解释的 OK**；如果变成**非 0** 就报 NOTE（不判失败）
+—— 那说明门户的 Redis 里又出现了数据，值得人看一眼。
+
+**这个 4→0 与集群工作完全无关**，三条独立证据：
+1. 门户 Redis 是**另一个实例**（run_id `be04312b…` vs HD 的 `23ec3542…`），
+   在**另一个容器**、**另一个 Docker 网络**里（HD 容器连 `cpsweb` 都解析不了）。
+2. 本轮所有脚本里**没有** `FLUSHALL` / `FLUSHDB`。
+3. 门户 Redis 的 `maxmemory-policy` 是 `noeviction`、`maxmemory` 是 0
+   → **不可能**是内存淘汰把 key 干掉的。
 
 ---
 
@@ -916,11 +1039,11 @@ awk '/^oms:/{f=1} f&&/^[a-zA-Z]/&&!/^oms:/{exit} f' mcyml/BOOT-INF/classes/appli
 | # | 严重度 | 谁引入 | 状态 |
 |---|---|---|---|
 | D1 | 🔴 | **上一轮 PG 迁移** | **🚫 不修**（用户决定：`hisDataProducer` / `hisDataSend` 不做修改）→ 这两个应用在本环境预期起不来，属已知且已接受 |
-| D2 | 🟡 | 安装包 | ⚠️ **实测更正**：手写补齐的做法是错的（覆盖了真配置）。真缺口只是「dataId 名对不上」，不阻断启动 → 处理方式待定 |
+| D2 | 🟡 | 安装包 | ⚠️ **实测更正**：手写补齐的做法是错的（覆盖了真配置）。真缺口只是「dataId 名对不上」，不阻断启动。✅ **选项 (a) 已实施 —— 但做在了门户树里**（`bootstrap.yml` 的 `shared-configs: []`，mtime 2026-11-01 14:49:35），并从门户树重编了 jar ⇒ **副作用就是 D8**。**交付树里还没修**，且**不能直接沿用门户树编出来的 jar** |
 | D3 | 🟡 | 安装包 | 本轮部署时补（`pg_hba.conf` + reload） |
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
 | D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行** |
 | D7-a | 🔴 | **集群补丁从未进入 napstar2.0 交付树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code`；补丁只在 portal/SVN 树 `D:\javawork\1.2\cpscloud1.0\code` 和共享的 `realserver-oms` / `model-service` 二进制里） | **待修**：把集群分支**移植进交付树的 5 个调用点**（照树 B 的 `if (redisClusterHelper.isCluster()) {…} else {executePipelined(…)}` 写法；`RedisClusterHelper` / `RedisClusterHashPipeline` 从交付树**现有**的 `realserver-oms` 依赖就能拿到 —— 那份二进制**本身已带集群分支**，**不需要新增模块**），**然后**重新编译并重新部署；并加 CI 门禁（查 jar + 查**限定范围后**的 5 个调用点） |
 | D7-b | 🔴 | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | **待修**：把树 B 的 `.join()` + `writeWithRetry` + 去 `@Async` 移植进交付树；异常要显式记日志。**光重新编译修不掉**，且**必须跟 D7-a 一起修** |
-| D8 | 🟡 | **交付包差异**（`model-controller` 的 jar 被换成过一份：`oms:` 块从「注释掉」变成「cluster + `127.0.0.1:6379` + 空密码」的占位符） | **待定**：不修它，验证矩阵的 A 段**恒定**有 2~4 条 FAIL（`A2`/`A2b` model-controller），会掩盖真正的回归。**Task 6 实测：换回基线那份 jar + 让 4 个应用都在跑 → base 矩阵精确回到 47 PASS / 0 FAIL / 3 SKIP** ⇒ 矩阵本身没退化 |
+| D8 | 🟡 | **实施 D2 选项 (a) 时的副作用**（在**门户树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**门户树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与门户树产物**逐字节相同**） | **待修**：**从华盾交付树重编**并把 D2 (a) 的改动做在交付树里 —— 一次同时解决 D2 和 D8。**Task 6 实测：换回基线那份 jar + 4 个应用都在跑 → base 矩阵精确回到 47 PASS / 0 FAIL / 3 SKIP** ⇒ 矩阵本身没退化。⚠️ **jar 文件换回不等于运行中的 JVM 换回**，下次重启会再变 |
