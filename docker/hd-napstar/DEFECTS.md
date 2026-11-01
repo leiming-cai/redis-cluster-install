@@ -8,7 +8,8 @@
 > | D1 / D2 / D3 / D4 | 2026-11-01 部署轮 | `docs/superpowers/sessions/2026-11-01-hd-napstar-docker-deploy.md` |
 > | **D2 走 (a)** | 2026-11-02 集群测试轮 | `docs/superpowers/sessions/2026-11-02-hd-redis-cluster-test.md` §3.5 |
 > | **D6**（含**实测优先级**） | 2026-11-01/02 集群测试轮 | 同上 §3.1 |
-> | **D7-a / D7-b** | 2026-11-02 集群测试轮 | 同上 §4.1 / §4.2 / §4.3 |
+> | **D7-a**（含**依赖解析机制** + **修复点在 `monitor`**） | 2026-11-02 集群测试轮 | 同上 §3.6 / §3.7 / §4.1·一 / §4.1·二 / §4.1·三 |
+> | **D7-b** | 2026-11-02 集群测试轮 | 同上 §4.2 / §4.3 |
 > | **D8** | 2026-11-02 集群测试轮 | 同上 §4.4 |
 
 ---
@@ -352,15 +353,21 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 
 ---
 
-## 🔴 D7（集群模式接入实测）集群补丁从未进入 napstar2.0 交付树 —— 集群模式下功能静默失效
+## 🔴 D7（集群模式接入实测）集群补丁只落在 platform 侧 —— 集群模式下功能静默失效
 
 > **2026-11-01 实测**（`scripts/hd-cluster-app-test.sh`，三个应用各一条判据）。
 > 本条记录两个**互相独立**的缺陷：
-> **D7-a** 是交付树里根本没有集群分支，
+> **D7-a** 是 application 侧的调用点根本没有集群分支，
 > **D7-b** 是交付树里写路径的异常处理会把失败吞掉。
 > 两条**都在交付树（树 A）里**，也都**不是**「重新编译一下」能解决的 ——
 > D7-a 要**移植补丁**，D7-b 要**移植 `.join()`**。
 > 而且它们是**叠加**的：只修 D7-a，失败照样静默。
+>
+> 📌 **2026-11-02 补充**：D7-a 的**根因描述改写过**（见下面「根因」一节）——
+> 现在说清了「补丁在 platform 侧、缺的是 application 侧的调用点」，
+> 并且查清了两件事：
+> ① 树 A 的 platform 依赖**全部解析到基线树编的 1.0.14**（同一个 jar 里混两版 platform）；
+> ② **修复点在 `monitor` 模块，不在 `web-controller`**（后者自己零 Redis）。
 
 ### ⚠️ 先说清楚：机器上有**两棵** napstar2.0 源码树
 
@@ -377,11 +384,18 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 | **是不是交付出去的那个** | **是**（见下面的 md5） | 否 |
 
 > 📌 **本次部署用的 jar 就是树 A 编译出来的**，
-> 而**集群补丁只在树 B 里**（详见 D7-a）。
+> 而**集群补丁只在树 B 的源码里、以及基线树编的共享二进制里**
+> （详见 D7-a）。
 > 所以本文里凡是提到「交付树」「portal/SVN 树」，都指上表这两棵，
 > 不再用含糊的「源码树」。
 
-### D7-a — 集群补丁从未进入 napstar2.0 交付树
+### D7-a — 集群补丁只落在 platform 侧，application 侧的调用点从来没跟上
+
+> 📌 **标题在 2026-11-02 改过。**
+> 原来叫「集群补丁从未进入 napstar2.0 交付树」——
+> **不够准确**：它让人以为「把补丁搬进交付树」就完事了。
+> 实际机制见下面的「根因」：**platform 侧**的补丁**一直在**（基线树编的
+> `realserver-oms-1.0.14.jar` 里），**缺的是 application 侧**的调用点。
 
 #### 现象
 
@@ -394,12 +408,65 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 
 而 `model-controller` 一切正常（它用的 `model-service-1.0.14.jar` **是**带集群分支的）。
 
-#### 根因
+#### 根因 —— **不是「补丁没进交付树」这么笼统，是「补丁只落在 platform 侧」**
 
-**集群补丁从来没有被应用到 napstar2.0 交付树（树 A）。**
-它只存在于 portal/SVN 树（树 B）以及**共享的** `realserver-oms-1.0.14.jar` /
-`model-service-1.0.14.jar` 这两个二进制里 —— 后者正是 model-controller
-（modelserver，用共享的 `realserver-oms`）能在集群模式下正常工作的原因。
+> 📌 **这一节在 2026-11-02 被改写过。**
+> 原来写的是「集群补丁从来没有被应用到 napstar2.0 交付树（树 A）」——
+> **这句话不够准确**，而且它掩盖了一个更根本的事实。
+> 下面是重测后的版本。
+
+**集群补丁只落在 platform 侧（基线树编的共享二进制里），
+application 侧（树 A 自己编的模块）的调用点从来没有跟上。**
+
+**为什么树 A 的 platform 依赖会拿到基线树编的 1.0.14**：
+
+树 A 的 `platform/backend` 版本是 **3.0.0**，但它的模块依赖**不写 `<version>`**：
+
+```xml
+<!-- 树 A: platform/backend/modelserver/controller/pom.xml -->
+<dependency>
+    <groupId>com.sac.platform</groupId>
+    <artifactId>model-service</artifactId>     <!-- 没有 <version> -->
+</dependency>
+<!-- 同样没有 <version> 的还有：util / taskmanage / dashboard /
+     menuservice / realserver-oms / authentication / idgenerator / springconfig -->
+```
+
+版本由父 pom 的 `<platform.version>` 给（树 A `platform/backend/pom.xml:38`）：
+
+```xml
+<platform.version>[1.0.0,2.0.0)</platform.version>
+```
+
+⇒ 解析到**本地 Maven 仓库里基线树编的 1.0.14**。
+
+**实测证据**（容器里交付的 jar 的 `BOOT-INF/lib/`）：
+
+| jar | `model-controller-3.0.0.jar`（modelserver） | `web-controller-3.0.0.jar`（napstarweb） |
+|---|---|---|
+| `realserver-oms` | **`1.0.14`** ← 基线编的，**带** `RedisClusterHelper` / `RedisClusterHashPipeline` ✅ | **`1.0.14`** ← 同上 ✅ |
+| `model-service` | **`1.0.14`** ← 基线编的，`isCluster` 痕迹 ✅ | **`3.0.0`** ← 树 A 自己编的 |
+| `util` / `taskmanage` / `dashboard` / `menuservice` / `authentication` / `idgenerator` / `springconfig` / `systemmonitor` | **全部 `1.0.14`** | `menuservice` / `util` 是 `1.0.14` |
+| **树 A 自己编的** | — | **`monitor-3.0.0.jar`**（467531 字节） |
+
+⇒ **同一个交付 jar 里混了两个版本的 platform**：
+**1.0.14 的基线二进制 + 3.0.0 的自编模块**。
+
+**这就是「model-controller 能跑集群、web-controller 不能」的确切原因**：
+
+| 应用 | 它的写路径在哪 | 那份二进制带集群分支吗 |
+|---|---|---|
+| `model-controller` | platform 侧的 `model-service-1.0.14.jar` | ✅ **带**（`isCluster` 常量池 4 条 / `isCluster:()Z` 调用点 1 个） |
+| `web-controller` | **树 A 自己编的** `monitor-3.0.0.jar` | ❌ **不带**（`isCluster` **0** 个 class、`executePipelined` **4** 个 class） |
+
+**实测**（把交付 jar 里的 `monitor-3.0.0.jar` 抽出来数）：
+
+```
+monitor-3.0.0.jar 内 class 总数                : 267
+含 'isCluster' 的 class 文件数                : 0      ← 补丁一点没进
+含 'RedisClusterHelper' 的 class 文件数       : 0
+含 'executePipelined' 的 class 文件数         : 4      ← 裸调用都在这 4 个里
+```
 
 **所以这不是「jar 过期 / 忘了重建」**：
 树 A 自己编译出来的 `monitor-3.0.0.jar` 与容器里部署的那份 **md5 完全相同**：
@@ -411,7 +478,26 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 
 ⇒ **从树 A 重新编译，产出的还是同一个 jar，什么都不会变。**
 
-##### 补丁足迹对比（整棵树里按标记数文件数）
+##### 🟡 新增待交付方确认项：**同一个 jar 里混 1.0.14 和 3.0.0 两版 platform，是有意的吗？**
+
+这是上面那条根因的**副产品**，但它**不是 bug 的修法，是流程问题**：
+
+- 树 A 的 `platform/backend` 是 **3.0.0**，但它**编出来的 jar 里装的 platform 依赖是 1.0.14**。
+- 也就是说：**树 A 的 platform 源码（3.0.0）根本没有被打包进去** ——
+  它只是**用**了仓库里别人编的 1.0.14。
+- 后果：树 A 里 `platform/backend/**` 的任何改动（包括集群补丁）
+  **都不会进入交付产物**，除非有人先把它 `mvn install` 进共享仓库。
+- ⚠️ 而本轮**绝不 `mvn install`**（共享 `mvnRepo`，一次 install 会静默改写
+  华盾树拿到的产物 —— 见 2026-11-01 存档 §四·4）。
+
+⇒ **要交付方确认**：交付流程是不是**先编 platform 再 install、然后编 application**？
+如果是，那「树 A 的 platform 源码没进包」就是**流程漏了一步**，不是配置问题。
+⇒ **这条必须先问清楚**，否则 D7-a 修完（改了 application 侧的调用点），
+platform 侧仍然会从 1.0.14 拿 —— **那部分补丁到底在不在，取决于仓库里那个
+1.0.14 是不是最新的基线产物**（实测它**是**带集群分支的，所以 D7-a 的修法成立；
+但这个「是」是**运气**，不是**保证**）。
+
+##### 📌 补丁足迹对比（整棵树里按标记数文件数）
 
 ```bash
 # 两个树各挂一个只读卷，用同一套命令量
@@ -694,6 +780,86 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 
    （`application/backend-gd/` 是同一批代码的**副本目录**，一并改或直接不管 ——
    它不参与本次发版，但留着不改以后会再咬人。）
+
+   **⚠️ 修复点在 `monitor` 模块，不在 `web-controller`** ——
+   **这一条 2026-11-02 才查清楚**，之前一直写「web-controller 的集群分支」，
+   容易让人去改错模块。
+
+   **实测**（树 A 的 `application/backend/napstarweb/web-controller`）：
+
+   | 项 | 值 |
+   |---|---|
+   | `src` 下的 `.java` 文件数 | **9** |
+   | 其中有 Redis 用法的文件 | **0**（`RedisTemplate` / `Jedis` / `opsForHash` / `opsForValue` / `RedisConnectionFactory` / `StringRedisTemplate` 全部 0 命中） |
+   | 自己的 `pom.xml` 里的 Redis 依赖 | **没有**（只有 `monitor` / `system` / `model-interface` 等业务模块依赖） |
+
+   那 9 个文件全是**配置类 + 控制器 + 启动类**：
+
+   ```
+   config/CmtDataSourceConfig.java   config/HisDataSourceConfig.java
+   config/InfoDataSourceConfig.java  config/SacDataSourceConfig.java
+   config/SelfDataSourceConfig.java  entity/NapUser.java
+   NapstarWebRestApplication.java    web/controller/BaseMenuController.java
+   web/controller/LoginController.java
+   ```
+
+   **但它部署出来的 jar 里有完整的 Redis 栈，而且运行时确实连 Redis** ——
+   因为 Redis 代码**全在它依赖的 `monitor` 模块里**：
+
+   ```
+   web-controller-3.0.0.jar 的 BOOT-INF/lib/:
+     realserver-oms-1.0.14.jar      ← 基线编的，带集群类 ✅
+     jedis-3.6.1.jar
+     spring-data-redis-2.7.18.jar
+     monitor-3.0.0.jar              ← 树 A 自己编的，isCluster = 0 ❌
+   ```
+
+   **运行日志**：`*** Using Redis Standalone at node1:6379` /
+   `Redis mode detected: STANDALONE` —— 连是连上了，**写不进去**。
+
+   ⇒ **`monitor` 模块里用 Redis 的文件共 10 个**：
+
+   ```
+   monitor/.../kafka/RTListener.java
+   monitor/.../services/CalculateService.java
+   monitor/.../services/SVGCheckService.java
+   monitor/.../services/SVGParseService.java
+   monitor/.../services/impl/ColorConfigServiceImp.java
+   monitor/.../services/impl/GraphDataServiceImpl.java
+   monitor/.../services/impl/JKServiceImpl.java
+   monitor/.../services/impl/SVGCacheServiceImpl.java
+   monitor/.../task/CalculateTask.java
+   monitor/.../websocket/service/impl/WebSocketServiceImpl.java
+   ```
+
+   其中**用 `executePipelined` 的正好 4 个** —— 就是上面要改的那 4 个
+   `monitor` 文件。另外 6 个用的是单 key 操作（`opsForHash().get()` /
+   `opsForValue().get()`），**集群模式下按槽路由，没问题，不用改**。
+
+   ⇒ **结论**：
+
+   | | 要不要改 |
+   |---|---|
+   | `monitor` 的 **4** 个 `executePipelined` 文件 | ✅ **要改** |
+   | `rtdata-module` 的 **1** 个 `executePipelined` 文件 | ✅ **要改** |
+   | `monitor` 里另外 6 个用 Redis 的文件 | ❌ **不用改**（单 key 操作，集群安全） |
+   | **`web-controller` 自己**（9 个文件） | ❌ **不用改**（**零 Redis**） |
+
+   > 📌 **`oms.*` 的优先级问题对 `web-controller` 同样成立** ——
+   > 它走的是**同一份**共享的 `realserver-oms-1.0.14.jar`，
+   > 而 `RedisPropertiesConfig`（读 `oms.*` 的那个类）在**那份二进制**里。
+   > ⇒ 所以「Nacos 的 `oms:` 赢不了 jar」这条对它也一样 ——
+   > **但它不是「web-controller 自己的问题」，是「共享二进制 +  jar 内 `application.yml`」的问题。**
+
+   > 📌 **顺带澄清一个容易数错的点**：`napstarweb/system` 模块里
+   > `system/services/impl/ServerStatusServicesImpl.java` 也用 Redis
+   > （`redisTemplate.opsForHash().get(...)`，**单 key**）。
+   > 它**不在** `monitor` 里，是 `monitor` 的**兄弟模块**
+   > （`web-controller` 的 pom 第 94 行依赖它）。
+   > 它**两棵树都没有 `isCluster`**（树 B 也没有），
+   > 而且它**只用单 key 的 `HGET`** → **集群安全，不是盲点，不用改**。
+   > （它的 pom 里也**没有** `realserver-oms` 依赖 —— 它靠 Spring 的
+   > `RedisTemplate` 按槽路由，不需要集群辅助类。）
 
 2. **再重新编译并重新部署** `monitor`（napstarweb）和
    `rtdata-module`（realserver）两个模块。
@@ -1026,17 +1192,45 @@ JVM 启动时就把 jar 里的 class 读进内存了，之后改磁盘上的 jar
 ⇒ **在 D8 修掉之前，任何一轮回归都必须显式确认 model-controller 是怎么起来的**
 （用哪份 jar、有没有 `HD_REDIS_CLUSTER=1`），否则 A 段的数字不可比。
 
-#### 📌 2026-11-02 复核：这条残留**已经变成活的**
+#### 📌 2026-11-02 复核：残留**仍然是潜伏的**（跟上面那段一致）
 
-```
-磁盘上的 jar : c41735d81db324e1a69dc4aa3e47ada2   （= 门户树编的那份）
-备份那份     : 064ba5fa05266dcf5b2e14c594abbfed   （在 /opt/hd/jar-backup-d2/）
-运行中的 JVM : 2026-11-02 03:34:36 启动
-```
+> ⚠️ **先说清楚**：这个复核**推翻了**一版更激进的说法。
+> 那一版写的是「残留已经变成活的」「下次重启会再起不来 —— 这不是假设，是可复现的」。
+> **那是错的** —— 下面是自己重测的证据。
 
-⇒ 那个 JVM **是重启过的**（不是 Task 6 那个用旧 jar 起的进程了），
-所以它启动时读到的就是磁盘上那份 `c41735d8`。
-⇒ **下一次再重启，它会再起不来** —— 这条现在**不是假设，是可复现的**。
+**自己重测的时间线**（2026-11-02，`hd-node1` 容器内）：
+
+| 证据 | 值 |
+|---|---|
+| 运行中的 JVM（pid 402367）启动 | **2026-11-02 03:34:36**（`ps -o lstart`） |
+| 日志第一条 | `[11-02 03:34:43,288]` |
+| 日志里的 Redis 那行 | `[11-02 03:34:57,192] *** Using Redis Standalone at node1:6379` |
+| `grep -c 'Using Redis Cluster'` | **0** |
+| 磁盘 jar 的 mtime | **2026-11-02 03:36:09** —— **比 JVM 启动晚 93 秒** |
+| inode：磁盘 vs `/proc/402367/fd/4` | **267624 == 267624** → 文件是**原地覆盖**，不是替换 |
+| `/proc/402367/cmdline` 里的 `--oms.*` | **0 个** |
+| 磁盘 jar 现在的 md5 | `c41735d8…`（= 门户树编的那份，`oms:` 未注释、`redisMode: cluster`） |
+| 备份那份的 md5 | `064ba5fa…`（`oms:` **被注释**，只有一行 `# oms:`） |
+
+**推论**：
+
+- 磁盘上那份 `c41735d8` 的 `oms:` 是 `redisMode: cluster` → 启动**必然**打
+  `Using Redis Cluster`。
+- 而日志打的是 `Using Redis Standalone at node1:6379`，
+  `Using Redis Cluster` 出现 **0 次**
+  → **JVM 读的是旧内容**（`064ba5fa` 那份，`oms:` 被注释 → 回落到 Nacos 的
+  `hostname: node1` → standalone）。
+- 覆盖发生在 **03:36:09**，比 JVM 启动（03:34:36）**晚 93 秒** ——
+  **JVM 起来时读到的还是旧内容**，之后文件被原地覆盖（同一 inode）它也不受影响。
+
+⇒ **结论（「下次重启会失败」）仍然成立** —— 磁盘上的确是 `c41735d8`。
+⇒ **但残留仍然是潜伏的**，跟上文那段说的一致。
+⇒ ⚠️ **这一版的错误是「假红」的镜像**（见会话存档 §7.2：
+「假绿比假红更危险」的另一面）——
+  声称「已经可复现」会让读者以为**现在**就该看到 NOAUTH，
+  而实际上**现在跑得好好的**。
+  **「结论对、推理错」比「结论错」更难发现** —— 所以它必须逐条拿证据核。
+
 ⇒ **每一轮回归的记录里都要写清 model-controller 是怎么起来的**
 （用哪份 jar、有没有 `HD_REDIS_CLUSTER=1`），否则 A 段的数字不可比。
 
@@ -1130,6 +1324,6 @@ matrix exit=0                                   ← 绿！真实的失败被丢�
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
 | D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行**。📌 **实测优先级**（2026-11-01/02）：**命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId** ⇒ Nacos 里的 `oms:` **压不过 jar** → `docs/OPERATIONS.md` §4.5 那条「三个 dataId 各填一份」**在当前配置下不生效**，已修正 |
-| D7-a | 🔴 | **集群补丁从未进入 napstar2.0 交付树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code`；补丁只在 portal/SVN 树 `D:\javawork\1.2\cpscloud1.0\code` 和共享的 `realserver-oms` / `model-service` 二进制里） | **待修**：把集群分支**移植进交付树的 5 个调用点**（照树 B 的 `if (redisClusterHelper.isCluster()) {…} else {executePipelined(…)}` 写法；`RedisClusterHelper` / `RedisClusterHashPipeline` 从交付树**现有**的 `realserver-oms` 依赖就能拿到 —— 那份二进制**本身已带集群分支**，**不需要新增模块**），**然后**重新编译并重新部署；并加 CI 门禁（查 jar + 查**限定范围后**的 5 个调用点） |
+| D7-a | 🔴 | **集群补丁只落在 platform 侧，application 侧的调用点从来没跟上**（树 A `D:\work\info\web\extendsystem\华盾-napstar2.0\code`）。**platform 依赖不带 `<version>` → 由 `platform.version [1.0.0,2.0.0)` 解析到基线树编的 `1.0.14`**（那份二进制**带**集群类 ✅）；**树 A 自己编的 `monitor-3.0.0.jar` / `rtdata-module-3.0.0.jar` 不带**（`isCluster` = 0，`executePipelined` = 4 ❌）⇒ **同一个 jar 里混 1.0.14 和 3.0.0 两版 platform**） | **待修**：把集群分支**移植进交付树 application 侧的 5 个调用点**（`napstarweb/monitor` ×4 + `rtdata-module` ×1；照树 B 的 `if (redisClusterHelper.isCluster()) {…} else {executePipelined(…)}` 写法；`RedisClusterHelper` / `RedisClusterHashPipeline` 从**现有**的 `realserver-oms` 依赖就能拿到 —— 那份二进制**本身已带集群分支**，**不需要新增模块**），**然后**重新编译并重新部署；并加 CI 门禁（查 jar + 查**限定范围后**的 5 个调用点）。📌 **修复点在 `monitor` 模块，不在 `web-controller`**（后者 9 个文件、零 Redis）。⚠️ **待交付方确认**：同一个 jar 里混两版 platform，是有意的吗？ |
 | D7-b | 🔴 | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | **待修**：把树 B 的 `.join()` + `writeWithRetry` + 去 `@Async` 移植进交付树；异常要显式记日志。**光重新编译修不掉**，且**必须跟 D7-a 一起修** |
-| D8 | 🟡 | **实施 D2 选项 (a) 时的副作用**（在**门户树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**门户树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与门户树产物**逐字节相同**） | **待修**：**从华盾交付树重编**并把 D2 (a) 的改动做在交付树里 —— 一次同时解决 D2 和 D8。**Task 6 实测：换回基线那份 jar + 4 个应用都在跑 → base 矩阵精确回到 47 PASS / 0 FAIL / 3 SKIP** ⇒ 矩阵本身没退化。⚠️ **jar 文件换回不等于运行中的 JVM 换回**，下次重启会再变 |
+| D8 | 🟡 | **实施 D2 选项 (a) 时的副作用**（在**门户树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**门户树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与门户树产物**逐字节相同**） | **待修**：**从华盾交付树重编**并把 D2 (a) 的改动做在交付树里 —— 一次同时解决 D2 和 D8。**Task 6 实测：换回基线那份 jar + 4 个应用都在跑 → base 矩阵精确回到 47 PASS / 0 FAIL / 3 SKIP** ⇒ 矩阵本身没退化。⚠️ **jar 文件换回不等于运行中的 JVM 换回**（2026-11-02 实测：运行中的 JVM 启动于 03:34:36，磁盘上的文件在 03:36:09 被**原地覆盖**（同一 inode），**晚 93 秒** —— 所以 JVM 跑的还是**旧内容**，残留**仍潜伏**），下次重启会再变 |

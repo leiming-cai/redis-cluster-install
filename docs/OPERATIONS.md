@@ -888,6 +888,10 @@ oms:
 > ⚠️ **先读这一段再动手。** 三个应用**从 Nacos 拉的东西不一样** ——
 > 「把 `oms:` 统一放 `ext_base.yaml`」**只对 modelserver 成立**，
 > 另两个应用会**读不到**，直接落到本地 `application.yml` 的占位符上。
+>
+> 🔴 **但 2026-11-02 实测之后，这整段对 `oms:` 来说已经作废了** ——
+> `ext_base.yaml` **在安装包里不存在**，而且 Nacos 的 `oms:` **对三个应用一律不生效**
+> （jar 内的 `application.yml` 赢）。**下面那条 ⛔ 实测更正才是现在该读的。**
 
 各应用的 `bootstrap.yml` 决定了它读哪些 dataId：
 
@@ -897,13 +901,39 @@ oms:
 | **realserver** | `MODELSERVER_GROUP` | **无** | ❌ **不能** |
 | **napstarweb** | `NAPSTARWEB_GROUP` | 只有 `kafkabus.yaml`（同 group） | ❌ **不能** |
 
+> ⚠️ **上面这张表是 D2 走 (a) 之前的状态** ——
+> `share_base.yaml` / `ext_base.yaml` **在安装包里不存在**，
+> 而 D2 (a) 之后 `bootstrap.yml` 也**不再引用**它们
+> （只剩 `napstarmappingconfig.yaml`）。**别照这张表去建 dataId。**
+
 Nacos 地址都是 `node1:18848`。
 
-**所以 `oms:` 该放哪：**
+> ⛔ **实测更正（2026-11-02）：上面那张表和下面那张表，对 `oms:` 而言**整体作废**。
+>
+> 1. **`ext_base.yaml` 在安装包里根本不存在。**
+>    实测 `nacos_config_export_postgresql-napstar2.0/DEFAULT_GROUP/` 里
+>    **只有 3 个文件**：`hisdataproducer-ext.yaml` / `jk.yaml` / `napstarmappingconfig.yaml`。
+>    DM 那份导出包也一样 → **不是导出遗漏**。
+>    ⇒ 之前那句「`ext_base.yaml` 现在的内容」是**照着一个不存在的文件写的**。
+> 2. **D2 走 (a) 之后，`bootstrap.yml` 也不再引用它了**
+>    （`shared-configs: []`，只留 `napstarmappingconfig.yaml` —— 那份**确实存在**）。
+>    ⇒ **`ext_base.yaml` / `share_base.yaml` 现在都不需要。**
+> 3. **而且就算它们存在、也被引用了，Nacos 的 `oms:` 也赢不了 jar**
+>    —— 优先级是 **命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId**
+>    （**实测**，见 §4.5 的「实测更正」）。
+>    ⇒ **对这三个应用，Nacos 侧的 `oms:` 一律不生效。**
+>
+> ⇒ 所以 **`oms:` 的放置位置由 §4.5 的优先级表决定，不由本节决定**：
+> **要么走命令行覆盖（§4.4.5），要么改 jar 内的 `application.yml`。**
+> 本节剩下的内容只对 **Kafka** 侧还有参考价值（`share_base.yaml` 那部分
+> 同样受 D2 (a) 影响 —— 但 Kafka 的键**没有**「jar 赢过 Nacos」这个问题，
+> 所以那部分仍然成立）。
+
+**（作废的旧说法，留个记录）当时是这样写的：**
 
 | 应用 | `oms:` 放在哪 |
 |---|---|
-| modelserver | `DEFAULT_GROUP/ext_base.yaml`（共享，一处） |
+| modelserver | `DEFAULT_GROUP/ext_base.yaml`（共享，一处） ← **❌ 该文件不存在** |
 | realserver | **它自己 group 的 `icms-real-controller.yaml`** |
 | napstarweb | **它自己 group 的 `napstarweb-controller.yaml`** |
 
@@ -912,20 +942,8 @@ Nacos 地址都是 `node1:18848`。
 > 如果只改了 `ext_base.yaml`，这两个应用会静默地用**本地 `application.yml` 里的
 > 占位符** `127.0.0.1:6379` + 空密码 → 启动看着正常，**第一次读写才炸**（§4.6）。
 
-**`ext_base.yaml` 现在的内容**（实测解压 Nacos 导出包确认）：
-
-```yaml
-oms:
-  database: 0
-  hostname: node1
-  port: 6379
-  password: <集群密码>
-  timeout: 5000
-```
-
-> ⚠️ **这段现在是 standalone 形态** —— 没有 `redisMode`，也就没有 `clusters`。
-> 按 `parseMode` 的规则，缺失即 `standalone` → **生产上程序今天连的是单机 Redis，
-> 不是集群**。切集群必须在这里补 `redisMode: cluster` + `clusters:`。
+> ⚠️ **这一条现在多了一层**（见上面第 3 点）：不只是「另两个应用读不到」，
+> 是**三个应用都读不到生效** —— Nacos 的 `oms:` 一律输给 jar 里的那份。
 
 **Kafka 的真值**在 `DEFAULT_GROUP/share_base.yaml`：
 
@@ -973,9 +991,14 @@ spring:
 > ⚠️ **group 名有一处对不上，本手册不替你猜**：
 > 源码和部署 jar 的 `bootstrap.yml` 写的是 `MODELSERVER_GROUP` / `NAPSTARWEB_GROUP`，
 > 而**导出包**里这些 dataId 放在 `PORTAL_GROUP`。
-> **`DEFAULT_GROUP` 下的 `ext_base.yaml` / `share_base.yaml` 两边是一致的**，
-> 那两个是确定的；**各应用自己那份 dataId 在哪个 group，
+> **各应用自己那份 dataId 在哪个 group，
 > 请到 Nacos 控制台上按 dataId 查一眼再改**。
+>
+> 🔴 **实测更正（2026-11-02）**：`DEFAULT_GROUP` 下的 `ext_base.yaml` /
+> `share_base.yaml` **在安装包里根本不存在**（那个目录只有
+> `hisdataproducer-ext.yaml` / `jk.yaml` / `napstarmappingconfig.yaml`），
+> 而且 D2 走 (a) 之后 `bootstrap.yml` 也不再引用它们
+> → **「两边是一致的，那两个是确定的」这句话作废。**
 
 > ✅ **实测更正（2026-11-02）：Nacos 与 jar 内 `application.yml` 的优先级已经测出来了。**
 >
@@ -1157,6 +1180,11 @@ commitdata:
 > ⚠️ **这里的地址是 E2E 集群的临时地址，不能带进生产。**
 > 生产配置来自 Nacos（`share_base` 提供 `spring.kafka.*`，
 > `ext_base` 提供 `oms.*`），不是这个文件。
+>
+> 🔴 **但 `ext_base` 那句在 2026-11-02 之后也不成立了** ——
+> `ext_base.yaml` **在安装包里不存在**，而且 Nacos 的 `oms:*` **输给 jar 内的
+> `application.yml`**（§4.5 的实测更正）。
+> ⇒ **`oms.*` 的生产真值要么走命令行覆盖，要么改 jar 里的 `application.yml`。**
 
 #### 4.4.5 命令行覆盖写法
 
@@ -1771,8 +1799,8 @@ VERBOSE=1 bash tests/validate_java_pipelines.sh <app-backend> [platform-backend]
 | 启动报 `No qualifying bean of type 'RedisConnectionFactory'` | `redisMode` 值不合法（或老版本大小写敏感） | 改成 `standalone`/`cluster`/`sentinel` 之一 |
 | 启动报 `oms.clusters must be configured...` | `redisMode=cluster` 但 `clusters` 空 | 填 `clusters` |
 | 启动正常但**第一次读写**报 `No reachable node` | `oms.clusters` 指向了空地址 | 见 §4.6 |
-| 只有 modelserver 变了，realserver / napstarweb 没变 | 只改了 `DEFAULT_GROUP/ext_base.yaml`，而那两个应用**根本不读它**（§4.3） | `oms:` 要在**三个应用各自的** Nacos dataId 里都填一遍 |
-| 日志里没有 `*** Using Redis Cluster with nodes:` | 配置没生效 / `redisMode` 不是 cluster | 按 §4.5 核对，Nacos 与本地 yaml 都要查 |
+| 只有 modelserver 变了，realserver / napstarweb 没变 | 只改了 `DEFAULT_GROUP/ext_base.yaml`，而那两个应用**根本不读它**（§4.3） | `oms:` 要在**三个应用各自的** Nacos dataId 里都填一遍 —— ⚠️ **但这也不够**：Nacos 的 `oms:` **对三个应用一律输给 jar**（§4.5 的实测更正）→ 真正生效的是**命令行**或**改 jar** |
+| 日志里没有 `*** Using Redis Cluster with nodes:` | 配置没生效 / `redisMode` 不是 cluster | 按 §4.5 核对 —— **但注意 Nacos 那一侧改了没用**，看命令行参数和 jar 内的 `application.yml` |
 | 启动多花 12 秒 | Nacos 连不上，在 grpc 超时 | 关掉 Nacos 开关（只在离线调试时） |
 | 构建报 `Can't read .../jre/lib/rt.jar` | 用错了 JDK | `JAVA_HOME` 指到 JDK 8 |
 | 构建报莫名其妙的语法错误 | VSCode ECJ 污染了 `target/classes` | **等 8 秒**再重新构建 |
