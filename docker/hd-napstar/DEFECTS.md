@@ -2,6 +2,14 @@
 
 > 2026-11-01 在 Docker 环境里实跑出来的。**这些不是本轮引入的**，
 > 但其中几个是**上一轮 PG 迁移引入的**（配置改了，依赖/数据没跟上）。
+>
+> | 缺陷 | 什么时候发现的 | 相关存档 |
+> |---|---|---|
+> | D1 / D2 / D3 / D4 | 2026-11-01 部署轮 | `docs/superpowers/sessions/2026-11-01-hd-napstar-docker-deploy.md` |
+> | **D2 走 (a)** | 2026-11-02 集群测试轮 | `docs/superpowers/sessions/2026-11-02-hd-redis-cluster-test.md` §3.5 |
+> | **D6**（含**实测优先级**） | 2026-11-01/02 集群测试轮 | 同上 §3.1 |
+> | **D7-a / D7-b** | 2026-11-02 集群测试轮 | 同上 §4.1 / §4.2 / §4.3 |
+> | **D8** | 2026-11-02 集群测试轮 | 同上 §4.4 |
 
 ---
 
@@ -299,14 +307,32 @@ entrypoint 的提交记录。`node2` 必须指向 hd-node2 容器的**真实 IP*
 
 ### 根因
 
-jar 内的 `application.yml` 硬编码了 `oms:` 块，实测优先级是：
+jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 
-```
-命令行 --oms.*   >   jar 内 application.yml   >   Nacos dataId
-```
+| 优先级 | 来源 | 结果 |
+|---|---|---|
+| 1（最高） | **命令行 `--oms.*`** | ✅ **赢** |
+| 2 | jar 内 `application.yml` | ✅ **赢过 Nacos** |
+| 3（最低） | Nacos dataId 里的 `oms:` | ❌ **输** |
 
-（jar 里的 `oms.redisMode=cluster` + `clusters:[127.0.0.1:6379]` 压不过 Nacos，
-所以只能走命令行 —— 见 `scripts/start-hd-apps.sh`。）
+**证据**（2026-11-01/02 实测）：
+
+- 给 Nacos 的 `icms-controller.yaml` 的 `oms:` 加 `redisMode: standalone`，
+  启动日志**仍然是**
+  `*** Using Redis Cluster with nodes: 127.0.0.1:6379` ——
+  那是 jar 里的**集群占位符**，**压过了 Nacos**。
+- 同一份 jar 改成命令行
+  `--oms.redisMode=standalone --oms.hostname=node1 --oms.port=6379 --oms.password=sac888`
+  就变成 `*** Using Redis Standalone at node1:6379`，**立刻生效**。
+
+⇒ **jar 里的 `oms:` 压不过 Nacos 这句话是错的** ——
+是 **Nacos 压不过 jar**。所以 Nacos 里改 `oms:` **没有用**，
+只能走命令行 —— 见 `scripts/start-hd-apps.sh` 的 `HD_REDIS_CLUSTER=1` 开关。
+
+> 📌 **连带影响**：`docs/OPERATIONS.md` §4.5 原本要求
+> 「`oms:` 要在**三个** Nacos dataId 各填一份」——
+> **在当前这套配置下那条指引不生效**（jar 的 `oms:` 赢）。
+> 已于 2026-11-02 修正 §4.5，并补上实测优先级表。
 
 ### 本轮接受的理由
 
@@ -1000,6 +1026,20 @@ JVM 启动时就把 jar 里的 class 读进内存了，之后改磁盘上的 jar
 ⇒ **在 D8 修掉之前，任何一轮回归都必须显式确认 model-controller 是怎么起来的**
 （用哪份 jar、有没有 `HD_REDIS_CLUSTER=1`），否则 A 段的数字不可比。
 
+#### 📌 2026-11-02 复核：这条残留**已经变成活的**
+
+```
+磁盘上的 jar : c41735d81db324e1a69dc4aa3e47ada2   （= 门户树编的那份）
+备份那份     : 064ba5fa05266dcf5b2e14c594abbfed   （在 /opt/hd/jar-backup-d2/）
+运行中的 JVM : 2026-11-02 03:34:36 启动
+```
+
+⇒ 那个 JVM **是重启过的**（不是 Task 6 那个用旧 jar 起的进程了），
+所以它启动时读到的就是磁盘上那份 `c41735d8`。
+⇒ **下一次再重启，它会再起不来** —— 这条现在**不是假设，是可复现的**。
+⇒ **每一轮回归的记录里都要写清 model-controller 是怎么起来的**
+（用哪份 jar、有没有 `HD_REDIS_CLUSTER=1`），否则 A 段的数字不可比。
+
 ### 📌 备注：门户 Redis 的 DBSIZE 从 4 变成 0（**与本轮无关**，但门禁脚本要知道）
 
 `scripts/compare-hd-portal-baseline.sh` 原来把门户 Redis 的 DBSIZE
@@ -1089,7 +1129,7 @@ matrix exit=0                                   ← 绿！真实的失败被丢�
 | D3 | 🟡 | 安装包 | 本轮部署时补（`pg_hba.conf` + reload） |
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
-| D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行** |
+| D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行**。📌 **实测优先级**（2026-11-01/02）：**命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId** ⇒ Nacos 里的 `oms:` **压不过 jar** → `docs/OPERATIONS.md` §4.5 那条「三个 dataId 各填一份」**在当前配置下不生效**，已修正 |
 | D7-a | 🔴 | **集群补丁从未进入 napstar2.0 交付树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code`；补丁只在 portal/SVN 树 `D:\javawork\1.2\cpscloud1.0\code` 和共享的 `realserver-oms` / `model-service` 二进制里） | **待修**：把集群分支**移植进交付树的 5 个调用点**（照树 B 的 `if (redisClusterHelper.isCluster()) {…} else {executePipelined(…)}` 写法；`RedisClusterHelper` / `RedisClusterHashPipeline` 从交付树**现有**的 `realserver-oms` 依赖就能拿到 —— 那份二进制**本身已带集群分支**，**不需要新增模块**），**然后**重新编译并重新部署；并加 CI 门禁（查 jar + 查**限定范围后**的 5 个调用点） |
 | D7-b | 🔴 | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | **待修**：把树 B 的 `.join()` + `writeWithRetry` + 去 `@Async` 移植进交付树；异常要显式记日志。**光重新编译修不掉**，且**必须跟 D7-a 一起修** |
 | D8 | 🟡 | **实施 D2 选项 (a) 时的副作用**（在**门户树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**门户树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与门户树产物**逐字节相同**） | **待修**：**从华盾交付树重编**并把 D2 (a) 的改动做在交付树里 —— 一次同时解决 D2 和 D8。**Task 6 实测：换回基线那份 jar + 4 个应用都在跑 → base 矩阵精确回到 47 PASS / 0 FAIL / 3 SKIP** ⇒ 矩阵本身没退化。⚠️ **jar 文件换回不等于运行中的 JVM 换回**，下次重启会再变 |

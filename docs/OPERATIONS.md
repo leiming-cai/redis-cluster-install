@@ -977,9 +977,23 @@ spring:
 > 那两个是确定的；**各应用自己那份 dataId 在哪个 group，
 > 请到 Nacos 控制台上按 dataId 查一眼再改**。
 
-> ⚠️ **Nacos 与本地 `application.yml` 谁覆盖谁，本手册不写规则。**
-> `share_base.yaml` 里有 `spring.cloud.config.override-none: true`，
-> 而这个开关自己就在远端配置里 —— 这个优先级组合**本轮没有实测过**。
+> ✅ **实测更正（2026-11-02）：Nacos 与 jar 内 `application.yml` 的优先级已经测出来了。**
+>
+> | 优先级 | 来源 | 结果 |
+> |---|---|---|
+> | 1（最高） | **命令行 `--oms.*`** | ✅ **赢** |
+> | 2 | jar 内 `application.yml` | ✅ **赢过 Nacos** |
+> | 3（最低） | Nacos dataId 里的 `oms:` | ❌ **输** |
+>
+> 详见 §4.5 的「实测更正」一节。
+>
+> > ⚠️ **原来的那句「这个优先级组合本轮没有实测过」已经作废。**
+> > `share_base.yaml` 里的 `spring.cloud.config.override-none: true`
+> > **并没有**让 Nacos 赢过 jar 里的 `application.yml` ——
+> > 实测是 **jar 赢**（Nacos 的 `oms:` 被压掉了）。
+> > 要让 Nacos 赢，得改 `bootstrap.yml` 的 override 开关
+> > （`override-none: false` + `allow-override: true`），
+> > **这一条需要单独验证，本手册不背书。**
 >
 > **本手册给的是可验证的判据**（见 §5.3）：启动日志里那行
 > `*** Using Redis Cluster with nodes: <节点列表>` **逐字打印生效值**。
@@ -1201,6 +1215,40 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 
 #### Redis 侧
 
+> ⛔ **实测更正（2026-11-02）：本表第 1/5/6 行的「填在 Nacos 里」在当前这套配置下不生效。**
+>
+> **实测出来的优先级**（华盾 napstar2.0，2026-11-01/02 两轮实测）：
+>
+> | 优先级 | 来源 | 结果 |
+> |---|---|---|
+> | 1（最高） | **命令行 `--oms.*`** | ✅ **赢** |
+> | 2 | jar 内 `application.yml` | ✅ **赢过 Nacos** |
+> | 3（最低） | Nacos dataId 里的 `oms:` | ❌ **输** |
+>
+> **证据**：给 Nacos 的 `icms-controller.yaml` 的 `oms:` 加 `redisMode: standalone`，
+> 启动日志**仍然是**
+> `*** Using Redis Cluster with nodes: 127.0.0.1:6379` ——
+> 那是 **jar 内 `application.yml` 的集群占位符**，压过了 Nacos。
+> 同一份 jar 改成命令行
+> `--oms.redisMode=standalone --oms.hostname=node1 --oms.port=6379 --oms.password=sac888`
+> 就变成 `*** Using Redis Standalone at node1:6379`，**立刻生效**。
+>
+> ⇒ **要真正切到集群，只有两条路**：
+> ① **命令行覆盖**（§4.4.5 的写法）—— 本项目验证配置生效的标准手法；
+> ② **改 jar 内的 `application.yml` 的 `oms:` 块**。
+> （还有第三条：改 `bootstrap.yml` 的 override 开关让 Nacos 赢 ——
+> `spring.cloud.config.override-none: false` + `allow-override: true`。
+> **这一条需要单独验证，本手册不背书。**）
+>
+> ⇒ 下表第 1/5/6 行**照填不误**（它们是 Nacos 侧的**目标状态**，
+> 交付方在 `bootstrap.yml` 配好 override 之后就会生效），
+> 但**在 override 配好之前，填了也白填**。
+>
+> 📌 **判据不变**：启动日志里那行
+> `*** Using Redis Cluster with nodes: <节点列表>` —— **逐字打印生效值**，
+> 行里的列表就是真正生效的节点。**改完配置 → 重启 → 看这行。**
+> （注意这行**没有**结尾的 `***`。）
+
 > ⚠️ **`oms:` 要在**三个地方**分别填**（因为三个应用从 Nacos 拉的东西不一样，见 §4.3）：
 
 | # | 位置 | 键 | 填什么 | 必改 |
@@ -1214,7 +1262,7 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 | 7 | 仓库 `cluster.conf` | `cluster_password` | `<集群密码>`（**必须与 #3/#5/#6 一致**） | ✅ |
 | 8 | 仓库 `cluster.conf` | `cluster_require_full_coverage` | `no`（两机部署必改，见 §2.5） | ✅ |
 | 9 | 仓库 `cluster.conf` | `redis_prefix` | 与节点上实际路径一致，否则 Redis 起不来 | ✅ |
-| 10 | 三个应用的 `application.yml` → `oms:` 块 | `clusters` / `password` | 离线/测试用；生产走 Nacos 的话可不改 | 可选 |
+| 10 | 三个应用的 `application.yml` → `oms:` 块 | `clusters` / `password` | **⚠️ 这一层才是当前真正生效的那一层**（见上面的实测更正） | 切集群时 ✅ |
 
 > **集群密码要同时出现在三处**，任一不一致 = 认证失败：
 >
@@ -1228,6 +1276,12 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 > > 它们会用本地 `application.yml` 的占位符 `127.0.0.1:6379` + 空密码 →
 > > **启动正常、第一次读写才炸**（§4.6 第一种下场）。
 > > 这是本手册里**最容易踩**的一个坑。
+>
+> > ⚠️ **本条与上面那条实测更正叠在一起**：
+> > 「只改了 `ext_base.yaml`」的后果，现在**多了一层** ——
+> > Nacos 的 `oms:` 就算**三个 dataId 都填对了**，只要 jar 里的 `oms:` 还在，
+> > **它照样赢**（实测）。
+> > 所以「三个 dataId 都填了」**不等于**「生效了」。
 
 > ⛔ **切集群前必读：napstarweb 的 `executePipelined` 集群分支**
 >
@@ -1273,7 +1327,7 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 
 ### 4.6 改错的实测症状
 
-**这三种下场都实测过，不是推理**：
+**这三种下场都实测过，不是推理**（下面 §4.6·一 还有**另外三种**，也是实测的）：
 
 | 你填的 | 现象 | 为什么 |
 |---|---|---|
@@ -1291,8 +1345,28 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 |---|---|
 | `No qualifying bean of type 'RedisConnectionFactory'` | `redisMode` 写成了不认识的值（老版本还大小写敏感） |
 | `oms.clusters must be configured when oms.redisMode=cluster` | `redisMode=cluster` 但 `clusters` 没填或填成了空 |
+| `oms.hostname and oms.port must be configured when oms.redisMode=standalone` | **两种模式都没配全** —— 见下面「第三种失败模式」 |
 | `JedisNoReachableNodeException: No reachable node in cluster` | 节点地址不可达，或 `password` 不对 |
 | `NOAUTH Authentication required` | `oms.password` 与集群密码不一致（见 §4.5 的三处一致） |
+| `UnsupportedOperationException: Pipeline is currently not supported for JedisClusterConnection` | 集群模式下**有代码路径还在裸用 `executePipelined`** —— 回调体一次都不执行，**数据一条都写不进去** |
+
+#### 4.6·一 另外三种**实测**出来的失败模式（2026-11-02）
+
+| 你填的 | 现象 | 为什么 |
+|---|---|---|
+| `oms.clusters` 指向**不可达地址** | 应用**能起来**，但第一次读写**挂住**（像死了一样） | **`redis-cli` / Jedis 没有内置的连接超时** → 连不上就一直等 |
+| 集群**部分节点 down** | 应用**能起来**，第一次读写才失败 | 连接工厂是懒连接的；启动时只装配不连 |
+| Nacos 的 `oms:` 是 standalone，jar 的 `oms:` 是**集群占位符** | 启动报 `oms.hostname and oms.port must be configured when oms.redisMode=standalone` | **jar 的 `oms:` 赢过 Nacos**（§4.5 的实测更正）→ 实际生效的是 jar 的**集群占位符**（`clusters: [127.0.0.1:6379]`），而 Nacos 那个 standalone 的 `hostname`/`port` **被压掉了** → **两种模式都没配全**：cluster 要 `clusters`，standalone 要 `hostname` + `port` |
+
+> ⚠️ **第一种最隐蔽** —— 它不会报错，只会「卡住」。
+> 所以**每个探针都要套 `timeout`**（`redis-cli` 没有内置超时，
+> 不套的话一个不可达的地址能把整个脚本拖死）；
+> 应用侧则要配好 `connectTimeout` / `readTimeout`。
+>
+> ⚠️ **第三种是 §4.5 那条实测更正最常见的「表现形式」** ——
+> 看到这条报错，要想到「jar 里的 `oms:` 压过了 Nacos」，
+> 而不是「Nacos 里少填了 `hostname` / `port`」。
+> 判据还是那行日志：**`*** Using Redis Cluster with nodes: <列表>`**。
 
 ---
 

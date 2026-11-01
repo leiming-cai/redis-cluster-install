@@ -1,11 +1,16 @@
 # 会话存档（2026-11-01）：华盾 napstar2.0 Docker 部署 + 上一轮代码验证
 
 > **这份文件是给「下一个会话」看的。**
-> 打开它 == 拿到本会话的**全部产出**：环境、结论、实测证据、发现���缺陷、留痕。
+> 打开它 == 拿到本会话的**全部产出**：环境、结论、实测证据、发现的缺陷、留痕。
 >
 > - 上一份存档：`docs/superpowers/sessions/2026-11-01-napstarweb-cluster-branch-impl-session.md`
 > - 本会话的 spec：`docs/superpowers/specs/2026-11-01-hd-napstar-docker-deploy-design.md`
 > - 本会话的 plan：`docs/superpowers/plans/2026-11-01-hd-napstar-docker-deploy.md`
+> - **下一份存档（2026-11-02）：`docs/superpowers/sessions/2026-11-02-hd-redis-cluster-test.md`**
+>   —— Redis 集群模式读写测试。本会话遗留的 **D2 走 (a)** 在那一轮落地了
+>   （**做在了门户树，不是交付树**），并因此暴露了 **D8**；
+>   那一轮还测出了 **配置优先级**（命令行 > jar 内 `application.yml` > Nacos）
+>   和两个真实的代码缺陷 **D7-a / D7-b**。
 
 ---
 
@@ -21,7 +26,7 @@ Redis（双实例）+ ZooKeeper（2 节点）+ Kafka（2 broker）+ Nacos + Post
 | # | 缺陷 | 严重度 | 谁引入 | 状态 |
 |---|---|---|---|---|
 | **D1** | `hisDataProducer` / `hisDataSend` 的 jar 里**没有 PG 驱动** | 🔴 | **上一轮 PG 迁移** | **🚫 不修**（用户决定）→ 这两个应用在本环境**预期起不来**，属已知且已接受 |
-| **D2** | 安装包的 Nacos 导出包**少 3 个 dataId** | 🟡 | 安装包 | ⚠️ **实测更正**：缺的这两个**不阻断启动**，上一轮「手写补齐」是错的 → 已改为从真实 `icms-controller.yaml` 派生 |
+| **D2** | 安装包的 Nacos 导出包**少 3 个 dataId** | 🟡 | 安装包 | ✅ **实测更正 + 已走 (a)**：缺的这两个**不阻断启动**，上一轮「手写补齐」是错的 → 已改为从真实 `icms-controller.yaml` 派生。**(a)（`bootstrap.yml` 不再引用 `share_base.yaml` / `ext_base.yaml`，只留 `napstarmappingconfig.yaml` —— 安装包里确实有它）已在 2026-11-02 那一轮实施**（详见该轮存档 §3.5） |
 | **D3** | `initPostgresDB.sql` **没改 `pg_hba.conf`** | 🟡 | 安装包 | 本轮部署时补 |
 | **D4** | datasource 指向 `node2`，但 PG 只在一台机器上 | 🟡 | 安装包（按生产拓扑写的） | 本轮改（Nacos + 命令行覆盖） |
 
@@ -634,6 +639,55 @@ bootstrapProperties-share_base.yaml,DEFAULT_GROUP
 
 ---
 
+## 八·六、第三轮追加：D2 走 (a) 的结果（2026-11-02 会话）
+
+> **这一节由 2026-11-02 那一轮补写** ——
+> 那一轮的存档：`docs/superpowers/sessions/2026-11-02-hd-redis-cluster-test.md`。
+
+### 8.6.1 (a) 做了什么
+
+D2 的两个修法里，**最终选的是 (a)**：
+
+| 项 | 值 |
+|---|---|
+| 修法 | **(a)** —— 从 `bootstrap.yml` 里去掉对 `share_base.yaml` / `ext_base.yaml` 的引用 |
+| 改后 | **只留** `napstarmappingconfig.yaml`（`shared-configs: []`） |
+| 为什么留它 | **安装包里确实有** —— `DEFAULT_GROUP/napstarmappingconfig.yaml`，**1117 字节** |
+| 改的文件 | `modelserver/controller/src/main/resources/bootstrap.yml`、`modelserver/plugins/commitDataIncreProducer/src/main/resources/bootstrap.yml` |
+
+⇒ **`ext_base.yaml` / `share_base.yaml` 现在都不需要了。**
+（本会话 §八·五 那个「从真实的 `icms-controller.yaml` 派生」的手写补齐做法，
+**已经被 (a) 取代** —— 既然根本不用引用它们，就不用造它们。）
+
+### 8.6.2 ⚠️ 但 (a) 做在了**错误的树上**
+
+| 树 | (a) 的状态 |
+|---|---|
+| **门户树** `D:\javawork\1.2\cpscloud1.0\code` | ✅ **已实施**（`shared-configs: []`，mtime 2026-11-01 14:49:35） |
+| **napstar2.0 交付树** `D:\work\info\web\extendsystem\华盾-napstar2.0\code` | ❌ **没做** —— `modelserver/controller/bootstrap.yml` 里 `share_base.yaml` + `ext_base.yaml` + `napstarmappingconfig.yaml` **三个都还在** |
+
+⇒ **D2 在交付树里还没修。**
+
+### 8.6.3 🔴 而「从门户树重编出来的 jar」**不能直接部署**
+
+从门户树重编 `model-controller` 时，那个 jar 把**门户树的 `application.yml`
+一起打进去了** —— 而门户树那份的 `oms:` 块是**没被注释的集群占位符**
+（`redisMode: cluster` / `clusters: [127.0.0.1:6379]` / `password: ""`），
+交付树那份是**被注释掉的**（`# oms:`）。
+
+⇒ 部署上去的 jar **standalone 下直接 NOAUTH 起不来**。
+⇒ 这就是 **`docker/hd-napstar/DEFECTS.md` 的 D8**。
+
+**教训**：**不要从另一棵树编译交付物。** 改配置要改**真正被部署的那棵树**；
+「重新编译一个 jar」不是局部操作 —— 它会把那棵树此刻的**每一个配置文件**
+一起固化进产物。**交付物和它的配置必须成套、同源。**
+
+⇒ **正解**（D8 的修法，也是 D2 在交付树里的修法）：
+**从交付树重新编译** `model-controller`，并把 (a) 的改动**做在交付树里** ——
+**一次改动同时解决两件事**。
+
+---
+
 ## 九、下一轮的入口
 
 | # | 事 | 严重度 | 说明 |
@@ -644,7 +698,7 @@ bootstrapProperties-share_base.yaml,DEFAULT_GROUP
 | **4** | **`OmsConfig` 硬编码 `10.137.220.191`** | 🔴 | 用户上一轮明确排除。**本轮实测：唯一走硬编码那条路的是 `realserver`**（A2 显示 `10.137.220.191` + `2000/3000ms`）→ 那是该问题的**实际影响面**。但 `realserver` **用户说明没用、不启动** → **本环境不受影响** |
 | **5** | **安装包那 3 个缺陷要不要修进交付物** | 🟡 | D2（缺 dataId）/ D3（pg_hba）/ D4（node2 指向）。修它们要改安装包或加部署脚本 |
 | **6** | **`application/backend-gd`** | 🟡 | 逐字副本，同一套问题。本轮**没碰** |
-| **7** | **D2 的最终修法待定** | 🟡 | 缺的是「dataId 名对不上」这个**声明与实际不一致**的问题。修法：(a) 改华盾树 `bootstrap.yml` 不引用这两个 dataId，或 (b) 在安装包里补上正确内容 → **需产品/交付方确认** |
+| **7** | ~~**D2 的最终修法待定**~~ | ✅ | **已定：(a)**。见 §八·六 —— (a) 已实施，**但做在了门户树**；交付树里还没做，且**不能直接用门户树编出来的 jar**（那是 D8） |
 
 > **🚫 明确不做**：`hisDataProducer` / `hisDataSend` 的 PG 驱动缺失（D1）。
 > 用户决定**不修改这两个模块** → 它们在本环境**预期起不来**，
