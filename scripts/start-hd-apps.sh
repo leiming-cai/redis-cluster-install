@@ -15,6 +15,58 @@ mkdir -p "$LOG_DIR"
 #    -Xmx192m 是能跑起来的下限；生产是 4G/2G。
 JAVA_OPTS="-Xms64m -Xmx192m -server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:MaxMetaspaceSize=160m -Dfile.encoding=UTF-8"
 
+# ---------------------------------------------------------------
+# Redis 集群端点 —— **一次性**算出来，不是每个应用算一次。
+# 这是**环境的属性**，不是应用的属性。
+# ---------------------------------------------------------------
+# ⚠️ 不能用 `hostname -i`：它返回**空格分隔的多个值**
+#    （"172.22.0.2 172.22.0.2"），传给 redis-cli -h 会变成
+#    "Could not connect to Redis at 172.22.0.2 172.22.0.2:16379"。
+# ⚠️ `awk '{print $1}'` 也不行：它打印**每一行**的第一个字段，
+#    多行输出（getent ahosts node1 在这台机器上就是 3 行 STREAM/DGRAM/RAW）
+#    会得到多个 IP -> 命令行被拆开 -> 集群配置静默写错。
+#    `awk 'NF{print $1; exit}'` 只取第一个非空行。
+#    三个脚本（start-hd-apps.sh / hd-redis-cluster.sh / hd-cluster-verify.sh）
+#    必须用**同一种**写法，否则 IP 推导会分叉。
+#
+# ⚠️ 用 `${VAR-...}`（只认**没设**）而不是 `${VAR:-...}`（没设**或**空串都算）：
+#    显式设了空值是一种"我以为配了"的错误状态，应该报错，
+#    而不是悄悄回退到 getent 的结果 —— 那会让操作的人以为设成功了。
+if [ -n "${HD_CLUSTER_IP+set}" ]; then
+  CLUSTER_IP="$HD_CLUSTER_IP"
+else
+  CLUSTER_IP="$(getent hosts node1 | awk 'NF{print $1; exit}')"
+fi
+# ⚠️ 密码必须跟 hd-redis-cluster.sh 的 HD_CLUSTER_PASS **完全一致** ——
+#    这是两个文件里各自独立的默认值，改一个不改另一个就会分叉，
+#    分叉的后果是 NOAUTH —— 正是这个开关本来要解决的那类坑。
+if [ -n "${HD_CLUSTER_PASS+set}" ]; then
+  CLUSTER_PASS="$HD_CLUSTER_PASS"
+else
+  CLUSTER_PASS="HdClusterPw2026"
+fi
+
+# 集群地址必须是**单个** IP：多个值会在命令行里被拆成散落的参数，
+# 既污染集群配置，又给 JVM 塞了莫名其妙的额外参数。
+case "$CLUSTER_IP" in
+  ''|*' '*|*$'\n'*|*[!0-9.]*)
+    echo "!! 容器 IP 解析失败或含多个值: '$CLUSTER_IP'" >&2
+    echo "   （getent hosts node1 的输出或 HD_CLUSTER_IP 有问题）" >&2
+    exit 1
+    ;;
+esac
+
+# ⚠️ 密码不能含空白：命令行参数是按空白切分的，
+#    "my pass" 会被切成 "--oms.password=my" 和 "pass" 两个 argv ——
+#    前者让应用拿到**错的**密码（NOAUTH），后者被静默吞掉。
+#    操作的人会看到一个他"设过了"的密码却报认证失败，极难排查。
+case "$CLUSTER_PASS" in
+  *[[:space:]]*)
+    echo "!! HD_CLUSTER_PASS 里有空白字符，不能放进命令行" >&2
+    exit 1
+    ;;
+esac
+
 # 停止上一批：按 jar 名匹配，**绝不用 pkill -f java**（会杀掉中间件的 Kafka/ZK/Nacos）
 # ⚠️ hisDataProducer / hisDataSend 仍列在停止名单里 —— 万一之前跑起来了要能停掉。
 #    但**不启动**它们（见 BATCH2 的注释）。
@@ -32,11 +84,15 @@ start_one() {
   # ⚠️ transformNapstarModel 的 application.yml（**打进了 jar 里**）把 sac/cmt
   #    两个 datasource 写成 node2:5432，但 PG 只跑在 hd-node1 ->
   #    "Connection to node2:5432 refused"。用命令行覆盖（Spring Boot 优先于 jar 内配置）。
-  local extra=""
+  #
+  # ⚠️ 这里用**数组**，不是字符串：数组里每个元素原样变成一个 argv，
+  #    不会被空白切开、不会被通配符展开。
+  #    （字符串 + 不加引号的 $extra 会把 "my pass" 这种密码切成两个参数。）
+  local extra=()
   case "$name" in
     transformNapstarModel)
-      extra="--spring.datasource.sac.url=jdbc:postgresql://node1:5432/napstar?currentSchema=sac&stringtype=unspecified&characterEncoding=UTF-8
-             --spring.datasource.cmt.url=jdbc:postgresql://node1:5432/napstar?currentSchema=cmt&stringtype=unspecified&characterEncoding=UTF-8"
+      extra=("--spring.datasource.sac.url=jdbc:postgresql://node1:5432/napstar?currentSchema=sac&stringtype=unspecified&characterEncoding=UTF-8"
+             "--spring.datasource.cmt.url=jdbc:postgresql://node1:5432/napstar?currentSchema=cmt&stringtype=unspecified&characterEncoding=UTF-8")
       ;;
   esac
 
@@ -47,22 +103,24 @@ start_one() {
   #      命令行 --oms.*      赢
   #      jar 内 application.yml  赢过 Nacos
   #      Nacos 的 oms:          输
-  #    jar 内 application.yml 硬编码了 oms.redisMode=cluster + clusters:[127.0.0.1:6379]
+  #    model-controller 的 jar 内 application.yml 硬编码了
+  #    oms.redisMode=cluster + clusters:[127.0.0.1:6379] + password:""
   #    → Nacos 里的 oms 根本压不过它 → 只能走命令行。
-  #    判据：启动日志那行 *** Using Redis Cluster with nodes: <列表> ***，列表就是生效值。
+  #    判据：启动日志里那行
+  #      *** Using Redis Cluster with nodes: <列表> (connectTimeout=..., ...)
+  #    列表就是生效值（**没有**结尾的 ***）。
   if [ "${HD_REDIS_CLUSTER:-0}" = "1" ]; then
-    # ⚠️ 不能用 `hostname -i` —— 它返回空格分隔的多个值
-    local cip="${HD_CLUSTER_IP:-$(getent hosts node1 | awk '{print $1}')}"
-    local cpw="${HD_CLUSTER_PASS:-HdClusterPw2026}"
-    extra="$extra --oms.redisMode=cluster
-            --oms.clusters[0]=$cip:16379
-            --oms.clusters[1]=$cip:16380
-            --oms.clusters[2]=$cip:16381
-            --oms.password=$cpw"
+    extra+=(--oms.redisMode=cluster
+            "--oms.clusters[0]=$CLUSTER_IP:16379"
+            "--oms.clusters[1]=$CLUSTER_IP:16380"
+            "--oms.clusters[2]=$CLUSTER_IP:16381"
+            "--oms.password=$CLUSTER_PASS")
   fi
 
-  # shellcheck disable=SC2086
-  nohup "$JAVA" $JAVA_OPTS -jar "$jar" $extra > "$LOG_DIR/$name.log" 2>&1 &
+  # ⚠️ "${extra[@]}" 必须**加引号**：`${extra[@]+"${extra[@]}"}` 是 set -u 下
+  #    展开空数组的安全写法（bash < 4.4 直接 "${extra[@]}" 会报 unbound variable；
+  #    这台机器是 bash 5.1，但安全写法在任何版本都对）。
+  nohup "$JAVA" $JAVA_OPTS -jar "$jar" ${extra[@]+"${extra[@]}"} > "$LOG_DIR/$name.log" 2>&1 &
   echo "$!" > "$LOG_DIR/$name.pid"
   sleep 3
 }
@@ -98,6 +156,19 @@ case "$BATCH" in
   all) LIST="$BATCH1 $BATCH1B $BATCH2";;
   *) echo "batch must be 1|1b|2|all"; exit 2;;
 esac
+
+# ⚠️ 每次运行都把 Redis 模式**喊出来** —— 别让操作的人猜。
+#    不同 jar 的 oms: 块不一样（model-controller 是 cluster+127.0.0.1:6379，
+#    realalarmconsumer 是 standalone+node1:6379，web-controller / rtdata-consumer
+#    干脆没有 oms: 块），所以"这次到底走的哪条路"不是脚本能替他们决定的。
+if [ "${HD_REDIS_CLUSTER:-0}" = "1" ]; then
+  echo "=== Redis 模式: CLUSTER (命令行覆盖 oms.*) ==="
+  echo "    集群端点: $CLUSTER_IP:16379,$CLUSTER_IP:16380,$CLUSTER_IP:16381"
+else
+  echo "=== Redis 模式: 默认（走 jar/Nacos 自己的 oms.*）==="
+  echo "    ⚠️ model-controller 的 jar 内 oms.* 硬编码成 cluster+127.0.0.1:6379+空密码，"
+  echo "       在这个环境里**起不来**（NOAUTH）。要跑集群请设 HD_REDIS_CLUSTER=1。"
+fi
 
 echo "=== stopping any running app from a previous batch ==="
 stop_apps
@@ -138,6 +209,6 @@ for name in $LIST; do
   elif grep -q 'APPLICATION FAILED TO START' "$LOG_DIR/$name.log" 2>/dev/null; then
     echo "  FAILED   $name  $(grep -oE 'Description:|Action:' "$LOG_DIR/$name.log" | head -2 | tr '\n' ' ')"
   else
-    echo "  UNKNOWN  $name  (no 'Started ... in ... seconds' yet)"
+    echo "  UNKNOWN  $name  (no 'Started ... in .* seconds' yet)"
   fi
 done
