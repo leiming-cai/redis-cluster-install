@@ -399,13 +399,82 @@ docker run --rm \
 
 > 📌 补一句容易看错的：树 A 里有 17 个文件**提到** `RedisPipelineUtil`，
 > 但那全是 `import com.sac.platform.realserver.oms.utils.RedisPipelineUtil;` ——
-> **从共享模块 import 进来的**（共享模块本身在交付产物里是带集群分支的二进制）。
+> **从共享模块 import 进来的**。
 > 树 A 自己那份 `RedisPipelineUtil.java` 只有一个，在
 > `platform/backend/modelserver/plugins/hisDataSend/.../config/` 下，
 > 是**另一个毫不相干的同名类**。
-> 也就是说：**树 A 用的是共享模块的「单机版」接口**，
-> `RedisPipelineUtil` 本身在共享模块里有没有集群分支是另一回事 ——
-> napstarweb / rtdata-module 的**调用点**根本没走集群分支。
+>
+> ⚠️⚠️ **关键（这里曾经自相矛盾过，纠正如下）**：
+> 交付树**并不是**在用一个「单机版」的 `RedisPipelineUtil` ——
+> **那份共享二进制本身就是带集群分支的**（见下面的实测）。
+> 缺的不是那个类，缺的是**调用点**。
+
+##### 共享模块那份二进制：**本身是带集群分支的**（实测）
+
+交付树从**本地 Maven 仓库**取预编译的 `realserver-oms-${platform.version}`，
+**不是**从树里的 `common/oms` 源码目录编译的 ——
+树 A 的 `realserver/pom.xml` 的 `<modules>` 里**没有** `common/oms`：
+
+```
+树 A: platform/backend/realserver/pom.xml
+  <modules>
+    <module>controller</module>
+    <module>plugins/rtdata-consumer</module>
+    <module>plugins/rtdata-module</module>
+  </modules>          ← 没有 common/oms
+
+树 B: platform/backend/realserver/pom.xml
+  <modules>
+    <module>controller</module>
+    <module>entity</module>
+    <module>dao</module>
+    <module>services</module>
+    <module>common/oms</module>       ← 有
+    <module>plugins/rtdata-consumer</module>
+    <module>plugins/rtdata-module</module>
+  </modules>
+```
+
+而树 A 的 `napstarweb/monitor/pom.xml` **早就声明了**这个依赖（第 88-91 行）：
+
+```xml
+<dependency>
+    <groupId>com.sac.platform</groupId>
+    <artifactId>realserver-oms</artifactId>
+</dependency>
+```
+
+**实测那份二进制（`realserver-oms-1.0.14.jar`，随交付物发出）**：
+
+```
+md5 = 7ff57b5a1d4802a345e8381e8e7500ad   （取自容器里 rtdata-consumer 的 BOOT-INF/lib/）
+
+RedisPipelineUtil:
+  isCluster 调用点 (isCluster:()Z) = 9
+  RedisClusterHelper 字段引用      = 3
+  提供的集群感知入口: opsValueSetPipe / opsValueGetPipe /
+                     opsHashSetPipe(×2) / opsHashGetPipe / opsHashGetALLPipe /
+                     scan / delete
+RedisClusterHashPipeline:
+  提供的入口: putAllHashes / getAllHashes / getAllValues
+（RedisClusterHelper.class 也在同一个 jar 里）
+```
+
+⇒ **不需要**把 `common/oms` 搬进交付树 ——
+**集群感知的 API 已经在交付树的编译 classpath 上了。**
+
+**真正缺的是调用点**。树 B 的同一批文件已经改成了这样：
+
+```java
+if (redisClusterHelper.isCluster()) {
+    results = redisClusterHashPipeline.getAllHashes(keys);
+} else {
+    results = redisTemplate.executePipelined(new RedisCallback() { ... });
+}
+```
+
+（树 A 的 `CalculateService.java` 第 686、718 行**只有**裸的
+`redisTemplate.executePipelined(...)`，没有这个分支。）
 
 ##### class 层面的复核（A/B/C 三个指标）
 
@@ -493,6 +562,14 @@ strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的�
    - 单机模式 → `real_data:31249:134213433032705`，`HGET` = `"3.14,2026-11-01 00:00:00,2"` ✅
    - 集群模式 → **什么都没有** ❌（Kafka 侧确认消息已送达：`INCDATA-0` offset 5→6，lag 0）
 
+   > 📌 **值的格式可以自己推**：消息格式是 `obid;atype,datatype,value,time`，
+   > key 由 `RedisRealDataServiceImpl.processItem` 拼成
+   > `prefix + ":" + otype + ":" + obid`，
+   > 值由 `value = contents[2] + "," + contents[3] + "," + contents[1]`
+   > （即 `value,time,datatype` 这个顺序）拼成。
+   > 所以 `"3.14,2026-11-01 00:00:00,2"` 就是
+   > `contents[2]="3.14"` + `","` + `contents[3]="2026-11-01 00:00:00"` + `","` + `contents[1]="2"`。
+
    ⚠️ 这条是**实时数据**通道 —— 集群模式下等于**全部实时数据都丢**，
    而且监控盯日志是**发现不了**的。
 
@@ -528,19 +605,37 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 树 A 重新编译产出的 jar 与现在部署的**字节相同**（md5 `340d66a5…`）。
 必须**先把集群分支移植进交付树**：
 
-1. **把集群分支移植进 napstar2.0 交付树（树 A）**，两条路都行：
-   - **直接端口**：从 portal/SVN 树（树 B）把 `isCluster()` 守卫
-     移植到树 A 对应的调用点上
-     （`napstarweb/monitor` 的 `SVGCacheServiceImpl` / `RTListener` /
-     `SVGParseService` / `CalculateService` 等，
-     以及 `realserver/plugins/rtdata-module` 的写路径）；
-   - **改成走共享模块的集群感知入口**：把这些调用点改用
-     `realserver/common/oms` 的 `RedisPipelineUtil` /
-     `RedisClusterHashPipeline`（集群模式下它们会按 slot 属主归并、
-     逐 key 路由，不会踩 `openPipeline`）。
-     ⚠️ **这两个类目前不在交付树里** —— 树 A 的
-     `platform/backend/realserver/common/oms` 是**空目录**，
-     得先把树 B 的这个模块（或等价的集群感知实现）搬过来。
+1. **把集群分支移植进 napstar2.0 交付树（树 A）的调用点**。
+   **照树 B 的写法改即可**：
+
+   ```java
+   if (redisClusterHelper.isCluster()) {
+       results = redisClusterHashPipeline.getAllHashes(keys);   // 或 redisPipelineUtil.opsHashGetALLPipe(...)
+   } else {
+       results = redisTemplate.executePipelined(new RedisCallback() { ... });
+   }
+   ```
+
+   ⚠️ **不需要新增任何模块**：
+   `RedisClusterHelper` 和 `RedisClusterHashPipeline` 从交付树**现有的**
+   `com.sac.platform:realserver-oms` 依赖就能拿到
+   （`napstarweb/monitor/pom.xml` 第 88-91 行已经声明了），
+   而那份二进制**本身就是带集群分支的**（见上面「共享模块那份二进制」的实测）。
+
+   要改的调用点（**这 5 个文件**就是集群模式下发版的那两个模块里
+   所有用 `executePipelined` 的地方）：
+
+   ```
+   application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java
+   application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateService.java
+   application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/SVGParseService.java
+   application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.java
+   platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImpl.java
+   ```
+
+   （`application/backend-gd/` 是同一批代码的**副本目录**，一并改或直接不管 ——
+   它不参与本次发版，但留着不改以后会再咬人。）
+
 2. **再重新编译并重新部署** `monitor`（napstarweb）和
    `rtdata-module`（realserver）两个模块。
 3. **加一道 CI 门禁**（部署前对**交付树**的产物断言，别只查部署产物）：
@@ -551,13 +646,26 @@ real_graph:* key 数 = 0      ← 单机模式也没有
      # 然后在 /tmp/m 里 grep class 常量池里的 isCluster / RedisClusterHelper
      ```
 
-   - 查**调用点**（更直接，能挡住「树根本没打补丁」这种情况）：
+   - 查**调用点**（更直接，能挡住「树根本没打补丁」这种情况）。
+     ⚠️ **必须限定范围**：整棵树里用 `executePipelined` 的文件有 **41** 个，
+     分布在 6 个模块组里 ——
+     `backend-gd/napstarweb` ×4、`backend-gd/sche-viewer-server` ×10、
+     `backend/napstarweb` ×4、`backend/sche-viewer-server` ×10、
+     `modelserver` ×12、`realserver` ×1。
+     其中 `sche-viewer-server`、`backend-gd` 副本、
+     以及 `hisDataProducer`/`hisDataSend`（按 D1 **明确不改**）**都不在本次范围内**。
+     一个第一天就报 41 条的门禁会被无视、然后被整体加白 —— 那就白设了。
 
      ```bash
-     # 交付树里凡是用了 executePipelined 的文件，都必须带集群分支
-     grep -rl --include='*.java' 'executePipelined' <交付树>/code \
+     # 只查集群模式下发版的那两个模块
+     grep -rl --include='*.java' 'executePipelined' \
+       <交付树>/code/application/backend/napstarweb/monitor \
+       <交付树>/code/platform/backend/realserver/plugins/rtdata-module \
        | xargs grep -L 'isCluster'      # 这些文件就是漏网的
      ```
+
+     实测（树 A，限定后）：**5 个文件**，**5 个都缺** `isCluster` ——
+     正好是上面列的那 5 个。这是一个**第一天就报 5 条、修完就归零**的门禁。
 
    —— 没有这两道门禁，「树里没打补丁」会**静默**再次发生
    （重新编译照做、部署照做，问题一点没变）。
@@ -682,5 +790,5 @@ D7-b 让这个失效**连日志都不留**。只修 D7-a 不修 D7-b，
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
 | D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行** |
-| D7-a | 🔴 | **集群补丁从未进入 napstar2.0 交付树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code`；补丁只在 portal/SVN 树 `D:\javawork\1.2\cpscloud1.0\code` 和共享的 `realserver-oms` / `model-service` 二进制里） | **待修**：把集群分支**移植进交付树**（或让调用点走 `realserver/common/oms` 的 `RedisPipelineUtil` / `RedisClusterHashPipeline` —— 那两个类现在**不在**交付树里，oms 目录是空的），**然后**重新编译并重新部署；并加 CI 门禁（查 jar + 查交付树的调用点） |
+| D7-a | 🔴 | **集群补丁从未进入 napstar2.0 交付树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code`；补丁只在 portal/SVN 树 `D:\javawork\1.2\cpscloud1.0\code` 和共享的 `realserver-oms` / `model-service` 二进制里） | **待修**：把集群分支**移植进交付树的 5 个调用点**（照树 B 的 `if (redisClusterHelper.isCluster()) {…} else {executePipelined(…)}` 写法；`RedisClusterHelper` / `RedisClusterHashPipeline` 从交付树**现有**的 `realserver-oms` 依赖就能拿到 —— 那份二进制**本身已带集群分支**，**不需要新增模块**），**然后**重新编译并重新部署；并加 CI 门禁（查 jar + 查**限定范围后**的 5 个调用点） |
 | D7-b | 🔴 | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | **待修**：把树 B 的 `.join()` + `writeWithRetry` + 去 `@Async` 移植进交付树；异常要显式记日志。**光重新编译修不掉**，且**必须跟 D7-a 一起修** |

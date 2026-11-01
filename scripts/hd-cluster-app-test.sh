@@ -215,6 +215,40 @@ report_counter_delta() {
 }
 
 # ---------------------------------------------------------------
+# 三个 master 的 DBSIZE 基线。
+#
+# ⚠️ 为什么用**增量**而不是「绝对值 = 0」：
+#    「DBSIZE == 0」只在**集群本来是空的**时候才是对的判据；
+#    在一个有真实数据的集群上，它要么误报（本来就有 key），
+#    要么掩盖问题（测试多删了别人的 key，只要总数还是 0 就看不出来）。
+#    基线增量 = 0 才是「**我们没有改变集群的状态**」这个语义，
+#    而且它**顺带**证明了「清理没有多删」——
+#    要是清理脚本把 `model:*` 整个删了，基线增量就 ≠ 0。
+dbsize_snapshot() {
+  local p v out=""
+  for p in $P1 $P2 $P3; do
+    v=$(r "$p" DBSIZE | tr -d '\r')
+    case "$v" in
+      ''|*[!0-9]*) v="-1" ;;
+    esac
+    out="$out $v"
+  done
+  echo "${out# }"
+}
+# 基线 -> 现在 的 key 数增量（-1 = 某个 master 的 DBSIZE 读不到）
+dbsize_delta() {
+  local before="$1" after="$2"
+  local i b a d=0
+  for i in 1 2 3; do
+    b=$(echo "$before" | cut -d' ' -f$i)
+    a=$(echo "$after"  | cut -d' ' -f$i)
+    if [ "$b" = "-1" ] || [ "$a" = "-1" ]; then echo "-1"; return; fi
+    d=$((d + a - b))
+  done
+  echo "$d"
+}
+
+# ---------------------------------------------------------------
 # 前置条件：模型元数据表里有没有行。
 #
 # ⚠️ 为什么需要它：web-controller 的写路径
@@ -310,30 +344,24 @@ check_cluster_mode() {
 #    所以只认 `java.lang.UnsupportedOperationException` 这个全限定名
 #    以及 JedisClusterConnection 那句原文。
 #
-# ⚠️⚠️ 两种写法（限定名 / SDR 原文）**合成一条断言**，不要拆成两条。
-#    实测：每一条 SDR 原文都带着那个全限定名，反之亦然（57 = 57，
-#    两个方向都没有例外）。所以它们量的是**同一件事** ——
-#    拆成两条就是把**同一个缺陷数了两遍**，
-#    计数会虚高一倍（缺陷数 2 却报 FAIL=3），读的人也会以为有两个问题。
-#    保留两种写法是为了防「将来某个 SDR 版本只打印其中一种」，
-#    但它们必须**共用一个 ok/bad**，所以只能失败一次。
+# ⚠️⚠️ 两种写法用**一条 grep 的并集**来数，**不要**拆成两条断言，
+#    也**不要**取 min/max。
+#    - 拆成两条 = 同一个缺陷数两遍（缺陷数 2 却报 FAIL=3）；
+#    - 取 min 更糟：**只有一种写法出现时 min 会选出 0，把 FAIL 变成 PASS**
+#      （实测过：fqn=0 / sdr=5 -> min=0 -> 报 PASS，可实际有 5 个异常）。
+#      那正是这条判据要防的「将来某个 SDR 版本只打印其中一种」的场景。
+#    - 一条 grep 的**并集**（`-E` + `|`）：**一行只算一次**，
+#      只命中一种写法的行也照样算进来，两种都命中的行也只算一次。
+#      这正好是「异常行数」这个语义。
 check_no_pipeline_exception() {
   local name="$1" log="$2"
   [ -f "$log" ] || { bad "$name 没有日志文件 $log"; return 1; }
-  # 两种写法都数一遍，取**并集**的条数（一条异常行会被两种写法各数一次，
-  # 所以这里要数「行」而不是「次」，否则会翻倍）。
-  local n_fqn n_sdr n
+  local n n_fqn n_sdr
+  n=$(grep -ac -E 'java\.lang\.UnsupportedOperationException|not supported for JedisClusterConnection' "$log" 2>/dev/null)
+  # 下面两个只**展示**用（让人一眼看出是哪种写法在刷屏），不参与判定。
   n_fqn=$(grep -ac 'java\.lang\.UnsupportedOperationException' "$log" 2>/dev/null)
   n_sdr=$(grep -ac 'not supported for JedisClusterConnection' "$log" 2>/dev/null)
-  # ⚠️ 两个计数里**较小**的那个才是「异常出现的次数」——
-  #    实测两者恒等（同一个异常行同时被两种写法命中），
-  #    取 min 在「相等」时就是真实次数，在「将来只打印一种」时也不会翻倍。
-  if [ "${n_fqn:-0}" -le "${n_sdr:-0}" ] 2>/dev/null; then
-    n="${n_fqn:-0}"
-  else
-    n="${n_sdr:-0}"
-  fi
-  chk "$name 无 java.lang.UnsupportedOperationException（没踩 openPipeline 的雷；限定名计数 ${n_fqn:-0} / SDR 原文计数 ${n_sdr:-0}）" "${n:-0}" "0"
+  chk "$name 无 java.lang.UnsupportedOperationException（没踩 openPipeline 的雷；并集计数 ${n:-0} = 限定名 ${n_fqn:-0} + SDR 原文 ${n_sdr:-0}）" "${n:-0}" "0"
 }
 
 # ---------------------------------------------------------------
@@ -469,6 +497,14 @@ fi
 state=$(r "$P1" CLUSTER INFO | tr -d '\r' | grep -m1 '^cluster_state' | cut -d: -f2)
 chk "L0 cluster_state" "$state" "ok"
 
+# ⚠️ **基线**：记录三个 master 的 DBSIZE。
+#    收尾时断言「**增量** == 0」，而不是「总数 == 0」——
+#    后者只在集群本来是空的时候才是对的判据，在有真实数据的集群上
+#    会误报，还可能掩盖「清理脚本多删了别人的 key」。
+#    顺带也证明了「清理没有越界」。
+DBSIZE_BASELINE=$(dbsize_snapshot)
+echo "  DBSIZE 基线（$P1 $P2 $P3）= $DBSIZE_BASELINE"
+
 echo
 echo "############ A — web-controller（napstarweb）############"
 start_batch 1
@@ -570,6 +606,19 @@ echo "      （RedisCacheManager，key 前缀 'model:' + 缓存名 + ':'）---"
 # ⚠️ B2 没有 A2 那种前置条件问题：@Cacheable 的写入不依赖模型元数据表
 #    （`info.model_enumdict` 有 102 行，folder 级别的 'user_sex' 就在里面），
 #    所以这条判据**在本环境里都可执行**，测的是真东西。
+#
+# ⚠️ `model:` 是**共享的、应用自己管理的命名空间**，不是测试的草稿纸：
+#    model-controller 有 8 个 @Cacheable 缓存名都在它下面
+#    （enumdicts:folder / objecttypes:names / objecttypes:types /
+#      attributetypes:names / attributetypes:atypes / datatype /
+#      permittedobject / …），transformNapstarModel 也往里写
+#    （spring.cache.redis.use-key-prefix=true + key-prefix="model:"），
+#    sche-viewer-server 从里读 RedisKey.MODEL_TYPES，
+#    应用自己还会 `redisUtil.deleteNamespace("model:objecttypes:*")`。
+#    所以**只登记我们这一次会写的那一个 key**，
+#    绝不能按 `model:*` 整片删（那会把别人正在用的缓存清掉）。
+B_MODEL_KEY="model:enumdicts:folder:user_sex"
+CLEAN_KEYS+=("$B_MODEL_KEY")
 B_BEFORE=$(counters_snapshot)
 echo "    写前计数器: $B_BEFORE"
 B_TOK=$(cat /tmp/hd-token.txt 2>/dev/null)
@@ -590,17 +639,28 @@ echo "    写后计数器: $B_AFTER"
 report_app_talked "B2" "$(counter_delta "$B_BEFORE" "$B_AFTER")"
 echo "  --- 应用自己的 key 在集群里吗（model: 前缀）---"
 B_FOUND=0
+B_ONE=""
 for p in $P1 $P2 $P3; do
   # ⚠️ KEYS 只在**本 master** 上查（KEYS 没有槽感知），
   #    所以三个 master 都要查一遍再相加。
   n=$(r "$p" KEYS 'model:*' | grep -c '^model:')
   echo "    $p model:* key 数 = $n"
-  [ "${n:-0}" -gt 0 ] 2>/dev/null && B_FOUND=1
+  if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+    B_FOUND=1
+    # ⚠️ 顺手把**命中 key 的名字**记下来 —— 不能回头只查 P1：
+    #    key 可能落在 P2/P3，那时 B_FOUND=1 会报「key 在集群里」，
+    #    但 B_ONE 是空的 → 下面整个「读回」块被跳过 →
+    #    「往返成立」这条判据**静默消失**（既不 ok 也不 bad）。
+    #    KEYS 不带槽感知（加 -c 也没用），所以按 master 逐个取是对的，
+    #    只是**挑哪个**得由这里定下来。
+    if [ -z "$B_ONE" ]; then
+      B_ONE=$(r "$p" KEYS 'model:*' | grep -m1 '^model:')
+    fi
+  fi
 done
 if [ "$B_FOUND" -eq 1 ]; then
   ok "B2 应用写的 model:* key 在集群里"
   # 再把那个 key 读回来，确认真实数据（往返成立）
-  B_ONE=$(r "$P1" KEYS 'model:*' | grep -m1 '^model:')
   if [ -n "$B_ONE" ]; then
     B_VAL=$(rc "$P1" GET "$B_ONE" | tr -d '\r')
     echo "    读回 $B_ONE -> ${B_VAL:0:120}"
@@ -609,6 +669,10 @@ if [ "$B_FOUND" -eq 1 ]; then
     else
       bad "B2 $B_ONE 在集群里但读回来是空的"
     fi
+  else
+    # ⚠️ 到这里说明「数到了 key 却没取到名字」—— 判据没法执行，
+    #    **不能**静默跳过（跳过 = 这条判据凭空消失）。
+    bad "B2 数到了 model:* key 但取不到具体名字 —— 「往返成立」没法验"
   fi
 else
   bad "B2 集群里没有 model:* key —— 应用没写成功"
@@ -732,6 +796,22 @@ chk "D 读回 $SPREAD_PROBE" "$(rc "$P1" GET "$SPREAD_PROBE" | tr -d '\r')" "pro
 
 echo
 echo "############ E — 清理 ############"
+# ⚠️ cleanup() 删的是 CLEAN_KEYS 里**逐个登记**的 key：
+#    - 本脚本自己写的 `hd:test:apptest:*`（D 段）
+#    - 判据 B2 让 model-controller 写的那**一个** key
+#      `model:enumdicts:folder:user_sex`
+#
+# ⚠️⚠️ **绝不按 `model:*` 整片删**。
+#    `model:` 是**共享的、应用自己管理的命名空间**：
+#    model-controller 有 8 个 @Cacheable 缓存名都在它下面
+#    （enumdicts:folder / objecttypes:names / objecttypes:types /
+#      attributetypes:names / attributetypes:atypes / datatype /
+#      permittedobject / …），transformNapstarModel 也往里写
+#    （spring.cache.redis.use-key-prefix=true + key-prefix="model:"），
+#    sche-viewer-server 从里读 RedisKey.MODEL_TYPES，
+#    应用自己还会 `redisUtil.deleteNamespace("model:objecttypes:*")`。
+#    整片删会把**别人正在用的缓存**清掉 —— 那是数据损坏，不是清理。
+#    （早先的版本就是按 `model:*` 整片删的，这里改成只删登记过的那一个。）
 cleanup
 CLEAN_KEYS=()
 # ⚠️ 清理模式必须**只**匹配本脚本自己的前缀。
@@ -747,30 +827,42 @@ for p in $P1 $P2 $P3; do
 done
 chk "E 清理后无残留测试 key" "$left" "0"
 
-# ⚠️ **应用自己写的 key 也要清掉** —— 判据 B2 那一步让 model-controller
-#    往集群里写了一个 `model:enumdicts:folder:user_sex`。
-#    交付要求是「把集群恢复原样（三个 master 的 DBSIZE=0）」，
-#    所以这里把它也删掉。
-#    ⚠️ 删 key 要用 -c（跟随 MOVED）—— 这个 key 可能不在 16379 上。
-echo "  --- 清掉应用写的 key（判据 B2 留下的）---"
+echo "  --- 三个 master 现在的 DBSIZE（跟基线比）---"
+DBSIZE_NOW=$(dbsize_snapshot)
+echo "    基线 = $DBSIZE_BASELINE"
+echo "    现在 = $DBSIZE_NOW"
+DB_DELTA=$(dbsize_delta "$DBSIZE_BASELINE" "$DBSIZE_NOW")
+if [ "$DB_DELTA" = "-1" ]; then
+  bad "E 读不到某个 master 的 DBSIZE（节点掉了？）—— 没法比基线"
+else
+  if [ "$DB_DELTA" -eq 0 ]; then
+    ok "E 清理后三个 master 的 key 数回到基线（增量 $DB_DELTA）"
+  else
+    bad "E 清理后 key 数跟基线不符（增量 $DB_DELTA）—— 清理越界了或没清干净"
+  fi
+fi
+
+echo
+echo "  --- 复查：我们登记的那个 model key 删掉了，model:* 里**别的** key 没被动 ---"
+MODEL_LEFT=$(rc "$P1" EXISTS "$B_MODEL_KEY" | tr -d '\r')
+if [ "$MODEL_LEFT" = "0" ]; then
+  ok "E B2 写的 $B_MODEL_KEY 已删除"
+else
+  bad "E B2 写的 $B_MODEL_KEY 还在（EXISTS=$MODEL_LEFT）"
+fi
+MODEL_OTHERS=0
 for p in $P1 $P2 $P3; do
-  # ⚠️ KEYS 没有槽感知，只能逐 master 查（每个 master 只列出自己的 key）。
-  for k in $(r "$p" KEYS 'model:*' | grep '^model:'); do
-    rc "$P1" DEL "$k" >/dev/null 2>&1
-    echo "    DEL $k"
-  done
+  n=$(r "$p" KEYS 'model:*' | grep -c '^model:')
+  echo "    $p 现在的 model:* key 数 = $n"
+  [ "${n:-0}" -gt 0 ] 2>/dev/null && MODEL_OTHERS=1
 done
-echo "  --- 三个 master 现在的 DBSIZE ---"
-total=0
-for p in $P1 $P2 $P3; do
-  n=$(r "$p" DBSIZE | tr -d '\r')
-  echo "    $p DBSIZE = $n"
-  case "$n" in
-    ''|*[!0-9]*) ;;
-    *) total=$((total + n)) ;;
-  esac
-done
-chk "E 清理后三个 master 的 key 总数为 0" "$total" "0"
+if [ "$MODEL_OTHERS" -eq 0 ]; then
+  echo "    （当前集群里没有别的 model:* key —— 本环境是空的，"
+  echo "      所以「只删登记过的那一个」和「整片删」在这里看不出差别；"
+  echo "      但在有真实数据的集群上，前者才是对的。）"
+else
+  ok "E model:* 里还有别的 key —— 它们**没有被**本脚本删掉"
+fi
 
 DONE=1
 echo
