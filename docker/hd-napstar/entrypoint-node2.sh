@@ -6,18 +6,24 @@ set -uo pipefail
 log() { echo "[hd-entrypoint2] $*"; }
 
 # ---- 主机别名 ----
-for h in node1 hd-node1 node01 webdb node2 hd-node2 node02 napstardb; do
-  if ! grep -qE "[[:space:]]${h}([[:space:]]|$)" /etc/hosts 2>/dev/null; then
-    echo "127.0.0.1 ${h}" >> /etc/hosts 2>/dev/null || true
-  fi
-done
+# ⚠️ node1 必须指向 hd-node1 容器的真实 IP（跨容器），不能是 127.0.0.1 ——
+#    否则 hd-node2 的 ZK 会连回自己，ensemble 选举撞 ID。
+resolve_alias() {
+  local name="$1"
+  getent hosts "$name" 2>/dev/null | awk '{print $1; exit}'
+}
 
-# node1 必须指向 hd-node1 容器（跨容器）—— 用 HD_NODE1_IP 覆盖
-if [ -n "${HD_NODE1_IP:-}" ]; then
-  sed -i '/[[:space:]]node1[[:space:]]/d' /etc/hosts 2>/dev/null || true
-  echo "${HD_NODE1_IP} node1 hd-node1" >> /etc/hosts 2>/dev/null || true
-  log "node1 -> ${HD_NODE1_IP}"
-fi
+NODE1_IP="$(resolve_alias hd-node1)"
+[ -z "$NODE1_IP" ] && NODE1_IP="${HD_NODE1_IP:-127.0.0.1}"
+NODE2_IP="$(resolve_alias hd-node2)"
+[ -z "$NODE2_IP" ] && NODE2_IP="127.0.0.1"
+
+sed -i '/[[:space:]]node1[[:space:]]/d; /[[:space:]]hd-node1[[:space:]]/d; /[[:space:]]node2[[:space:]]/d; /[[:space:]]hd-node2[[:space:]]/d; /[[:space:]]node01[[:space:]]/d; /[[:space:]]node02[[:space:]]/d; /[[:space:]]webdb[[:space:]]/d; /[[:space:]]napstardb[[:space:]]/d' /etc/hosts 2>/dev/null || true
+{
+  echo "${NODE1_IP} node1 hd-node1 node01 webdb"
+  echo "${NODE2_IP} node2 hd-node2 node02 napstardb"
+} >> /etc/hosts 2>/dev/null || true
+log "hosts: node1=${NODE1_IP} node2=${NODE2_IP}"
 
 # ---- ZooKeeper #2 ----
 ZK_DATA="$ZOOKEEPER_HOME/data"

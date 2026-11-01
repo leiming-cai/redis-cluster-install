@@ -16,12 +16,30 @@ log() { echo "[hd-entrypoint] $*"; }
 
 # ---- 主机别名 ----
 # 构建期 /etc/hosts 只读，这里在运行时写。
-for h in node1 hd-node1 node01 webdb node2 hd-node2 node02 napstardb; do
-  if ! grep -qE "[[:space:]]${h}([[:space:]]|$)" /etc/hosts 2>/dev/null; then
-    echo "127.0.0.1 ${h}" >> /etc/hosts 2>/dev/null || true
-  fi
-done
-log "hosts: $(grep -E 'node1|node2' /etc/hosts | tr '\n' ' ')"
+#
+# ⚠️ **node2 不能指向 127.0.0.1** —— ZooKeeper 是 2 节点 ensemble，
+#    server.2=node2:2888:3888 如果解析回本机，quorum 选举会撞成
+#    "We got a connection request from a server with our own ID"。
+#    所以 node2 要指向 hd-node2 容器的真实 IP。
+#    做法: 用 Docker 网络别名解析（node2 由 hd-net 的 alias 提供），
+#    拿不到就退化成 127.0.0.1（单节点模式，ZK 会起不来但其余组件正常）。
+resolve_alias() {
+  local name="$1"
+  getent hosts "$name" 2>/dev/null | awk '{print $1; exit}'
+}
+
+NODE1_IP="$(resolve_alias hd-node1)"
+[ -z "$NODE1_IP" ] && NODE1_IP="127.0.0.1"
+NODE2_IP="$(resolve_alias hd-node2)"
+[ -z "$NODE2_IP" ] && NODE2_IP="127.0.0.1"
+
+# 删掉之前写入的别名行（幂等）
+sed -i '/[[:space:]]node1[[:space:]]/d; /[[:space:]]hd-node1[[:space:]]/d; /[[:space:]]node2[[:space:]]/d; /[[:space:]]hd-node2[[:space:]]/d; /[[:space:]]node01[[:space:]]/d; /[[:space:]]node02[[:space:]]/d; /[[:space:]]webdb[[:space:]]/d; /[[:space:]]napstardb[[:space:]]/d' /etc/hosts 2>/dev/null || true
+{
+  echo "${NODE1_IP} node1 hd-node1 node01 webdb"
+  echo "${NODE2_IP} node2 hd-node2 node02 napstardb"
+} >> /etc/hosts 2>/dev/null || true
+log "hosts: node1=${NODE1_IP} node2=${NODE2_IP}"
 
 # ---- PostgreSQL ----
 PG_VERSION=14
@@ -62,6 +80,17 @@ rm -f "$ZK_DATA/zookeeper_server.pid"
 export SERVER_JVMFLAGS="-Xmx${ZK_HEAP_SIZE:-256M}"
 "$ZOOKEEPER_HOME/bin/zkServer.sh" start
 log "zookeeper #1 started"
+
+# 2 节点 ensemble 要凑齐 quorum（2 节点里活 1 个不够 —— 实际需要 2 个都活）
+# 最多等 90 秒让 hd-node2 的 ZK 起来并完成选举
+log "waiting for the 2-node ZooKeeper ensemble to form ..."
+for i in $(seq 1 45); do
+  if "$ZOOKEEPER_HOME/bin/zkServer.sh" status 2>/dev/null | grep -qE "Mode: (leader|follower)"; then
+    log "zookeeper #1 is in the ensemble"
+    break
+  fi
+  sleep 2
+done
 
 # ---- Kafka broker #1 ----
 cd "$KAFKA_HOME"
