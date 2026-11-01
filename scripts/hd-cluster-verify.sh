@@ -42,19 +42,48 @@ rc() { timeout "$TMO" "$RC" -c -h "$IP" -p "$1" -a "$PASS" --no-auth-warning "${
 #    而且是静默的（不会报错，只会算出一个错的槽）。
 #    这里先用 nl 编号，再过滤数值行，序号永远对应原始命令的位置。
 #
+# ⚠️ 守卫要查**两件事**，缺一不可：
+#    1) 数字行的条数 == 命令数  -> 挡住「某条命令失败」（少了一行）
+#    2) **原始行数** == 命令数   -> 挡住「多出一行非数字输出」
+#       （只查 1 挡不住这个：多出来的那行被过滤掉了，
+#         数字行条数照样等于命令数，但编号已经整体错位。）
+#    两条都过了，配对才是可信的。
+#    （万一还是错位了，后果是**假 FAIL 而不是假 PASS** ——
+#      L4 会拿上报的槽去比对 "MOVED <slot> "，对不上就 FAIL。）
+#
+# ---------------------------------------------------------------
+# 本次运行的临时目录。
+# ⚠️ mktemp 出来的单个文件在 kill -9 之后会留在 /tmp 里（SIGKILL 捕不到，
+#    没法在 trap 里清）。所以统一放进一个**本次运行专属**的目录，
+#    由 cleanup() 整个删掉 —— 就算脚本被 kill -9，
+#    下次运行也不会越积越多（而且这种残留不影响功能）。
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/hd-cluster-verify.XXXXXX" 2>/dev/null)
+# ⚠️ mktemp -d 失败的话 WORKDIR 是空的。
+#    **不能**退回到 /tmp 本身 —— cleanup() 会 `rm -rf "$WORKDIR"`，
+#    那会把整个 /tmp 删掉！退回到一个固定的子目录名，
+#    并且用 OWNRUN_DIR 标记「这个目录是我们建的，可以整个删」。
+OWNRUN_DIR=0
+if [ -n "${WORKDIR:-}" ] && [ -d "${WORKDIR:-}" ]; then
+  OWNRUN_DIR=1
+else
+  WORKDIR="${TMPDIR:-/tmp}/hd-cluster-verify.fallback.$$"
+  mkdir -p "$WORKDIR" 2>/dev/null && OWNRUN_DIR=1
+fi
+
 # 用法：keyslots <prefix> <count> -> 每行一个 "key slot"
 # 返回码：0 = 结果条数与命令数一致（配对可信）；1 = 有命令失败，输出不可信。
 keyslots() {
   local prefix="$1" count="$2" i tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "$WORKDIR/keyslots.XXXXXX" 2>/dev/null) || return 1
   for i in $(seq 1 "$count"); do
     echo "CLUSTER KEYSLOT $prefix$i"
   done | timeout "$TMO" "$RC" -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning 2>&1 \
     | nl -ba > "$tmp"
-  # 期望 count 行（每条命令一行响应），且每行第 2 列都是槽号。
-  local got
+  # 每条命令应该正好回一行。数字行数 == count 且 原始行数 == count 才算可信。
+  local got total
   got=$(awk '$2 ~ /^[0-9]+$/' "$tmp" | wc -l)
-  if [ "$got" -ne "$count" ]; then
+  total=$(wc -l < "$tmp")
+  if [ "$total" -ne "$count" ] || [ "$got" -ne "$count" ]; then
     rm -f "$tmp"
     return 1
   fi
@@ -103,7 +132,14 @@ batch_cmds() {
     | grep -v '^-> Redirected to slot'
 }
 
-echo "### 目标: $IP  (ports $P1/$P2/$P3)  pass=$PASS"
+# ⚠️ **不要把密码打到 stdout**。日志会被贴到 issue / 工单里。
+#    只说密码的**来源**（环境变量设了没），不说值。
+if [ -n "${HD_CLUSTER_PASS:-}" ]; then
+  PASS_SRC="HD_CLUSTER_PASS 已设置"
+else
+  PASS_SRC="HD_CLUSTER_PASS 未设置（用内置默认值）"
+fi
+echo "### 目标: $IP  (ports $P1/$P2/$P3)  pass=<已隐藏>  [$PASS_SRC]"
 
 # ---------------------------------------------------------------
 # 清理用的 key 列表（跨槽的 key 不能用一条 DEL 删 —— 会 CROSSSLOT 整条失败，
@@ -112,25 +148,38 @@ CLEAN_KEYS=()
 
 cleanup() {
   local k
-  [ "${#CLEAN_KEYS[@]}" -eq 0 ] && return 0
-  # ⚠️ 不能用一条 `DEL k1 k2 k3` —— 跨槽的 key 会让整条命令
-  #    CROSSSLOT 失败，**一个都删不掉**（实测过）。
-  #    所以一条一条 DEL，但打包进同一个连接里。
-  local cmds=()
-  for k in "${CLEAN_KEYS[@]}"; do
-    [ -n "$k" ] && cmds+=("DEL $k")
-  done
-  [ "${#cmds[@]}" -gt 0 ] && batch_cmds "${cmds[@]}" >/dev/null
+  # 临时目录整个删掉（keyslots 的中间文件都在里面）。
+  # 放在最后：删 key 要用 redis-cli，跟临时目录没关系，但顺序上先清 key 更直观。
+  if [ "${#CLEAN_KEYS[@]}" -gt 0 ]; then
+    # ⚠️ 不能用一条 `DEL k1 k2 k3` —— 跨槽的 key 会让整条命令
+    #    CROSSSLOT 失败，**一个都删不掉**（实测过）。
+    #    所以一条一条 DEL，但打包进同一个连接里。
+    local cmds=()
+    for k in "${CLEAN_KEYS[@]}"; do
+      [ -n "$k" ] && cmds+=("DEL $k")
+    done
+    [ "${#cmds[@]}" -gt 0 ] && batch_cmds "${cmds[@]}" >/dev/null
+  fi
+  # ⚠️ 只有**我们建的**目录才能整个删。
+  #    万一 WORKDIR 指向了 /tmp 本身，`rm -rf` 会把整个 /tmp 删掉。
+  if [ "${OWNRUN_DIR:-0}" -eq 1 ] && [ -n "${WORKDIR:-}" ] && [ -d "${WORKDIR:-}" ]; then
+    rm -rf "$WORKDIR"
+  fi
+  return 0
 }
 # 兜底清理：脚本退出时把自己写的 key 删掉。
 #
 # 这个 EXIT trap **覆盖什么、不覆盖什么**（实测结论，别再想当然）：
 #   - 正常退出 / 报错退出        -> 触发
 #   - SIGTERM (kill -TERM)       -> 触发，且是**立刻**触发（不等前台子进程）
-#   - SIGINT  (kill -INT)       -> **被推迟**：bash 正在等前台子进程时，
-#                                  SIGINT 会排队等到子进程结束才处理。
-#                                  所以 Ctrl-C 实际上会让脚本**跑完**，
-#                                  清理在正常退出时发生，而不是中途。
+#   - SIGINT  (kill -INT)       -> 行为**取决于 bash 版本和当时在等什么**：
+#                                  有的是立刻触发，有的会被推迟到前台子进程
+#                                  结束才处理。实测（本容器 bash 5.1.16）：
+#                                  脚本正在等外部子进程时，SIGINT 被**推迟**，
+#                                  脚本会**跑完**，清理在正常退出时发生。
+#                                  真实的 Ctrl-C 是给**整个进程组**发 SIGINT，
+#                                  同样会被推迟 —— 所以 Ctrl-C 之后脚本
+#                                  通常还是会把活干完再清理。
 #   - SIGKILL (kill -9)          -> 捕不到（内核直接杀），残留无法避免。
 #
 # 所以「Ctrl-C 之后一定没有残留」这个说法只在脚本正常跑完时成立；
@@ -139,7 +188,17 @@ cleanup() {
 # SUMMARY 在正常路径末尾打印；trap 只在异常退出时补打一份。
 # ⚠️ 退出码变量叫 _e_ 而不是 rc —— rc 是本脚本的 redis-cli 包装函数。
 DONE=0
-trap '_e=$?; cleanup; if [ "$DONE" -eq 0 ]; then echo; echo "SUMMARY: PASS=$P FAIL=$F"; fi; exit $_e' EXIT
+trap '_e=$?; cleanup; if [ "$DONE" -eq 0 ]; then
+        # ⚠️ 异常退出时**绝不能**打印 "FAIL=0" ——
+        #    脚本崩了（比如 set -u 触发 unbound variable），
+        #    计数器还没来得及加，SUMMARY 就成了「假绿」。
+        #    计划里就是靠 grep "FAIL=0" 判断成败的，假绿会骗过人。
+        if [ "$_e" -ne 0 ] && [ "$F" -eq 0 ]; then
+          F=$((F+1))
+          echo "  FAIL  脚本异常退出（exit=$_e）—— 上面那条错误才是根因"
+        fi
+        echo; echo "SUMMARY: PASS=$P FAIL=$F"
+      fi; exit $_e' EXIT
 
 echo
 echo "############ L0 — 连通性前置检查 ############"
@@ -148,21 +207,33 @@ echo "############ L0 — 连通性前置检查 ############"
 #    把「集群没起来」和「集群行为不对」这两种失败区分开。
 # ⚠️ 判活看**输出文本**（PING / PONG），不看退出码 ——
 #    redis-cli PING 在 "Connection refused" 时也返回 0。
-pong=$(r $P1 PING | tr -d '\r')
-if [ "$pong" != "PONG" ]; then
+#
+# ⚠️ 必须探**三个** master，不能只探 $P1。
+#    半死集群（16379 活着、16380 挂了）如果只探 $P1 就会漏过去，
+#    然后 L5 的 DBSIZE 拿到的是一句 "Could not connect to Redis at ..."，
+#    拿它做算术 -> set -u 报 "Could: unbound variable" -> 脚本崩掉，
+#    而计数器还没加 -> trap 打印 "FAIL=0"（假绿）。
+#    三个都探，死掉的那个当场就被点名。
+down=0
+for port in $P1 $P2 $P3; do
+  pong=$(r "$port" PING | tr -d '\r')
   case "$pong" in
+    PONG)
+      ok "L0 $IP:$port PING -> PONG" ;;
     *NOAUTH*|*WRONGPASS*)
-      bad "L0 认证失败（$pong）—— 密码不对？HD_CLUSTER_PASS=${HD_CLUSTER_PASS:-<未设置，用默认>}" ;;
+      bad "L0 $IP:$port 认证失败（$pong）—— 密码不对？[$PASS_SRC]"
+      down=$((down+1)) ;;
     *)
-      bad "L0 连不上 $IP:$P1（PING 返回 '$pong'）—— 集群没起来？先跑 hd-redis-cluster.sh start" ;;
+      bad "L0 连不上 $IP:$port（PING 返回 '$pong'）—— 这个 master 没起来？先跑 hd-redis-cluster.sh status"
+      down=$((down+1)) ;;
   esac
-  echo
+done
+if [ "$down" -gt 0 ]; then
   echo "SUMMARY: PASS=$P FAIL=$F"
   DONE=1
   exit 1
 fi
-ok "L0 $IP:$P1 PING -> PONG"
-echo "    (redis-cli 版本) $("$RC" --version 2>&1)"
+echo "    (redis-cli 版本) $(timeout "$TMO" "$RC" --version 2>&1)"
 
 echo
 echo "############ L1 — 集群健康 ############"
@@ -340,42 +411,98 @@ echo "############ L5 — 分片倾斜（key 落在不同 master 上）#########
 #    所以测「增量」而不是绝对值。
 # ⚠️ 只写 3 个 key 有可能全落在 2 个 master 上（概率不低），
 #    这里写 30 个，落在 ≤2 个 master 上的概率可忽略。
+#
+# ⚠️ DBSIZE 的增量里混着**所有** key —— 不只是我们写的。
+#    所以「增量 == 30」这种精确判据只在**独占集群**时成立：
+#    Task 5 把 HD 应用接上集群之后，应用写的 key 会混进增量，
+#    total 就 > 30 了那时候报「集群丢 key 了」纯属冤枉。
+#    所以下面用「>= 30」：只要我们那 30 个都写进去了就算过，
+#    多出来的（别人的）不归我们管，也不该让这个测试挂掉。
+#    代价是：如果集群**真的**少写了 key，而同时恰好有别人补写了别的 key，
+#    这个判据会看不出来。独占集群时（现在）不存在这个问题；
+#    Task 5 之后这个检查的灵敏度会下降 —— 那时以 Task 5 的应用层断言为准。
 NK=30
-before1=$(r $P1 DBSIZE); before2=$(r $P2 DBSIZE); before3=$(r $P3 DBSIZE)
+before1=$(r $P1 DBSIZE | tr -d '\r'); before2=$(r $P2 DBSIZE | tr -d '\r'); before3=$(r $P3 DBSIZE | tr -d '\r')
 echo "    写前 DBSIZE: $P1=$before1  $P2=$before2  $P3=$before3"
-# 一次连接写完 30 个 key（每条往返 5s 超时下，30 次往返 = 150s，太慢）
-cmds=()
-i=1
-while [ "$i" -le "$NK" ]; do
-  key="hd:test:cluster:spread$i"
-  CLEAN_KEYS+=("$key")
-  cmds+=("SET $key s$i")
-  i=$((i+1))
+# ⚠️ **先验证再算术**：redis-cli 连不上时会返回一句人话
+#    "Could not connect to Redis at ..."，那不是数字。
+#    直接拿它做 $(( )) 会在 set -u 下报 "Could: unbound variable"，
+#    脚本当场崩掉 —— 而且崩的时候计数器还没加，trap 会打印 "FAIL=0"（假绿）。
+#    所以这里先确认三个值都是纯数字，不是就直接报清楚并跳过算术。
+dbsize_ok=1
+for v in "$before1" "$before2" "$before3"; do
+  case "$v" in
+    ''|*[!0-9]*) dbsize_ok=0 ;;
+  esac
 done
-wrote=$(batch_cmds "${cmds[@]}" | grep -c '^OK')
-chk "L5 $NK 个 key 一次写入全部返回 OK" "$wrote" "$NK"
-after1=$(r $P1 DBSIZE); after2=$(r $P2 DBSIZE); after3=$(r $P3 DBSIZE)
-echo "    写后 DBSIZE: $P1=$after1  $P2=$after2  $P3=$after3"
-d1=$((after1-before1)); d2=$((after2-before2)); d3=$((after3-before3))
-total=$((d1+d2+d3))
-echo "    增量: $P1=+$d1  $P2=+$d2  $P3=+$d3  (total=$total)"
-chk "L5 $NK 个 key 全部写入" "$total" "$NK"
-spread=0
-for d in $d1 $d2 $d3; do [ "$d" -gt 0 ] && spread=$((spread+1)); done
-chk "L5 key 分散在 3 个 master 上" "$spread" "3"
-# 分布不能太偏（任一 master 超过 70% 说明槽分配有问题）
-maxd=$d1; [ "$d2" -gt "$maxd" ] && maxd=$d2; [ "$d3" -gt "$maxd" ] && maxd=$d3
-if [ "$NK" -gt 0 ] && [ $((maxd*10)) -le $((NK*7)) ]; then
-  ok "L5 分布不过偏（最大分片 $maxd/$NK ≤ 70%）"
+if [ "$dbsize_ok" -eq 0 ]; then
+  bad "L5 拿不到某个 master 的 DBSIZE（节点没起来？先看 hd-redis-cluster.sh status）"
+  echo "    跳过 L5 的增量/分布计算（拿到的不是数字：'$before1' '$before2' '$before3'）"
+  after1=""; after2=""; after3=""
 else
-  bad "L5 分布过偏（最大分片 $maxd/$NK）—— 槽分配可能有问题"
+  # 一次连接写完 30 个 key（每条往返 5s 超时下，30 次往返 = 150s，太慢）
+  cmds=()
+  i=1
+  while [ "$i" -le "$NK" ]; do
+    key="hd:test:cluster:spread$i"
+    CLEAN_KEYS+=("$key")
+    cmds+=("SET $key s$i")
+    i=$((i+1))
+  done
+  wrote=$(batch_cmds "${cmds[@]}" | grep -c '^OK')
+  chk "L5 $NK 个 key 一次写入全部返回 OK" "$wrote" "$NK"
+  after1=$(r $P1 DBSIZE | tr -d '\r'); after2=$(r $P2 DBSIZE | tr -d '\r'); after3=$(r $P3 DBSIZE | tr -d '\r')
+  echo "    写后 DBSIZE: $P1=$after1  $P2=$after2  $P3=$after3"
+  dbsize_ok=1
+  for v in "$after1" "$after2" "$after3"; do
+    case "$v" in
+      ''|*[!0-9]*) dbsize_ok=0 ;;
+    esac
+  done
+  if [ "$dbsize_ok" -eq 0 ]; then
+    bad "L5 写完之后拿不到某个 master 的 DBSIZE（节点掉了？）"
+    echo "    跳过 L5 的增量/分布计算"
+    after1=""; after2=""; after3=""
+  fi
 fi
-# 每个 master 上都要能读到自己的 key
-r1=$(r $P1 KEYS 'hd:test:cluster:spread*' | grep -c 'hd:test:cluster:spread')
-r2=$(r $P2 KEYS 'hd:test:cluster:spread*' | grep -c 'hd:test:cluster:spread')
-r3=$(r $P3 KEYS 'hd:test:cluster:spread*' | grep -c 'hd:test:cluster:spread')
-echo "    各 master 上的 spread key 数: $P1=$r1  $P2=$r2  $P3=$r3"
-chk "L5 各 master 上的 key 数之和" "$((r1+r2+r3))" "$NK"
+
+if [ "$dbsize_ok" -eq 1 ]; then
+  d1=$((after1-before1)); d2=$((after2-before2)); d3=$((after3-before3))
+  total=$((d1+d2+d3))
+  echo "    增量: $P1=+$d1  $P2=+$d2  $P3=+$d3  (total=$total)"
+  # ⚠️ 用 >= 而不是 ==（见上面「前置条件」那段）：
+  #    增量里可能混着别的客户端写的 key，那不是我们的问题。
+  if [ "$total" -ge "$NK" ]; then
+    ok "L5 $NK 个 key 全部写入（增量 $total >= $NK）"
+  else
+    bad "L5 只写进 $total 个（期望至少 $NK）"
+  fi
+  # 每个 master 上都要能读到自己的 key
+  # ⚠️ 用 KEYS 数**我们自己的** key（名字前缀唯一），不用 DBSIZE 增量 ——
+  #    增量里混着别人的 key，别的客户端一写就可能把分布比例带偏，
+  #    报一个「槽分配有问题」的假 FAIL。
+  r1=$(r $P1 KEYS 'hd:test:cluster:spread*' | grep -c 'hd:test:cluster:spread')
+  r2=$(r $P2 KEYS 'hd:test:cluster:spread*' | grep -c 'hd:test:cluster:spread')
+  r3=$(r $P3 KEYS 'hd:test:cluster:spread*' | grep -c 'hd:test:cluster:spread')
+  echo "    各 master 上的 spread key 数: $P1=$r1  $P2=$r2  $P3=$r3"
+  chk "L5 各 master 上的 key 数之和" "$((r1+r2+r3))" "$NK"
+  # 「key 有没有分散到 3 个 master 上」也用 KEYS 数判断 ——
+  # 用 DBSIZE 增量的话，别的客户端往某个 master 上写一个 key，
+  # 就能让「那个 master 一个都没拿到」的假象被掩盖过去。
+  spread=0
+  for kc in $r1 $r2 $r3; do [ "$kc" -gt 0 ] && spread=$((spread+1)); done
+  chk "L5 key 分散在 3 个 master 上" "$spread" "3"
+  # 分布不能太偏（任一 master 超过 70% 说明槽分配有问题）
+  # ⚠️ 同样基于 KEYS 数（只算我们自己的 key），不受别的客户端影响。
+  maxd=$r1; [ "$r2" -gt "$maxd" ] && maxd=$r2; [ "$r3" -gt "$maxd" ] && maxd=$r3
+  if [ "$NK" -gt 0 ] && [ $((maxd*10)) -le $((NK*7)) ]; then
+    ok "L5 分布不过偏（最大分片 $maxd/$NK ≤ 70%）"
+  else
+    bad "L5 分布过偏（最大分片 $maxd/$NK）—— 槽分配可能有问题"
+  fi
+else
+  echo "    （L5 的增量/分布检查已跳过）"
+fi
 
 echo
 echo "############ L6 — pipeline 在集群下的行为 ############"
@@ -422,12 +549,19 @@ fi
 if [ -z "$local_key" ] && [ "$local_slots_failed" -eq 0 ]; then
   bad "L6 找不到落在本节点槽（$own_ranges）里的 key"
 fi
+# ⚠️ 找不到就**不找替身**了。
+#    早先的版本用 "hd:test:cluster:pipe-fallback" 顶上，但没检查过它的槽
+#    归不归 16379 —— 万一不归，对照组就会因为「key 在别人的槽上」而失败，
+#    报出来的是一个和真因无关的错。现在没有对照组就**明说**，
+#    并把对照组的检查整体跳过（下面的 L6_CONTROL 标志）。
+L6_CONTROL=0
 if [ -z "$local_key" ]; then
-  local_key="hd:test:cluster:pipe-fallback"
+  echo "    没有本节点槽内的 key -> 跳过 L6 对照组（跨槽部分仍然会跑）"
 else
+  L6_CONTROL=1
   echo "    对照组 key: $local_key (slot $local_slot，本节点槽内)"
 fi
-CLEAN_KEYS+=("$local_key")
+[ -n "$local_key" ] && CLEAN_KEYS+=("$local_key")
 
 # --- 准备一个跨槽的 key，并且**真的写进去** ---
 cross_key=""
@@ -455,42 +589,64 @@ if [ -n "$cross_key" ]; then
 fi
 
 # --- 对照组：多条命令**全部**落在本节点槽内 -> 必须一条错都没有 ---
-pipe_local=$(timeout "$TMO" "$RC" -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning --pipe <<EOF 2>&1
+# 没有本节点槽内的 key 时跳过（原因上面已经报过了）。
+if [ "$L6_CONTROL" -eq 1 ]; then
+  pipe_local=$(timeout "$TMO" "$RC" -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning --pipe <<EOF 2>&1
 SET $local_key pv1
 GET $local_key
 SET $local_key pv2
 GET $local_key
 EOF
 )
-echo "    对照组（4 条命令全在本节点槽）的 --pipe 输出:"
-echo "$pipe_local" | sed 's/^/      /'
-if echo "$pipe_local" | grep -q 'errors: 0'; then
-  ok "L6 对照组：本节点槽内的多条命令 pipeline 全部成功（errors: 0）"
+  echo "    对照组（4 条命令全在本节点槽）的 --pipe 输出:"
+  echo "$pipe_local" | sed 's/^/      /'
+  if echo "$pipe_local" | grep -q 'errors: 0'; then
+    ok "L6 对照组：本节点槽内的多条命令 pipeline 全部成功（errors: 0）"
+  else
+    bad "L6 对照组：本节点槽内的 pipeline 居然有错误"
+  fi
+  # ⚠️ --pipe 只打印出错的回复，成功的回复被吞掉；
+  #    所以对照组也要看**回复数** = 发出的命令数，才说明 4 条都回来了。
+  rep_local=$(echo "$pipe_local" | grep -oP 'replies: \K[0-9]+')
+  chk "L6 对照组的回复数 = 发出的命令数" "${rep_local:-0}" "4"
 else
-  bad "L6 对照组：本节点槽内的 pipeline 居然有错误"
+  echo "    （L6 对照组已跳过）"
 fi
-# ⚠️ --pipe 只打印出错的回复，成功的回复被吞掉；
-#    所以对照组也要看**回复数** = 发出的命令数，才说明 4 条都回来了。
-rep_local=$(echo "$pipe_local" | grep -oP 'replies: \K[0-9]+')
-chk "L6 对照组的回复数 = 发出的命令数" "${rep_local:-0}" "4"
 
 # --- 主体：多条命令里**混进跨槽**的 -> 跨槽的那几条必须报 MOVED ---
+# 跨槽的 pipeline 里也放本节点槽的命令（如果找得到），
+# 这样能证明「不是整条 pipeline 全废，而是只有跨槽的那几条失败」。
 if [ -n "$cross_key" ]; then
-  pipe_cross=$(timeout "$TMO" "$RC" -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning --pipe <<EOF 2>&1
+  if [ "$L6_CONTROL" -eq 1 ]; then
+    pipe_cross=$(timeout "$TMO" "$RC" -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning --pipe <<EOF 2>&1
 GET $local_key
 GET $cross_key
 GET $local_key
 GET $cross_key
 EOF
 )
-  echo "    混合（2 本地 + 2 跨槽）的 --pipe 输出:"
+  else
+    pipe_cross=$(timeout "$TMO" "$RC" -h "$IP" -p "$P1" -a "$PASS" --no-auth-warning --pipe <<EOF 2>&1
+GET $cross_key
+GET $cross_key
+EOF
+)
+  fi
+  if [ "$L6_CONTROL" -eq 1 ]; then
+    echo "    混合（2 本地 + 2 跨槽）的 --pipe 输出:"
+  else
+    echo "    全跨槽（2 条）的 --pipe 输出:"
+  fi
   echo "$pipe_cross" | sed 's/^/      /'
   n_moved=$(echo "$pipe_cross" | grep -c 'MOVED')
   err_line=$(echo "$pipe_cross" | grep -oP 'errors: \K[0-9]+')
   err_line=${err_line:-0}
   rep_line=$(echo "$pipe_cross" | grep -oP 'replies: \K[0-9]+')
   rep_line=${rep_line:-0}
-  chk "L6 跨槽命令返回 MOVED 的条数" "$n_moved" "2"
+  n_cmd=2; n_local=0; n_cross=2
+  if [ "$L6_CONTROL" -eq 1 ]; then n_cmd=4; n_local=2; n_cross=2; fi
+  # MOVED 的条数 = **跨槽**命令的条数（不是命令总数）
+  chk "L6 跨槽命令返回 MOVED 的条数" "$n_moved" "$n_cross"
   if [ "${err_line:-0}" -gt 0 ]; then
     ok "L6 跨槽 pipeline 的 errors 计数 > 0（$err_line）"
   else
@@ -498,19 +654,22 @@ EOF
   fi
   # ⚠️ redis-cli --pipe **只打印出错的回复**，成功的回复被吞掉了。
   #    所以「本节点槽的那两条成功了」不能靠看到值来判断，
-  #    要靠回复数：发了 4 条，收到 4 条回复，其中只有 2 条是错误
-  #    —— 另外 2 条（本地槽的）就是成功的。
-  chk "L6 混合 pipeline 的回复数 = 发出的命令数" "$rep_line" "4"
-  if [ "$rep_line" -eq 4 ] && [ "${err_line:-0}" -eq 2 ]; then
-    ok "L6 同一条 pipeline 里本节点槽的命令成功了（4 条命令 - 2 个错误 = 2 条成功）"
+  #    要靠回复数：发了 N 条，收到 N 条回复，其中只有 2 条是错误
+  #    —— 另外 N-2 条（本地槽的）就是成功的。
+  chk "L6 混合 pipeline 的回复数 = 发出的命令数" "$rep_line" "$n_cmd"
+  if [ "$rep_line" -eq "$n_cmd" ] && [ "${err_line:-0}" -eq "$n_cmd" ] && [ "$n_local" -eq 0 ]; then
+    ok "L6 同一条 pipeline 里本节点槽的命令成功了（$n_cmd 条命令 - $err_line 个错误 = $n_local 条成功）"
+  elif [ "$rep_line" -eq "$n_cmd" ] && [ "${err_line:-0}" -eq 2 ] && [ "$n_local" -eq 2 ]; then
+    ok "L6 同一条 pipeline 里本节点槽的命令成功了（$n_cmd 条命令 - 2 个错误 = 2 条成功）"
   else
     bad "L6 同一条 pipeline 里本节点槽的命令应该成功（replies=$rep_line errors=$err_line）"
   fi
-  if [ "$n_moved" -gt 0 ] && [ "${err_line:-0}" -gt 0 ]; then
-    ok "L6 结论：集群模式下不做槽感知的 pipeline，跨槽命令必失败（MOVED）→ 应用必须用 execute(cb)，不能用 executePipelined"
-  else
-    bad "L6 跨槽 pipeline 未按预期失败"
-  fi
+  # ⚠️ 这里**不用** ok/bad 报「结论」—— 结论跟上面的断言是同一批数据，
+  #    再报一次 ok 只会让人以为又多了一项独立的证据，
+  #    而且同一段里出现 FAIL 时还会夹着一个 PASS，看着像矛盾。
+  #    结论用普通注释行输出（不计入 PASS/FAIL）。
+  echo "    结论: 集群模式下不做槽感知的 pipeline，跨槽命令必失败（MOVED）"
+  echo "          → 应用必须用 execute(cb)，不能用 executePipelined"
   echo "    注：JedisClusterConnection.openPipeline() 抛 UnsupportedOperationException"
   echo "        属于客户端库行为，本命令行测试复现不了；"
   echo "        那个 JVM 层面的异常由 Task 5（应用层）验证。"
