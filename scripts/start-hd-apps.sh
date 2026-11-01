@@ -203,12 +203,30 @@ ps -eo pid,args 2>/dev/null | grep -E '[-]jar .*(web-controller|realalarm|rtdata
   | sed 's/\(-jar [^ ]*\).*/\1/' | sed 's/^/  /'
 
 echo "=== per-app startup result ==="
+# ⚠️ 失败计数 -> 退出码。
+#    脚本以前**永远**返回 0，哪怕整批应用全挂了 —— 那等于骗人。
+failed=0
 for name in $LIST; do
   if grep -qE 'Started .* in .* seconds' "$LOG_DIR/$name.log" 2>/dev/null; then
     echo "  OK       $name  $(grep -oE 'Started .* in .* seconds' "$LOG_DIR/$name.log" | tail -1)"
-  elif grep -q 'APPLICATION FAILED TO START' "$LOG_DIR/$name.log" 2>/dev/null; then
-    echo "  FAILED   $name  $(grep -oE 'Description:|Action:' "$LOG_DIR/$name.log" | head -2 | tr '\n' ' ')"
+  elif grep -qE 'APPLICATION FAILED TO START|Application run failed' "$LOG_DIR/$name.log" 2>/dev/null; then
+    # ⚠️ 两种失败串都要认：
+    #    'APPLICATION FAILED TO START' 是 Spring 的标准文案，
+    #    'Application run failed' 是这批 jar 实际用的文案。
+    #    实测（容器里所有 app 日志）：**零**个日志用了前者，
+    #    所有真实失败（commitDataIncreProducer / hisDataProducer / hisDataSend / cd-a）
+    #    用的都是后者 —— 只认前者的分支等于死代码，
+    #    失败的应用会被报成 UNKNOWN("还在启动")，最误导。
+    #    这里把根因（Caused by: ...）带出来。
+    failed=$((failed+1))
+    echo "  FAILED   $name  $(grep -oE 'Caused by: .*' "$LOG_DIR/$name.log" | tail -1)"
   else
-    echo "  UNKNOWN  $name  (no 'Started ... in .* seconds' yet)"
+    echo "  UNKNOWN  $name  (no 'Started ... in ... seconds' yet)"
   fi
 done
+
+if [ "$failed" -gt 0 ]; then
+  echo "!! $failed 个应用启动失败（详见 /opt/hd/logs/<应用名>.log）" >&2
+  exit 1
+fi
+exit 0
