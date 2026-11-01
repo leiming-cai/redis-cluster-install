@@ -15,7 +15,23 @@ set -uo pipefail
 
 REDIS_HOME=/opt/software/redis-8.10.0
 RC="$REDIS_HOME/bin/redis-cli"
-PASS="${HD_CLUSTER_PASS:-HdClusterPw2026}"
+# ⚠️ 密码的语义必须跟 start-hd-apps.sh / hd-redis-cluster.sh **完全一致**：
+#    用 `${VAR-...}`（只认**没设**）而不是 `${VAR:-...}`（没设**或**空串都算）。
+#    显式设了空值是一种"我以为配了"的错误状态，应该报错，
+#    而不是悄悄回退到默认值 —— 那会让操作的人以为设成功了，
+#    实际连上去的是 NOAUTH（三个脚本对同一个空密码给两种解释，
+#    就必然会分叉）。
+if [ -n "${HD_CLUSTER_PASS+set}" ]; then
+  PASS="$HD_CLUSTER_PASS"
+else
+  PASS="HdClusterPw2026"
+fi
+case "$PASS" in
+  '')
+    echo "!! HD_CLUSTER_PASS 是空的 —— 这是配置错误，不是'用默认值'" >&2
+    exit 1
+    ;;
+esac
 # ⚠️ 不要用 `hostname -i`：它返回空格分隔的多个地址。
 # ⚠️ `awk '{print $1}'` 也不行：它打印**每一行**的第一个字段，
 #    多行输出（getent ahosts node1 在这台机器上就是 3 行 STREAM/DGRAM/RAW）
@@ -156,7 +172,10 @@ batch_cmds() {
 
 # ⚠️ **不要把密码打到 stdout**。日志会被贴到 issue / 工单里。
 #    只说密码的**来源**（环境变量设了没），不说值。
-if [ -n "${HD_CLUSTER_PASS:-}" ]; then
+# ⚠️ 用 `${VAR+set}` 判断，跟上面取密码的语义**一致**：
+#    "已设置"包含"设成了空串" —— 但空串在上面已经被拒了，
+#    所以走到这里的一定是个真值。
+if [ -n "${HD_CLUSTER_PASS+set}" ]; then
   PASS_SRC="HD_CLUSTER_PASS 已设置"
 else
   PASS_SRC="HD_CLUSTER_PASS 未设置（用内置默认值）"

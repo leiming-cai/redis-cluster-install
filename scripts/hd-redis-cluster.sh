@@ -24,7 +24,10 @@
 #   0 = 成功
 #   1 = 失败（start：节点没起来 / 组集群失败 / 集群状态没收敛 / 端口被别的节点占着
 #             stop ：有节点连 SIGKILL 都杀不掉
-#             status：集群不是 cluster_state:ok）
+#             status：集群不是 cluster_state:ok
+#             另：HD_CLUSTER_IP 不是单个 IP、或 HD_CLUSTER_PASS 是空的 -> 直接退出 1
+#                 （**stop 不受 IP 检查约束** —— 它靠端口匹配的 pkill 兜底，
+#                   IP 坏了也必须能停集群）
 #   2 = 用法错误（子命令不认识）
 # 下游脚本请用 `&&` 串起来，别只看输出：
 #   bash hd-redis-cluster.sh start && bash hd-cluster-verify.sh
@@ -34,7 +37,23 @@ REDIS_HOME=/opt/software/redis-8.10.0
 RS="$REDIS_HOME/bin/redis-server"
 RC="$REDIS_HOME/bin/redis-cli"
 DATA=/opt/hd/redis-cluster
-PASS="${HD_CLUSTER_PASS:-HdClusterPw2026}"
+# ⚠️ 密码的语义必须跟 start-hd-apps.sh / hd-cluster-verify.sh **完全一致**：
+#    用 `${VAR-...}`（只认**没设**）而不是 `${VAR:-...}`（没设**或**空串都算）。
+#    显式设了空值是一种"我以为配了"的错误状态，应该报错，
+#    而不是悄悄回退到默认值 —— 那会让操作的人以为设成功了，
+#    实际连上去的是 NOAUTH（三个脚本对同一个空密码给两种解释，
+#    就必然会分叉）。
+if [ -n "${HD_CLUSTER_PASS+set}" ]; then
+  PASS="$HD_CLUSTER_PASS"
+else
+  PASS="HdClusterPw2026"
+fi
+case "$PASS" in
+  '')
+    echo "!! HD_CLUSTER_PASS 是空的 —— 这是配置错误，不是'用默认值'" >&2
+    exit 1
+    ;;
+esac
 
 # ⚠️ redis-cli **没有内置的连接超时**：地址不可达时它会一直挂着。
 #    所以凡是"不该被卡住"的调用都必须套 timeout：
@@ -327,23 +346,32 @@ status() {
   return 1
 }
 
-# ⚠️ 拿不到容器 IP 就直接失败：空 IP 传给 redis-cli -h 会报
+# ⚠️ 容器 IP 必须是**单个** IP：多个值（空格分隔或换行分隔）会被
+#    redis-cli -h 当成一个畸形的 host -> 报一个更难懂的错。
+#    空 IP 传给 redis-cli -h 会报
 #    "Could not connect to Redis at :16379: Name or service not known"，
 #    看起来像 DNS 出问题，其实是自己没拿到地址 —— 换个说法，别误导人。
-# ⚠️ 光判空**不够**：HD_CLUSTER_IP 可能是"多个值"（空格分隔或换行分隔），
-#    那会被 redis-cli -h 当成一个畸形的 host -> 报一个更难懂的错。
-#    所以这里要求它是**单个** IP（只含数字和点）。
-case "$ANNOUNCE_IP" in
-  ''|*' '*|*$'\n'*|*[!0-9.]*)
-    echo "!! 容器 IP 解析失败或含多个值: '$ANNOUNCE_IP'" >&2
-    echo "   （getent hosts node1 的输出或 HD_CLUSTER_IP 有问题）" >&2
-    exit 1
-    ;;
-esac
+#
+# ⚠️ 这个检查**只对需要 IP 的子命令生效**（start / status）。
+#    stop **不需要** IP：它的兜底是按端口精确匹配的 pkill
+#    （`pkill -f "redis-server \*:$p"`），跟 IP 无关。
+#    所以 IP 坏了也必须能停集群 —— 否则操作的人设错了 IP，
+#    就连集群都关不掉了。（优雅关闭那步会因为 IP 不对而失败，
+#    然后自然落到 pkill 兜底，这正是想要的行为。）
+require_ip() {
+  case "$ANNOUNCE_IP" in
+    ''|*' '*|*$'\n'*|*[!0-9.]*)
+      echo "!! 容器 IP 解析失败或含多个值: '$ANNOUNCE_IP'" >&2
+      echo "   （getent hosts node1 的输出或 HD_CLUSTER_IP 有问题）" >&2
+      exit 1
+      ;;
+  esac
+}
 
 case "${1:-start}" in
-  start)  start_nodes; create_cluster ;;
+  start)  require_ip; start_nodes; create_cluster ;;
+  # ⚠️ stop 不调 require_ip —— 它靠端口匹配的 pkill 兜底，不需要 IP。
   stop)   stop_cluster ;;
-  status) status ;;
+  status) require_ip; status ;;
   *) echo "usage: $0 {start|stop|status}" >&2; exit 2 ;;
 esac
