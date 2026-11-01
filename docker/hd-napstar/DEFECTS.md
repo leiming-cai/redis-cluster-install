@@ -317,17 +317,51 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块，实测优先级是：
 
 **部署的 jar 早于 2026-10-31 的集群补丁，从来没重新编译过。**
 
-用 `javap` / class 常量池直接查两个产物里的同一个 class：
+**测量方法**（读者可原样复现；在 `hd-node1` 容器内跑）：
+
+```bash
+# 部署产物：monitor-3.0.0.jar 藏在 web-controller-3.0.0.jar 里
+unzip -o -q /opt/napstar_app/web-controller-3.0.0.jar 'BOOT-INF/lib/monitor-3.0.0.jar' -d /tmp/dep
+mkdir -p /tmp/dep/x && unzip -o -q /tmp/dep/BOOT-INF/lib/monitor-3.0.0.jar -d /tmp/dep/x
+
+# 本地产物：直接用编译出来的 monitor-1.0.14.jar
+mkdir -p /tmp/loc/x && unzip -o -q monitor-1.0.14.jar -d /tmp/loc/x
+
+# 三个指标（下面表里用的就是这三个）
+C=/tmp/dep/x/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.class
+javap -c -p "$C" | grep -c 'isCluster:()Z'   # A 集群判定调用点
+javap -p    "$C" | grep -c 'RedisClusterHelper\|RedisClusterHashPipeline'  # B 集群辅助类字段
+strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的条目
+```
+
+- **A 集群判定调用点** = 这个 class **真的问了几次**「我现在是不是集群模式」。
+  `javap` 只在真正的 Methodref 上打印 `isCluster:()Z`，所以这个数就是**调用点**数。
+- **B 集群辅助类字段** = 这个 class **有没有**被塞进集群版的协作对象
+  （`RedisClusterHelper` / `RedisClusterHashPipeline`）。
+  没有这些字段，它就**不可能**有集群分支 —— 这是「有没有打过补丁」最直接的证据。
+- **C 常量池条目数** = 常量池里带 `isCluster` 这个名字的条目数
+  （补丁编译进去的指纹；`strings` 会把常量池里连续的可打印字符拼成一行来数）。
+
+**实测结果**：
 
 | class | 部署产物 `monitor-3.0.0.jar` | 本地产物 `monitor-1.0.14.jar`（2026/10/31 06:33） |
 |---|---|---|
-| `SVGCacheServiceImpl` | `isCluster=0` `RedisClusterHelper=0` | **`isCluster=2` `RedisClusterHelper=2`** |
-| `RTListener` | `isCluster=0` `RedisClusterHelper=0` | **`isCluster=2` `RedisClusterHelper=2`** |
-| `SVGParseService` | `isCluster=0` `RedisClusterHelper=0` | **`isCluster=3` `RedisClusterHelper=2` `RedisClusterHashPipeline=2`** |
-| `CalculateService` | `isCluster=0` `RedisClusterHelper=0` | **`isCluster=2` `RedisClusterHelper=2` `RedisClusterHashPipeline=2`** |
+| `SVGCacheServiceImpl` | A=0  B=0  C=0 | **A=1  B=1  C=4** |
+| `RTListener` | A=0  B=0  C=0 | **A=1  B=1  C=4** |
+| `SVGParseService` | A=0  B=0  C=0 | **A=2  B=2  C=7** |
+| `CalculateService` | A=0  B=0  C=0 | **A=2  B=2  C=7** |
 
-`rtdata-module-3.0.0.jar`（部署产物）里的 `RedisRealDataServiceImpl` 同样是
-`isCluster=0` `RedisClusterHashPipeline=0`。
+> 📌 `SVGParseService` 和 `CalculateService` 的集群分支结构是**一样的**
+> （各 2 处判定、2 个辅助类字段），所以它们的数字**必须相同** —— 上表就是这样的。
+> （早先这里填的 `isCluster=3` / `isCluster=2` 是**手工数的**，跟任何一种可复现的
+> 数法都对不上，已按上面的方法重测。）
+
+`rtdata-module-3.0.0.jar`（部署产物）里的两个 class 同样是 **A=0 B=0 C=0**：
+
+| class | 部署产物 `rtdata-module-3.0.0.jar` |
+|---|---|
+| `RedisRealDataServiceImpl` | A=0  B=0  C=0 |
+| `OmsWriteByKafkaServiceImpl` | A=0  B=0  C=0 |
 
 对照**源码树**（`application/backend/napstarweb`、`platform/backend/realserver`）：
 10 处 `executePipelined` **全部**已经加了 `isCluster()` 集群分支；
@@ -421,16 +455,44 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 于是方法体里抛出来的异常被**封在这个 future 里**，没有任何人观察它 ——
 既不进日志，也不进 stderr。
 
-（`javap` 可见 `RedisRealDataServiceImpl.wirteOmsPip` 上带
-`@Async("consumerRunExecutor")`，所以异常发生在**另一个线程**上，
-调用方更无从察觉。）
+⚠️ **部署产物里 `@Async` 的位置（这是「旧 jar」的属性，不是源码现状）**：
+
+`javap -v` 显示，部署产物 `rtdata-module-3.0.0.jar` 里带 `@Async` 的方法是：
+
+```
+RedisRealDataServiceImpl.wirteOmsPip          -> @Async("consumerRunExecutor")
+OmsWriteByKafkaServiceImpl.batchWirte         -> @Async("consumerRunExecutor")
+OmsWriteByKafkaServiceImpl.batchWirtePip      -> @Async("consumerRunExecutor")
+```
+
+所以在**这个旧 jar** 里，异常发生在 `wirteOmsPip` 所在的**另一个线程**上
+（`@Async` 把它挪到了 `consumerRunExecutor` 线程池），
+调用方（`batchWirtePip`）更无从察觉。
+
+> 📌 **当前源码树里的位置已经不一样了**，别拿源码去推断旧 jar 的行为：
+>
+> | | 部署产物（旧 jar） | 当前源码树 |
+> |---|---|---|
+> | `RedisRealDataServiceImpl.wirteOmsPip` | 带 `@Async` | **不带** `@Async`（类的 javadoc 明写「本类不再标注 @Async」，方法注释写「本方法为同步执行，异常直接抛给调用方」） |
+> | `OmsWriteByKafkaServiceImpl.batchWirte` / `batchWirtePip` | 带 `@Async` | 同样带 `@Async(value = "consumerRunExecutor")`（第 63、183 行） |
+> | 谁 `join()` | **没有人** | `writeWithRetry(...)` 里 `.join()`（第 75、195 行） |
+>
+> 也就是说：**「@Async 挂在 `wirteOmsPip` 上」只是旧 jar 的样子**。
+> 源码已经把 `@Async` 收到 Kafka 写入入口、并补上了 `.join()` ——
+> 重建之后异常就不会再被吞了。
+> 但 D7-b 要记的是**「丢弃 future」这个错误处理习惯本身**：
+> 只要将来又有哪个 `@Async` 方法返回一个没人观察的 future，
+> 同样的静默失败就会再来一次。**这条不会因为重建 jar 而自动消失**，
+> 所以要按「代码约定」修，而不是按「旧 jar 的现状」修。
 
 同一次测量（部署产物 `rtdata-module-3.0.0.jar`）：
 
 ```
-RedisRealDataServiceImpl : isCluster=0  RedisClusterHashPipeline=0  Async=1
-OmsWriteByKafkaServiceImpl : CompletableFuture.join 出现 0 次
+RedisRealDataServiceImpl   : A=0  B=0  C=0   Async=1  consumerRunExecutor=1  CompletableFuture.join=0
+OmsWriteByKafkaServiceImpl : A=0  B=0  C=0   Async=1  consumerRunExecutor=1  CompletableFuture.join=0
 ```
+
+（A/B/C 三个指标的定义见上面 D7-a 的「测量方法」。）
 
 #### 影响面
 
@@ -447,10 +509,18 @@ OmsWriteByKafkaServiceImpl : CompletableFuture.join 出现 0 次
 3. `@Async` 的方法**返回 `CompletableFuture` 时**，异常必须通过
    `join()` / `whenComplete()` 被观察，否则 Spring 不会替你记。
 
-> 📌 源码树里 `OmsWriteByKafkaServiceImpl` 已经改成 `writeWithRetry(...)` +
-> `.join()` 了 —— 但**部署的 jar 还没重建**（见 D7-a）。
-> 也就是说：**D7-a 修完之后，D7-b 才会真正暴露成需要单独修的问题**。
-> 两条都要改，不能以为重建 jar 就完事了。
+> 📌 **源码树里这三条已经做到了**（`writeWithRetry(...)` + `.join()`，
+> 见上面那张对照表），但**部署的 jar 还没重建**（见 D7-a）。
+> 所以：
+> - **重建 jar 之后，当前这个「旧 jar 丢 future」的现场会消失** ——
+>   异常不会再被吞，rtdata-consumer 的失败会变成**看得见**的报错；
+> - 但 D7-b 要立的是**「别再返回一个没人观察的 future」这条约定**。
+>   它不会因为重建 jar 而自动消失：只要将来又有哪个 `@Async` 方法
+>   返回一个没人 `join()` 的 future，同样的静默失败就会再来一次。
+>   建议配一条静态检查（grep 出「返回 `CompletableFuture` 但调用方不 `join()`」）。
+>
+> ⇒ **两条要分开看**：D7-a 是「部署产物过期」，重建即可；
+> D7-b 是「代码约定」，要靠约定 + 检查来防复发。
 
 ---
 
@@ -465,4 +535,4 @@ OmsWriteByKafkaServiceImpl : CompletableFuture.join 出现 0 次
 | D5 | 🟢 | 本轮 | 已修 |
 | D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行** |
 | D7-a | 🔴 | **部署产物过期**（源码 2026-10-31 已打补丁，部署 jar 没重建） | **待修**：重新编译并重新部署 `monitor` + `rtdata-module`；并加 CI 门禁断言部署 jar 里带集群分支 |
-| D7-b | 🔴 | **代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞） | **待修**：显式 join / 记日志。**重建 jar 之后依然存在**，跟 D7-a 是两件事 |
+| D7-b | 🔴 | **代码约定**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞） | **待修**：显式 `join()` / 记日志。源码树**已**改成 `writeWithRetry(...)` + `.join()`，但部署的 jar 还没重建；重建后当前现场消失，**但「别返回没人观察的 future」这条约定要单独立起来**（建议加静态检查） |
