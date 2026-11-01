@@ -40,9 +40,12 @@ ENV REDIS_HOME=/opt/software/redis-8.10.0
 ENV PATH=${JAVA_HOME}/bin:${NACOS_HOME}/bin:${ZOOKEEPER_HOME}/bin:${KAFKA_HOME}/bin:${REDIS_HOME}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # 内存约束 —— 本机只有 3.9GB 内存，门户容器已占 ~380MB
-ENV NACOS_JVM_OPTS="-Xms512m -Xmx1g -Xmn256m"
-ENV KAFKA_HEAP_OPTS="-Xms128M -Xmx256M"
-ENV ZK_HEAP_SIZE="256M"
+# ⚠️ 不设上限的话，这个容器会吃光宿主机内存并触发**宿主机的** OOM killer ——
+#    那会连带杀掉门户容器里的 Nacos（实测踩过：门户 cpsweb 的 OOMKilled=true，
+#    它的 Nacos 就是在 11 小时前被宿主 OOM 杀掉的）。
+ENV NACOS_JVM_OPTS="-Xms256m -Xmx512m -Xmn128m"
+ENV KAFKA_HEAP_OPTS="-Xms64M -Xmx192M"
+ENV ZK_HEAP_SIZE="192M"
 
 VOLUME /opt/napstar_app
 WORKDIR /opt/napstar_app
