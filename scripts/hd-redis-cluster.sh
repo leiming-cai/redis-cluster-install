@@ -21,9 +21,11 @@
 #   bash hd-redis-cluster.sh status    看状态
 #
 # 退出码：
-#   0 = 一切正常
-#   1 = 失败（节点没起来 / 组集群失败 / 集群状态一直没收敛 / 端口被别的节点占着）
-#   2 = 用法错误
+#   0 = 成功
+#   1 = 失败（start：节点没起来 / 组集群失败 / 集群状态没收敛 / 端口被别的节点占着
+#             stop ：有节点连 SIGKILL 都杀不掉
+#             status：集群不是 cluster_state:ok）
+#   2 = 用法错误（子命令不认识）
 # 下游脚本请用 `&&` 串起来，别只看输出：
 #   bash hd-redis-cluster.sh start && bash hd-cluster-verify.sh
 set -uo pipefail
@@ -33,6 +35,16 @@ RS="$REDIS_HOME/bin/redis-server"
 RC="$REDIS_HOME/bin/redis-cli"
 DATA=/opt/hd/redis-cluster
 PASS="${HD_CLUSTER_PASS:-HdClusterPw2026}"
+
+# ⚠️ redis-cli **没有内置的连接超时**：地址不可达时它会一直挂着。
+#    所以凡是"不该被卡住"的调用都必须套 timeout：
+#      - 探活 / 读身份 / SHUTDOWN：TMO（短，失败要快）
+#      - --cluster create：CREATE_TMO（长，这个操作本身就要几十秒）
+#    没有 timeout 的话：HD_CLUSTER_IP 指错了、或者容器 IP 在 start/stop 之间变了，
+#    start 会挂 90 秒，stop 更糟 —— 它卡在 SHUTDOWN 上，永远到不了 pkill 兜底，
+#    结果是节点还活着、数据目录也没清。
+TMO=5
+CREATE_TMO=60
 
 # 容器内可达的地址 —— 必须不是 127.0.0.1
 # ⚠️ 不能用 `hostname -i`：它返回**空格分隔的多个值**（"172.22.0.2 172.22.0.2"），
@@ -52,7 +64,13 @@ MAXMEM=64mb
 #    "Waiting for the cluster to join" 一直等下去，集群组不起来。
 #    所以 bus 端口必须跟客户端端口错开。
 
-rc() { "$RC" -h "$ANNOUNCE_IP" -p "$1" -a "$PASS" --no-auth-warning "${@:2}"; }
+# 普通 redis-cli 调用，**带超时**。
+# ⚠️ 一定要带 timeout：redis-cli 连不上时会一直挂着（实测连 10.99.99.99 直接挂死），
+#    探活、读身份、SHUTDOWN 这几个地方都不能被它拖住。
+rc() { timeout "$TMO" "$RC" -h "$ANNOUNCE_IP" -p "$1" -a "$PASS" --no-auth-warning "${@:2}"; }
+
+# 同上，但可以指定超时（用于 CLUSTER INFO 这种稍微重一点的读）
+rc_t() { local t="$1"; shift; timeout "$t" "$RC" -h "$ANNOUNCE_IP" -p "$1" -a "$PASS" --no-auth-warning "${@:2}"; }
 
 die() { echo "!! $*" >&2; exit 1; }
 
@@ -60,9 +78,14 @@ die() { echo "!! $*" >&2; exit 1; }
 # ⚠️ redis-cli 永远返回 0（连不上也是 0！），所以只能看**输出文本**：
 #    连不上会打 "Could not connect to Redis at ..."，这一行不能当成"有东西在跑"。
 #    不带密码问，这样密码不对的情况也能被认出来（输出是 WRONGPASS / NOAUTH）。
+# ⚠️ timeout 掐掉的（退出码 124）输出是空的 —— 那是"连不上"，
+#    要跟"连上了但返回了奇怪的东西"区分开，所以单独判一下 124。
 port_alive() {
-  local out
-  out="$("$RC" -h "$ANNOUNCE_IP" -p "$1" --no-auth-warning PING 2>&1)"
+  local out rc
+  out="$(timeout "$TMO" "$RC" -h "$ANNOUNCE_IP" -p "$1" --no-auth-warning PING 2>&1)"
+  rc=$?
+  # 124 = timeout 掐掉了 = 不可达，当成"没活着"
+  [ "$rc" -eq 124 ] && return 1
   case "$out" in
     "Could not connect"*|"*Connection refused"*|"*Name or service not known"*|"*No route to host"*|"*Connection timed out"*) return 1 ;;
   esac
@@ -138,8 +161,10 @@ create_cluster() {
   #    所以 REDISCLI_AUTH 不是"必须"，这里两道都带上是因为 --cluster 这个 helper
   #    自己会开一堆连接（每个节点好几句 CLUSTER 命令），两条腿走路更稳。
   local out rc
-  out="$(REDISCLI_AUTH="$PASS" "$RC" -a "$PASS" --no-auth-warning --cluster create $args \
-          --cluster-replicas 0 --cluster-yes 2>&1)"
+  # ⚠️ --cluster create 也要套 timeout：节点不可达时，实测每个节点要等 ~21 秒，
+  #    三个节点就是 60 秒往上。不套的话，配错 IP 的 start 会拖成 90 秒+ 的假死。
+  out="$(timeout "$CREATE_TMO" env REDISCLI_AUTH="$PASS" "$RC" -a "$PASS" --no-auth-warning \
+          --cluster create $args --cluster-replicas 0 --cluster-yes 2>&1)"
   rc=$?
   echo "$out" | tail -20
   echo
@@ -162,7 +187,9 @@ create_cluster() {
   local first="${PORTS%% *}"
   local i st reached=0
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    st="$(rc "$first" CLUSTER INFO 2>/dev/null | grep -m1 '^cluster_state' | tr -d '\r' | cut -d: -f2)"
+    # 这里用长一点的超时：刚 create 完、集群正在收敛，节点可能短暂不响应，
+    # 太短会把"正在收敛"误判成"读不到"。
+    st="$(rc_t 10 "$first" CLUSTER INFO 2>/dev/null | grep -m1 '^cluster_state' | tr -d '\r' | cut -d: -f2)"
     echo "  尝试 $i: cluster_state=$st"
     if [ "$st" = "ok" ]; then reached=1; break; fi
     sleep 3
@@ -188,14 +215,25 @@ stop_cluster() {
   # 那就只能靠后面的 pkill 硬杀 —— 得让操作的人知道是哪种。
   # ⚠️ redis-cli 永远返回 0，所以只能看输出：被拒时输出是
   #    "NOAUTH Authentication required." 或 "WRONGPASS ..."。
+  # ⚠️ SHUTDOWN **成功时输出是空的**（0 字节、退出码 0），
+  #    所以"输出为空"不等于"连不上" —— 得看退出码：
+  #    124 = timeout 掐掉的 = 地址不可达，SHUTDOWN 根本没送出去。
+  local unreachable="" srrc
   for p in $PORTS; do
     out="$(rc "$p" SHUTDOWN NOSAVE 2>&1)"
+    srrc=$?
     case "$out" in
       *NOAUTH*|*WRONGPASS*|*NOPERM*) graceful="$graceful $p" ;;
     esac
+    if [ "$srrc" -eq 124 ]; then
+      unreachable="$unreachable $p"
+    fi
   done
   if [ -n "$graceful" ]; then
     echo "  注意：端口$graceful 的优雅关闭被拒了（多半是 HD_CLUSTER_PASS 跟节点实际密码对不上），这些节点将被强杀。"
+  fi
+  if [ -n "$unreachable" ]; then
+    echo "  注意：端口$unreachable 连不上（$ANNOUNCE_IP 不可达？），优雅关闭没送出去，这些节点将被强杀。"
   fi
   sleep 2
 
@@ -239,7 +277,7 @@ stop_cluster() {
       exit 1
     fi
   fi
-  echo "  $PORTS 上的进程已全部退出。"
+  echo "  已确认停止的端口：$PORTS"
 
   rm -rf "$DATA"
   echo "  数据目录已删除：$DATA"
@@ -260,6 +298,20 @@ status() {
   echo
   echo "=== CLUSTER SLOTS ==="
   rc "$first" CLUSTER SLOTS 2>/dev/null | sed 's/^/  /'
+  echo
+  # ⚠️ 退出码是**故意**判的，不是碰巧：
+  #    之前它靠 pipefail 把 redis-cli 的失败透传出来（连不上时 redis-cli
+  #    对 CLUSTER SLOTS 返回 1），但那纯属副作用 —— 谁要是以后"顺手"给管道
+  #    加个 || true，status 就会在一个坏掉的集群上返回 0，骗人。
+  #    所以这里显式检查 cluster_state。
+  local st
+  st="$(rc "$first" CLUSTER INFO 2>/dev/null | grep -m1 '^cluster_state' | tr -d '\r' | cut -d: -f2)"
+  if [ "$st" = "ok" ]; then
+    echo "  结论：集群正常（cluster_state=ok）。"
+    return 0
+  fi
+  echo "!! 集群不正常（cluster_state=${st:-<读不到，多半是连不上>}）。" >&2
+  return 1
 }
 
 # ⚠️ 拿不到容器 IP 就直接失败：空 IP 传给 redis-cli -h 会报
