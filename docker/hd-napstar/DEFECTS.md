@@ -84,13 +84,89 @@ ERROR ... IllegalStateException: Cannot load driver class: org.postgresql.Driver
 
 | 缺的 dataId | 谁要它 | 后果 | 本轮处理 |
 |---|---|---|---|
-| `ext_base.yaml` | model-controller | 启动失败 `perms is null` | ✅ 脚本补齐 |
-| `share_base.yaml` | model-controller | 没有数据源和 Kafka 配置 | ✅ 脚本补齐 |
+| `ext_base.yaml` | model-controller | ~~启动失败 `perms is null`~~ | ⚠️ **上一轮判断有误，见下方「实测更正」** |
+| `share_base.yaml` | model-controller | ~~没有数据源和 Kafka 配置~~ | ⚠️ **上一轮判断有误，见下方「实测更正」** |
 | `hisdataSend-ext.yaml` | hisDataSend | `Could not resolve placeholder 'hisDataSend.thread-pool-size'` | 🚫 **不补**（那个模块不做修改，预期起不来） |
 
 > `hisdataSend-ext.yaml` 的键集细节（`hisDataSend.*` 与 `hisdataproducer.*` **不一样**，
 > `hisDataSend` 独有 `thread-pool-size`）记在 `NACOS-GAPS.md` 里，
 > 作为将来要支持 `hisDataSend` 时的参考。
+
+### 🔬 实测更正（2026-11-01 第二轮）：这两个 dataId **不是启动必需项**
+
+上一轮的结论是「model-controller 缺这两个 dataId 会启动失败（`perms is null`）」，
+**这个结论是错的**。实测推翻：
+
+**实验**：把上一轮手写的 `ext_base.yaml` / `share_base.yaml` 从 Nacos **删掉**，
+再启动 model-controller：
+
+```
+=== 6) 启动结果 ===
+  ✅ 起来了：Started ModelserverRestApplication in 31.733 seconds
+=== 7) 致命错误 ===
+  （空）
+=== 10) 端口 8090 ===
+  HTTP 200
+```
+
+**为什么**：`model-controller` 的 dataId 加载顺序是
+
+```
+bootstrapProperties-icms-controller.yaml,MODELSERVER_GROUP   ← 应用自己的
+bootstrapProperties-icms-controller,MODELSERVER_GROUP
+bootstrapProperties-napstarmappingconfig.yaml,DEFAULT_GROUP
+bootstrapProperties-ext_base.yaml,DEFAULT_GROUP
+bootstrapProperties-share_base.yaml,DEFAULT_GROUP
+```
+
+而**安装包自带的 `icms-controller.yaml` 里本来就全都有**：
+
+| 键 | 在 `icms-controller.yaml` 里？ | 谁读 |
+|---|---|---|
+| `shiroconfig.perms` | ✅ 有 | `ShiroConfig`（jar 里） |
+| `import.commit.filepath` / `.templatepath` | ✅ 有 | `Configuration.java` |
+| `dashboard.nacos` / `.jmx` | ✅ 有 | `BaseDataVersionController.java` |
+| `oms.*` / `orm.*` / `task.*` | ✅ 有 | `OrmPropertiesConfig` 等 |
+| `spring.datasource.*`（info/cmt/sac） | ✅ 有 | `InfoDataSourceConfig` |
+| `spring.redis.*` / `spring.cache.*` | ✅ 有 | — |
+
+→ **缺的从来不是这两个 dataId，而是上一个会话自己写的那个手写版覆盖掉了它们的一部分。**
+
+**手写版反而更差**（把真配置里有的东西删了）：
+
+| 手写版的问题 | 后果 |
+|---|---|
+| `ext_base.yaml` 删掉了 `shiroconfig` | 真配置里有 → 靠 `icms-controller.yaml` 兜住 |
+| `ext_base.yaml` 删掉了 `import:` / `dashboard:` / `svg:` / `commitdata:` / `alarmParam:` 等 | 同上 |
+| `ext_base.yaml` 顶层键写成 `hisdataproducer:` | 死键 —— 代码读的是 `${hisdata.path}` / `${hisdata.bak}` / `${hisdata.delTime}`（`hisdataSend`）和 `${hisdataproducer.*}`（`hisDataProducer`，来自 `hisdataproducer-ext.yaml`）→ **两组键互不相干** |
+| `share_base.yaml` 删掉了 `spring.redis` / `spring.cache` / `logging.*` / `mybatis.mapper-locations` / `mybatis.log-impl` / kafka 的 serializer | 同上 |
+| `share_base.yaml` 的 kafka 段只有 `bootstrap-servers`，**没有 producer/consumer 的 serializer** | Kafka 消息格式可能不对（真配置里有 `StringSerializer` / `StringDeserializer`） |
+
+**有效配置的证据**（删掉手写版后的启动日志，反而更接近真实）：
+
+```
+Using Redis Standalone at node1:6379 (connectTimeout=5000ms, ...)
+jmxUrl: {}          ← 来自 icms-controller.yaml 的 dashboard.jmx
+```
+
+> ⚠️ 注意 `jmxUrl: {}` 是**空的** —— 因为 `dashboard.jmx` 在 `icms-controller.yaml` 里是
+> `node1:9998`，但 `KafkaJmxConnection` 读的是**另一个键**。这是安装包自身的小问题，
+> 与 D2 无关。
+
+### 结论
+
+- **D2 的前提（"缺这两个 dataId 导致启动失败"）不成立** —— 实测删掉它们照样能起。
+- 真正的缺口是：`ext_base.yaml` / `share_base.yaml` **这两个 dataId 名在安装包里不存在**，
+  而华盾树的 `bootstrap.yml` 引用了它们 → **Spring Cloud 会对不存在的 dataId 报错/告警**，
+  属于「配置声明与实际不一致」，但**不阻断启动**。
+- **手写补齐这个做法本身是错的**（造了一份更差的配置覆盖真配置）。
+  正确做法是：**要么改华盾树的 `bootstrap.yml` 不引用它们，
+  要么在安装包里补上真正的这两个文件**（内容应对齐 `icms-controller.yaml`）。
+
+> 📌 本轮**仍未定**：这两个 dataId 到底该
+> (a) 从 `bootstrap.yml` 里去掉引用（改代码），还是
+> (b) 在安装包里补上正确内容（改交付物）？
+> 需要产品/交付方确认。
 
 ---
 
@@ -178,7 +254,7 @@ entrypoint 的提交记录。`node2` 必须指向 hd-node2 容器的**真实 IP*
 | # | 严重度 | 谁引入 | 状态 |
 |---|---|---|---|
 | D1 | 🔴 | **上一轮 PG 迁移** | **🚫 不修**（用户决定：`hisDataProducer` / `hisDataSend` 不做修改）→ 这两个应用在本环境预期起不来，属已知且已接受 |
-| D2 | 🟡 | 安装包 | 本轮用脚本补齐（`import-hd-nacos-configs.sh`） |
+| D2 | 🟡 | 安装包 | ⚠️ **实测更正**：手写补齐的做法是错的（覆盖了真配置）。真缺口只是「dataId 名对不上」，不阻断启动 → 处理方式待定 |
 | D3 | 🟡 | 安装包 | 本轮部署时补（`pg_hba.conf` + reload） |
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |

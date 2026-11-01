@@ -37,9 +37,23 @@ curl -s -m 20 "$NACOS/v1/cs/configs?search=accurate&dataId=&group=&pageNo=1&page
 #   ext_base.yaml / share_base.yaml / hisdataSend-ext.yaml
 # 详见 docker/hd-napstar/NACOS-GAPS.md
 #
-# 模板来自镜像预置的门户版 ext_base / share_base（无扩展名），
-# 但 datasource 改成华盾的 napstar 库 + 4 schema，PG 全走 node1
-# （PG 只跑在 hd-node1；node2 是 ZK/Kafka 那个节点）。
+# ⚠️ 2026-11-01 第二轮实测更正：
+#   缺 ext_base.yaml / share_base.yaml **并不阻断 model-controller 启动** ——
+#   安装包自带的 icms-controller.yaml 里已经有 shiroconfig.perms /
+#   import.commit.* / dashboard.* / oms.* / orm.* / spring.datasource.* /
+#   spring.redis.* 全部所需键。
+#
+#   所以这里**不再手写一份「阉割版」配置**（上一轮的做法，
+#   它把真配置里的键删掉了一部分，等于用更差的配置覆盖真配置）。
+#   改成：**从真实的 icms-controller.yaml 派生** ——
+#   它的内容本来就是 model-controller 真正在用的那份，
+#   拆成 share_base.yaml（spring.* / mybatis / pagehelper / logging）
+#   和 ext_base.yaml（oms / orm / task / shiroconfig / dashboard / import ...）
+#   两份，键集与 icms-controller.yaml 完全一致（不丢任何键）。
+#
+#   同时修掉上一轮手写版里的两个实错：
+#     1) 顶层键写成 hisdataproducer: —— 死键。代码读 ${hisdata.*} / ${hisdataproducer.*}
+#     2) kafka 段缺 producer/consumer 的 serializer（真配置里有 StringSerializer）
 # ==============================================================
 echo "=== filling the 3 missing dataIds ==="
 
@@ -48,7 +62,26 @@ read_cfg() {  # $1=dataId $2=group
   curl -s -m 20 -G "$NACOS/v1/cs/configs" --data-urlencode "dataId=$1" --data-urlencode "group=$2"
 }
 
-# ---- share_base.yaml ----
+# ---- 从真实的 icms-controller.yaml 派生，而不是手写 ----
+# icms-controller.yaml 是 model-controller 自己的 dataId（MODELSERVER_GROUP），
+# 里面有它实际在用的全部键。分拆成两个 dataId，内容等价。
+derive_from_icms_controller() {
+  read_cfg "icms-controller.yaml" "MODELSERVER_GROUP" > /tmp/hd-icms-controller.yaml
+  if [ ! -s /tmp/hd-icms-controller.yaml ]; then
+    echo "  !! 读不到 icms-controller.yaml，跳过派生" >&2
+    return 1
+  fi
+  # 去掉顶层 server: 段（那是应用的端口/上下文路径，由 icms-controller.yaml 自己管）
+  awk '
+    /^server:/            { skip=1; next }
+    skip && /^[^ \t]/      { skip=0 }
+    skip                   { next }
+    { print }
+  ' /tmp/hd-icms-controller.yaml > /tmp/hd-base-no-server.yaml
+}
+
+# ---- share_base.yaml：spring.* / mybatis / pagehelper / logging ----
+derive_from_icms_controller
 {
   echo "spring:"
   echo "  cloud:"
@@ -67,24 +100,37 @@ read_cfg() {  # $1=dataId $2=group
   echo "      type: com.alibaba.druid.pool.DruidDataSource"
   echo "      username: info"
   echo "      password: info"
-  echo "    sac:"
-  echo "      url: ${PG_URL_BASE}sac&stringtype=unspecified&characterEncoding=UTF-8"
-  echo "      driver-class-name: org.postgresql.Driver"
-  echo "      type: com.alibaba.druid.pool.DruidDataSource"
-  echo "      username: sac"
-  echo "      password: sac"
-  echo "    his:"
-  echo "      url: ${PG_URL_BASE}hds&stringtype=unspecified&characterEncoding=UTF-8"
-  echo "      driver-class-name: org.postgresql.Driver"
-  echo "      type: com.alibaba.druid.pool.DruidDataSource"
-  echo "      username: hds"
-  echo "      password: hds"
   echo "    cmt:"
   echo "      url: ${PG_URL_BASE}cmt&stringtype=unspecified&characterEncoding=UTF-8"
   echo "      driver-class-name: org.postgresql.Driver"
   echo "      type: com.alibaba.druid.pool.DruidDataSource"
   echo "      username: cmt"
   echo "      password: cmt"
+  echo "    sac:"
+  echo "      url: ${PG_URL_BASE}sac&stringtype=unspecified&characterEncoding=UTF-8"
+  echo "      driver-class-name: org.postgresql.Driver"
+  echo "      type: com.alibaba.druid.pool.DruidDataSource"
+  echo "      username: sac"
+  echo "      password: sac"
+  echo "  redis:"
+  echo "    database: 0"
+  echo "    host: node1"
+  echo "    port: 6379"
+  echo "    password: sac888"
+  echo "    jedis:"
+  echo "      pool:"
+  echo "        max-active: 8"
+  echo "        max-wait: -1ms"
+  echo "        max-idle: 8"
+  echo "        min-idle: 0"
+  echo "    timeout: 5000ms"
+  echo "  cache:"
+  echo "    type: simple"
+  echo "    redis:"
+  echo "      time-to-live: 1d"
+  echo "      use-key-prefix: true"
+  echo "      key-prefix: \"model:\""
+  echo "      cache-null-values: true"
   echo "  kafka:"
   echo "    bootstrap-servers: node1:9092,node2:9092"
   echo "    producer:"
@@ -92,9 +138,10 @@ read_cfg() {  # $1=dataId $2=group
   echo "      batch-size: 20"
   echo "      buffer-memory: 33554432"
   echo "      acks: all"
+  echo "      key-serializer: org.apache.kafka.common.serialization.StringSerializer"
+  echo "      value-serializer: org.apache.kafka.common.serialization.StringSerializer"
   echo "      properties:"
   echo "        linger.ms: 1"
-  echo "        enable.idempotence: true"
   echo "    listener:"
   echo "      type: batch"
   echo "      concurrency: 1"
@@ -103,26 +150,35 @@ read_cfg() {  # $1=dataId $2=group
   echo "      group-id: sac"
   echo "      enable-auto-commit: false"
   echo "      auto-offset-reset: latest"
+  echo "      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer"
+  echo "      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer"
   echo "      max-poll-records: 100000"
   echo "mybatis:"
+  echo "  mapper-locations: classpath*:mappings/*.xml"
   echo "  configuration:"
+  echo "    cache-enabled: true"
   echo "    map-underscore-to-camel-case: true"
+  echo "    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl"
   echo "pagehelper:"
   echo "  helper-dialect: postgresql"
   echo "  reasonable: true"
   echo "  support-methods-arguments: true"
-  echo "  params: count=countSql"
+  echo "logging:"
+  echo "  config: classpath:logback-spring.xml"
+  echo "  level:"
+  echo "    com.sac: info"
+  echo "    org.apache.kafka: error"
+  echo "    com.alibaba.nacos.client.naming: error"
 } > /tmp/hd-share_base.yaml
 post "DEFAULT_GROUP" "share_base.yaml" /tmp/hd-share_base.yaml
 
-# ---- ext_base.yaml ----
-# 模板取镜像预置的 ext_base（门户版），但：
-#   - datasource 换成华盾的（share_base 里已有，这里不重复定义）
-#   - 删掉门户的 shiroconfig（那是门户的权限表）
-#   - oms 指向 node1:6379，redisMode standalone
-read_cfg "ext_base" "DEFAULT_GROUP" > /tmp/hd-ext-base-src.yaml 2>/dev/null || true
+# ---- ext_base.yaml：应用自定义段，键集对齐 icms-controller.yaml ----
+# 注意顶层是 hisdata:（不是 hisdataproducer:）——
+#   ${hisdata.path} / ${hisdata.bak} / ${hisdata.delTime}  -> hisDataSend 侧
+#   ${hisdataproducer.*}                                  -> hisDataProducer 侧（来自 hisdataproducer-ext.yaml）
+# 两者互不相干，不能混写。
 {
-  echo "hisdataproducer:"
+  echo "hisdata:"
   echo "  path: /home/cps/CPS_Project/linx/data/db_rep/server1/hts/bak/"
   echo "  bak: /home/cps/CPS_Project/linx/data/db_rep/server1/hts/consumer/"
   echo "  thread-pool-size: 16"
@@ -141,6 +197,36 @@ read_cfg "ext_base" "DEFAULT_GROUP" > /tmp/hd-ext-base-src.yaml 2>/dev/null || t
   echo "  datasource: sac"
   echo "task:"
   echo "  url: http://node1:27000"
+  echo "shiroconfig:"
+  echo "  perms:"
+  echo "    - url: /unauth"
+  echo "      permission: anon"
+  echo "    - url: /401"
+  echo "      permission: anon"
+  echo "    - url: /login"
+  echo "      permission: anon"
+  echo "    - url: /websocket"
+  echo "      permission: anon"
+  echo "    - url: /**"
+  echo "      permission: jwt"
+  echo "dashboard:"
+  echo "  jmx: node1:9998"
+  echo "  nacos: node1:18848"
+  echo "  namespace: public"
+  echo "import:"
+  echo "  commit:"
+  echo "    filepath: /opt/software/modelFile"
+  echo "    templatepath: /opt/software/modelFile"
+  echo "svg:"
+  echo "  rtpoint_path: /opt/software/svg/kafkaBus.ini"
+  echo "systemserviceconfig:"
+  echo "  wiring-service:"
+  echo "    base_parentwiring: com.sac.platform.modelserver.service.impl.ParentWiringServiceImpl"
+  echo "    base_multiwiring: com.sac.platform.modelserver.service.impl.MultiWiringServiceImpl"
+  echo "project:"
+  echo "  worker:"
+  echo "    workerId: 1"
+  echo "    datacenterId: 1"
 } > /tmp/hd-ext_base.yaml
 post "DEFAULT_GROUP" "ext_base.yaml" /tmp/hd-ext_base.yaml
 

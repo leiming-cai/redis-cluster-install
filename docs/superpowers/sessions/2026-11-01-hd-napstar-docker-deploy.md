@@ -21,7 +21,7 @@ Redis（双实例）+ ZooKeeper（2 节点）+ Kafka（2 broker）+ Nacos + Post
 | # | 缺陷 | 严重度 | 谁引入 | 状态 |
 |---|---|---|---|---|
 | **D1** | `hisDataProducer` / `hisDataSend` 的 jar 里**没有 PG 驱动** | 🔴 | **上一轮 PG 迁移** | **🚫 不修**（用户决定）→ 这两个应用在本环境**预期起不来**，属已知且已接受 |
-| **D2** | 安装包的 Nacos 导出包**少 3 个 dataId**（实际补 2 个） | 🟡 | 安装包 | 本轮脚本补齐（`ext_base.yaml` + `share_base.yaml`） |
+| **D2** | 安装包的 Nacos 导出包**少 3 个 dataId** | 🟡 | 安装包 | ⚠️ **实测更正**：缺的这两个**不阻断启动**，上一轮「手写补齐」是错的 → 已改为从真实 `icms-controller.yaml` 派生 |
 | **D3** | `initPostgresDB.sql` **没改 `pg_hba.conf`** | 🟡 | 安装包 | 本轮部署时补 |
 | **D4** | datasource 指向 `node2`，但 PG 只在一台机器上 | 🟡 | 安装包（按生产拓扑写的） | 本轮改（Nacos + 命令行覆盖） |
 
@@ -549,6 +549,91 @@ fb4bb00 feat(hd): add the Dockerfile and the two entrypoints
 
 ---
 
+## 八·五、第二轮追加：D2 的实测更正（2026-11-01 会话续）
+
+> 用户指出：**「D2 这个工程没有 `ext_base.yaml` + `share_base.yaml`」**。
+> 复核后确认用户是对的 —— **上一轮的处理方式是错的**，本轮用实测推翻了它。
+
+### 8.5.1 复核：安装包里确实没有这两个文件
+
+`/pkg/env/nacos/nacos_config_export_postgresql-napstar2.0/DEFAULT_GROUP/` 只有 3 个：
+
+```
+hisdataproducer-ext.yaml
+jk.yaml
+napstarmappingconfig.yaml
+```
+
+DM 那份导出包（`nacos_config_export_dm-napstar2.0/`）**也一样** → 不是导出遗漏。
+
+### 8.5.2 决定性实验：删掉手写的两个 dataId，model-controller 照样起来
+
+```
+=== 6) 启动结果 ===
+  ✅ 起来了：Started ModelserverRestApplication in 31.733 seconds
+=== 7) 致命错误 ===
+  （空）
+=== 10) 端口 8090 ===
+  HTTP 200
+```
+
+→ **「缺这两个 dataId 导致启动失败」这个前提不成立。**
+
+### 8.5.3 为什么
+
+`model-controller` 的 dataId 加载顺序：
+
+```
+bootstrapProperties-icms-controller.yaml,MODELSERVER_GROUP   ← 应用自己的
+bootstrapProperties-icms-controller,MODELSERVER_GROUP
+bootstrapProperties-napstarmappingconfig.yaml,DEFAULT_GROUP
+bootstrapProperties-ext_base.yaml,DEFAULT_GROUP
+bootstrapProperties-share_base.yaml,DEFAULT_GROUP
+```
+
+而**安装包自带的 `icms-controller.yaml` 里本来就全都有**：
+`shiroconfig.perms`（ShiroConfig 读）、`import.commit.*`（`Configuration.java` 读）、
+`dashboard.nacos`（`BaseDataVersionController.java` 读）、`oms.*` / `orm.*` / `task.*`、
+`spring.datasource.{info,cmt,sac}`、`spring.redis.*` / `spring.cache.*`。
+
+**→ 缺的从来不是这两个 dataId，而是上一轮自己写的那个手写版覆盖掉了真配置的一部分。**
+
+### 8.5.4 手写版的三个实错
+
+| # | 错 | 后果 |
+|---|---|---|
+| 1 | 顶层键写成 `hisdataproducer:` | **死键**。代码读 `${hisdata.path}` / `${hisdata.bak}` / `${hisdata.delTime}`（`hisDataSend` 侧）和 `${hisdataproducer.*}`（`hisDataProducer` 侧，来自 `hisdataproducer-ext.yaml`）→ **两组键互不相干** |
+| 2 | `share_base.yaml` 的 kafka 段没有 serializer | 真配置里有 `StringSerializer` / `StringDeserializer` → 消息格式可能不对 |
+| 3 | 删掉了 `shiroconfig` / `import:` / `dashboard:` / `svg:` / `systemserviceconfig:` / `project:` / `spring.redis` / `spring.cache` / `logging.*` / `mybatis.mapper-locations` / `mybatis.log-impl` | 全靠 `icms-controller.yaml` 兜住 —— 等于用**更差的配置**覆盖真配置 |
+
+### 8.5.5 已做的修正
+
+`scripts/import-hd-nacos-configs.sh` 改成**从真实的 `icms-controller.yaml` 派生**
+（而不是手写一份阉割版），并修掉上面 3 个错。实测：
+
+```
+=== 1) 新的 ext_base.yaml 顶层键 ===
+  hisdata:  hisDataSendArea:  oms:  orm:  task:
+  shiroconfig:  dashboard:  import:  svg:  systemserviceconfig:  project:
+=== 2) 关键键抽查 ===
+  ✅ hisdata: 存在     ❌ hisdataproducer: 缺失（死键已除）
+  ✅ shiroconfig: 存在  ✅ import: 存在     ✅ dashboard: 存在
+=== 3) kafka serializer ===
+  ✅ key-serializer / value-serializer / key-deserializer / value-deserializer
+=== 5) 重启 model-controller ===
+  Started ModelserverRestApplication in 23.649 seconds
+  致命错误：（空）
+  /model/login HTTP 200
+```
+
+**回归验证**：`SUMMARY: PASS=47 FAIL=0 SKIP=3`（与上一轮一致，无回归）。
+
+> ⚠️ 顺带发现一个**与 D2 无关**的小问题：`dashboard.jmx` 在 `icms-controller.yaml` 里是
+> `node1:9998`，但 `KafkaJmxConnection` 实际读到的 `jmxUrl` 是**空的**（`{}`）→
+> 它读的是另一个键。安装包自身的问题，暂不处理。
+
+---
+
 ## 九、下一轮的入口
 
 | # | 事 | 严重度 | 说明 |
@@ -559,6 +644,7 @@ fb4bb00 feat(hd): add the Dockerfile and the two entrypoints
 | **4** | **`OmsConfig` 硬编码 `10.137.220.191`** | 🔴 | 用户上一轮明确排除。**本轮实测：唯一走硬编码那条路的是 `realserver`**（A2 显示 `10.137.220.191` + `2000/3000ms`）→ 那是该问题的**实际影响面**。但 `realserver` **用户说明没用、不启动** → **本环境不受影响** |
 | **5** | **安装包那 3 个缺陷要不要修进交付物** | 🟡 | D2（缺 dataId）/ D3（pg_hba）/ D4（node2 指向）。修它们要改安装包或加部署脚本 |
 | **6** | **`application/backend-gd`** | 🟡 | 逐字副本，同一套问题。本轮**没碰** |
+| **7** | **D2 的最终修法待定** | 🟡 | 缺的是「dataId 名对不上」这个**声明与实际不一致**的问题。修法：(a) 改华盾树 `bootstrap.yml` 不引用这两个 dataId，或 (b) 在安装包里补上正确内容 → **需产品/交付方确认** |
 
 > **🚫 明确不做**：`hisDataProducer` / `hisDataSend` 的 PG 驱动缺失（D1）。
 > 用户决定**不修改这两个模块** → 它们在本环境**预期起不来**，

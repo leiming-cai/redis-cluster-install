@@ -2,6 +2,11 @@
 
 > 2026-11-01 实测。**安装包自带的 Nacos 导出包不完整** ——
 > 华盾树的 `bootstrap.yml` 引用了 3 个 **不存在** 的 dataId。
+>
+> ⚠️ **2026-11-01 第二轮实测更正**（见文末「🔬 实测更正」）：
+> 缺这两个 dataId **并不阻断 model-controller 启动** ——
+> 安装包自带的 `icms-controller.yaml` 里已经有全部所需键。
+> 上一轮「手写补齐」的做法**反而覆盖掉了真配置**，是错的。
 
 ## 一、事实
 
@@ -34,13 +39,16 @@
 
 | 缺的 dataId | 谁要它 | 后果 |
 |---|---|---|
-| **`ext_base.yaml`** | model-controller（`extension-configs`） | **启动失败**：`NullPointerException: Cannot invoke "java.util.List.forEach(...)" because "perms" is null`（ShiroConfig 读 `shiroconfig.perms`，而空配置让它是 null） |
-| **`share_base.yaml`** | model-controller（`shared-configs`） | 同上 —— 而且 `share_base` 决定 `spring.datasource.*` / `spring.kafka.*`，缺了就没有数据源和 Kafka |
+| **`ext_base.yaml`** | model-controller（`extension-configs`） | ⚠️ **实测：不阻断启动** —— 见文末「实测更正」。真正的后果只是「声明与实际不一致」（Spring Cloud 对缺失 dataId 告警） |
+| **`share_base.yaml`** | model-controller（`shared-configs`） | ⚠️ **实测：不阻断启动** —— 同上 |
 | **`hisdataSend-ext.yaml`** | hisDataSend（`extension-configs`） | hisDataSend 拿不到 `hisdataproducer` 的扩展配置 |
 
 > ⚠️ **注意 dataId 的扩展名**：华盾树用的是 **带 `.yaml`** 的名字
 > （`ext_base.yaml`），而镜像里预置的是**不带扩展名**的 `ext_base` ——
 > **两个不同的 dataId**，Spring Cloud 不会互相 fallback。
+>
+> ⚠️ 但**不带扩展名的那两个（`ext_base` / `share_base`）是门户的配置**，
+> `share_base` 的 datasource 指向 `webdb:5432/cpspg`（门户库）→ **不能给华盾直接用**。
 
 ### 1.4 镜像预置的 Nacos 是什么
 
@@ -74,13 +82,14 @@ url: jdbc:postgresql://webdb:5432/cpspg?...
 > 而那个模块**用户决定不做修改**（jar 里没有 PG 驱动，预期起不来，
 > 见 [`DEFECTS.md`](DEFECTS.md) D1）→ 这个 dataId 对本轮没有任何作用。
 >
-> 实际补的是 **2 个**：`ext_base.yaml` + `share_base.yaml`。
+> ⚠️ 上一轮「实际补的是 2 个：`ext_base.yaml` + `share_base.yaml`」——
+> **这个做法已被实测推翻，见 §三「实测更正」**。
 
-## 三、本轮怎么处理的
+## 三、上一轮的处理（⚠️ 已实测推翻）
 
 **不改华盾树、不改安装包**（本轮是「验证」，不是「改造」）。
 
-处理办法：**用「门户版」的两个 dataId 作为模板，生成华盾版的**：
+上一轮的处理办法是：**用「门户版」的两个 dataId 作为模板，手写生成华盾版的**：
 
 - `ext_base.yaml` ← 门户的 `ext_base`，但把 `datasource` / `oms` 等**指向华盾的值**
   （`napstar` 库 + 4 schema + `node1:6379`），并**去掉 `shiroconfig`**（那是门户的）
@@ -90,6 +99,38 @@ url: jdbc:postgresql://webdb:5432/cpspg?...
 
 > 生成脚本：`scripts/import-hd-nacos-configs.sh`（负责导入 + 补齐这 2 个 +
 > 把 `node2:5432` 改写成 `node1:5432`）。
+
+### 🔬 实测更正（2026-11-01 第二轮）：这个做法是**错的**
+
+**实验**：把这两个手写 dataId 从 Nacos 删掉，再启 model-controller：
+
+```
+✅ Started ModelserverRestApplication in 31.733 seconds
+致命错误：（空）
+/model/login HTTP 200
+```
+
+**→ 缺这两个 dataId 根本不阻断启动。** 原因：**安装包自带的
+`icms-controller.yaml` 里本来就全都有** `shiroconfig.perms` /
+`import.commit.*` / `dashboard.*` / `oms.*` / `orm.*` / `spring.datasource.*` /
+`spring.redis.*` —— 而手写版把这些**删掉了一部分**，等于用一份**更差的配置**
+去覆盖真配置。
+
+**手写版的两个实打实的错**：
+
+1. `ext_base.yaml` 顶层键写成 `hisdataproducer:` —— **死键**。
+   代码读的是 `${hisdata.path}` / `${hisdata.bak}` / `${hisdata.delTime}`
+   （`hisDataSend` 侧）和 `${hisdataproducer.*}`（`hisDataProducer` 侧，
+   来自 `hisdataproducer-ext.yaml`）→ **两组键互不相干**。
+2. `share_base.yaml` 的 kafka 段**没有 producer/consumer 的 serializer**
+   （真配置里有 `StringSerializer` / `StringDeserializer`）。
+
+**正确的处理方式（待定）**：
+
+- (a) 改华盾树的 `bootstrap.yml`，**不引用**这两个 dataId；或
+- (b) 在**安装包**里补上正确的这两个文件（内容对齐 `icms-controller.yaml`）。
+
+> 📌 需要产品/交付方确认走哪条路。
 
 ## 四、华盾版的 datasource 该长什么样
 
