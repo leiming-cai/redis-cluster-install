@@ -293,14 +293,36 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块，实测优先级是：
 
 ---
 
-## 🔴 D7（集群模式接入实测）部署的 jar 早于集群补丁 —— 集群模式下功能静默失效
+## 🔴 D7（集群模式接入实测）集群补丁从未进入 napstar2.0 交付树 —— 集群模式下功能静默失效
 
 > **2026-11-01 实测**（`scripts/hd-cluster-app-test.sh`，三个应用各一条判据）。
 > 本条记录两个**互相独立**的缺陷：
-> **D7-a** 是部署产物过期，**D7-b** 是代码本身漏了错误处理。
-> D7-b **在重建 jar 之后依然存在**，所以两条必须分开记、分开修。
+> **D7-a** 是交付树里根本没有集群分支，
+> **D7-b** 是交付树里写路径的异常处理会把失败吞掉。
+> 两条**都在交付树（树 A）里**，也都**不是**「重新编译一下」能解决的 ——
+> D7-a 要**移植补丁**，D7-b 要**移植 `.join()`**。
+> 而且它们是**叠加**的：只修 D7-a，失败照样静默。
 
-### D7-a — 部署的 jar 没有集群分支（补丁没编译进去）
+### ⚠️ 先说清楚：机器上有**两棵** napstar2.0 源码树
+
+这是本条分析错过的根源 —— 「源码树」这个说法**有歧义**，
+两棵树里**有一堆同名同路径的文件**（`application/backend/napstarweb/...`、
+`platform/backend/realserver/...`），但内容不同。
+
+| | **树 A** | **树 B** |
+|---|---|---|
+| 路径 | `D:\work\info\web\extendsystem\华盾-napstar2.0\code` | `D:\javawork\1.2\cpscloud1.0\code` |
+| 是什么 | **napstar2.0 交付树** | **门户 / SVN 工作副本**（`cpscloud1.0`） |
+| 上一级目录里有 | `install/`（`web-3.2.2.zip`、`web_3.2.3.zip` 等发布包）、`doc/`、交付用的 `.docx`/`.doc` | `.svn/`、`svn.log`、`doc/` |
+| 产出的 `monitor` jar | `monitor-3.0.0.jar`（467531 字节，2026/11/1 00:18） | `monitor-1.0.14.jar`（564353 字节，2026/10/31 06:33） |
+| **是不是交付出去的那个** | **是**（见下面的 md5） | 否 |
+
+> 📌 **本次部署用的 jar 就是树 A 编译出来的**，
+> 而**集群补丁只在树 B 里**（详见 D7-a）。
+> 所以本文里凡是提到「交付树」「portal/SVN 树」，都指上表这两棵，
+> 不再用含糊的「源码树」。
+
+### D7-a — 集群补丁从未进入 napstar2.0 交付树
 
 #### 现象
 
@@ -315,20 +337,88 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块，实测优先级是：
 
 #### 根因
 
-**部署的 jar 早于 2026-10-31 的集群补丁，从来没重新编译过。**
+**集群补丁从来没有被应用到 napstar2.0 交付树（树 A）。**
+它只存在于 portal/SVN 树（树 B）以及**共享的** `realserver-oms-1.0.14.jar` /
+`model-service-1.0.14.jar` 这两个二进制里 —— 后者正是 model-controller
+（modelserver，用共享的 `realserver-oms`）能在集群模式下正常工作的原因。
 
-**测量方法**（读者可原样复现；在 `hd-node1` 容器内跑）：
+**所以这不是「jar 过期 / 忘了重建」**：
+树 A 自己编译出来的 `monitor-3.0.0.jar` 与容器里部署的那份 **md5 完全相同**：
+
+```
+树 A 本地 target/ : 340d66a55a4a65d2c36be561f19ee277  monitor-3.0.0.jar  467531 字节
+容器内已部署的     : 340d66a55a4a65d2c36be561f19ee277  monitor-3.0.0.jar  467531 字节
+```
+
+⇒ **从树 A 重新编译，产出的还是同一个 jar，什么都不会变。**
+
+##### 补丁足迹对比（整棵树里按标记数文件数）
 
 ```bash
-# 部署产物：monitor-3.0.0.jar 藏在 web-controller-3.0.0.jar 里
-unzip -o -q /opt/napstar_app/web-controller-3.0.0.jar 'BOOT-INF/lib/monitor-3.0.0.jar' -d /tmp/dep
-mkdir -p /tmp/dep/x && unzip -o -q /tmp/dep/BOOT-INF/lib/monitor-3.0.0.jar -d /tmp/dep/x
+# 两个树各挂一个只读卷，用同一套命令量
+docker run --rm \
+  -v "D:\work\info\web\extendsystem\华盾-napstar2.0\code:/treeA:ro" \
+  -v "D:\javawork\1.2\cpscloud1.0\code:/treeB:ro" \
+  rc-e2e-runner:local bash -c \
+  'for m in executePipelined isCluster RedisClusterHelper RedisClusterHashPipeline RedisPipelineUtil writeWithRetry; do
+     echo "$m  A=$(grep -rl --include=*.java -F $m /treeA | wc -l)  B=$(grep -rl --include=*.java -F $m /treeB | wc -l)"
+   done'
+```
 
-# 本地产物：直接用编译出来的 monitor-1.0.14.jar
-mkdir -p /tmp/loc/x && unzip -o -q monitor-1.0.14.jar -d /tmp/loc/x
+| 标记（整棵树里含该标记的 `.java` 文件数） | **树 A（交付树）** | **树 B（portal/SVN 树）** |
+|---|---|---|
+| java 文件总数 | **1792** | **1635** |
+| `executePipelined` | **41** | 23 |
+| `isCluster` | **0** | **29** |
+| `RedisClusterHelper` | **0** | **22** |
+| `RedisClusterHashPipeline` | **0** | **10** |
+| `RedisPipelineUtil` | 17 | 19 |
+| `writeWithRetry` | **0** | **1** |
 
-# 三个指标（下面表里用的就是这三个）
-C=/tmp/dep/x/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.class
+> ⚠️ **别再引用「10 处 `executePipelined` 全部加了 `isCluster()`」** ——
+> 那个说法只对**树 B**成立（而且 10 是「站点数」，不是文件数）。
+> **树 A 有 41 个文件用 `executePipelined`，其中 0 个带集群分支。**
+
+##### 最硬的一条证据：交付树的 `common/oms` 是**空目录**
+
+集群版的协作对象住在**共享的 `realserver/common/oms` 模块**里。
+树 A 的这个目录**存在，但里面一个文件都没有**：
+
+```
+树 A: platform/backend/realserver/common/oms
+  文件总数 = 0        （只有一个空目录本身）
+  没有 RedisClusterHelper.java / RedisPipelineUtil.java /
+       RedisScanUtils.java / RedisClusterHashPipeline.java / RedisUtilConfig.java
+
+树 B: platform/backend/realserver/common/oms
+  java 文件数 = 19，其中：
+    utils/  : RedisClusterHashPipeline.java  RedisClusterHelper.java
+              RedisPipelineUtil.java  RedisScanUtils.java  RedisUtil.java
+    config/ : RedisConfigProperties.java  RedisPropertiesConfig.java  RedisUtilConfig.java
+```
+
+> 📌 补一句容易看错的：树 A 里有 17 个文件**提到** `RedisPipelineUtil`，
+> 但那全是 `import com.sac.platform.realserver.oms.utils.RedisPipelineUtil;` ——
+> **从共享模块 import 进来的**（共享模块本身在交付产物里是带集群分支的二进制）。
+> 树 A 自己那份 `RedisPipelineUtil.java` 只有一个，在
+> `platform/backend/modelserver/plugins/hisDataSend/.../config/` 下，
+> 是**另一个毫不相干的同名类**。
+> 也就是说：**树 A 用的是共享模块的「单机版」接口**，
+> `RedisPipelineUtil` 本身在共享模块里有没有集群分支是另一回事 ——
+> napstarweb / rtdata-module 的**调用点**根本没走集群分支。
+
+##### class 层面的复核（A/B/C 三个指标）
+
+**测量方法**（读者可原样复现）：
+
+```bash
+# 两个树各自的 monitor 产物（注意版本号不一样）
+TREE_A=.../华盾-napstar2.0/code/application/backend/napstarweb/monitor/target/monitor-3.0.0.jar
+TREE_B=.../cpscloud1.0/code/application/backend/napstarweb/monitor/target/monitor-1.0.14.jar
+
+mkdir -p /tmp/x && unzip -o -q "$TREE_A" -d /tmp/x
+C=/tmp/x/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.class
+
 javap -c -p "$C" | grep -c 'isCluster:()Z'   # A 集群判定调用点
 javap -p    "$C" | grep -c 'RedisClusterHelper\|RedisClusterHashPipeline'  # B 集群辅助类字段
 strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的条目
@@ -344,7 +434,7 @@ strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的�
 
 **实测结果**：
 
-| class | 部署产物 `monitor-3.0.0.jar` | 本地产物 `monitor-1.0.14.jar`（2026/10/31 06:33） |
+| class | 树 A（交付树）`monitor-3.0.0.jar`<br>md5 `340d66a5…` | 树 B（portal/SVN 树）`monitor-1.0.14.jar`<br>md5 `2551839c…` |
 |---|---|---|
 | `SVGCacheServiceImpl` | A=0  B=0  C=0 | **A=1  B=1  C=4** |
 | `RTListener` | A=0  B=0  C=0 | **A=1  B=1  C=4** |
@@ -353,21 +443,31 @@ strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的�
 
 > 📌 `SVGParseService` 和 `CalculateService` 的集群分支结构是**一样的**
 > （各 2 处判定、2 个辅助类字段），所以它们的数字**必须相同** —— 上表就是这样的。
-> （早先这里填的 `isCluster=3` / `isCluster=2` 是**手工数的**，跟任何一种可复现的
-> 数法都对不上，已按上面的方法重测。）
 
-`rtdata-module-3.0.0.jar`（部署产物）里的两个 class 同样是 **A=0 B=0 C=0**：
+##### 交付树的写路径文件逐个核对
 
-| class | 部署产物 `rtdata-module-3.0.0.jar` |
-|---|---|
-| `RedisRealDataServiceImpl` | A=0  B=0  C=0 |
-| `OmsWriteByKafkaServiceImpl` | A=0  B=0  C=0 |
+| 文件（**树 A** = 交付树） | `isCluster` | `@Async` | `.join()` | `writeWithRetry` |
+|---|---|---|---|---|
+| `napstarweb/monitor/.../services/impl/SVGCacheServiceImpl.java` | **0** | 0 | 0 | 0 |
+| `napstarweb/monitor/.../kafka/RTListener.java` | **0** | 0 | 0 | 0 |
+| `napstarweb/monitor/.../services/SVGParseService.java` | **0** | 0 | 0 | 0 |
+| `napstarweb/monitor/.../services/CalculateService.java` | **0** | 0 | 0 | 0 |
+| `realserver/plugins/rtdata-module/.../RedisRealDataServiceImpl.java` | **0** | **1** | **0** | **0** |
+| `realserver/plugins/rtdata-module/.../OmsWriteByKafkaServiceImpl.java` | **0** | 2 | **0** | **0** |
 
-对照**源码树**（`application/backend/napstarweb`、`platform/backend/realserver`）：
-10 处 `executePipelined` **全部**已经加了 `isCluster()` 集群分支；
-本地编译出来的 `monitor-1.0.14.jar`（2026/10/31 06:33）**也**带这些分支。
+对照**树 B**（同样的文件路径）：
 
-⇒ 也就是说：**补丁在源码里、也在本地产物里，唯独不在部署产物里。**
+| 文件（**树 B** = portal/SVN 树） | `isCluster` | `@Async` | `.join()` | `writeWithRetry` |
+|---|---|---|---|---|
+| `SVGCacheServiceImpl.java` | **5** | 0 | 0 | 0 |
+| `RTListener.java` | **5** | 0 | 0 | 0 |
+| `SVGParseService.java` | **9** | 0 | 0 | 0 |
+| `CalculateService.java` | **8** | 0 | 0 | 0 |
+| `RedisRealDataServiceImpl.java` | **14** | 1 | 0 | 0 |
+| `OmsWriteByKafkaServiceImpl.java` | **6** | 2 | **2** | **4** |
+
+⇒ 结论：**交付树（树 A）里没有任何一个集群分支**；
+补丁只在 portal/SVN 树（树 B）里，以及共享模块的二进制里。
 
 #### 影响面
 
@@ -424,18 +524,45 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 
 #### 修法
 
-1. **重新编译并重新部署** `monitor`（napstarweb）和 `rtdata-module`（realserver）两个模块。
-2. **加一道 CI 门禁**：部署前对 jar 里的 class 断言集群分支存在，例如
+⚠️ **单纯「重新编译并重新部署」解决不了这个问题** ——
+树 A 重新编译产出的 jar 与现在部署的**字节相同**（md5 `340d66a5…`）。
+必须**先把集群分支移植进交付树**：
 
-   ```bash
-   # 部署 jar 里必须能查到集群分支的痕迹
-   unzip -p <app>.jar BOOT-INF/lib/monitor-*.jar > /tmp/m.jar && unzip -q /tmp/m.jar -d /tmp/m
-   # 然后在 /tmp/m 里 grep class 常量池里的 isCluster / RedisClusterHelper
-   ```
+1. **把集群分支移植进 napstar2.0 交付树（树 A）**，两条路都行：
+   - **直接端口**：从 portal/SVN 树（树 B）把 `isCluster()` 守卫
+     移植到树 A 对应的调用点上
+     （`napstarweb/monitor` 的 `SVGCacheServiceImpl` / `RTListener` /
+     `SVGParseService` / `CalculateService` 等，
+     以及 `realserver/plugins/rtdata-module` 的写路径）；
+   - **改成走共享模块的集群感知入口**：把这些调用点改用
+     `realserver/common/oms` 的 `RedisPipelineUtil` /
+     `RedisClusterHashPipeline`（集群模式下它们会按 slot 属主归并、
+     逐 key 路由，不会踩 `openPipeline`）。
+     ⚠️ **这两个类目前不在交付树里** —— 树 A 的
+     `platform/backend/realserver/common/oms` 是**空目录**，
+     得先把树 B 的这个模块（或等价的集群感知实现）搬过来。
+2. **再重新编译并重新部署** `monitor`（napstarweb）和
+   `rtdata-module`（realserver）两个模块。
+3. **加一道 CI 门禁**（部署前对**交付树**的产物断言，别只查部署产物）：
+   - 查 jar：部署的 jar 里必须能查到集群分支的痕迹
 
-   —— 没有这道门禁，「改了源码忘了重建」会**静默**再次发生。
+     ```bash
+     unzip -p <app>.jar BOOT-INF/lib/monitor-*.jar > /tmp/m.jar && unzip -q /tmp/m.jar -d /tmp/m
+     # 然后在 /tmp/m 里 grep class 常量池里的 isCluster / RedisClusterHelper
+     ```
 
-### D7-b — `batchWirtePip` 把 `CompletableFuture` 丢掉了（重建 jar 之后依然存在）
+   - 查**调用点**（更直接，能挡住「树根本没打补丁」这种情况）：
+
+     ```bash
+     # 交付树里凡是用了 executePipelined 的文件，都必须带集群分支
+     grep -rl --include='*.java' 'executePipelined' <交付树>/code \
+       | xargs grep -L 'isCluster'      # 这些文件就是漏网的
+     ```
+
+   —— 没有这两道门禁，「树里没打补丁」会**静默**再次发生
+   （重新编译照做、部署照做，问题一点没变）。
+
+### D7-b — `batchWirtePip` 把 `CompletableFuture` 丢掉了（**交付树里依然存在**，重新编译也修不掉）
 
 #### 现象
 
@@ -455,9 +582,10 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 于是方法体里抛出来的异常被**封在这个 future 里**，没有任何人观察它 ——
 既不进日志，也不进 stderr。
 
-⚠️ **部署产物里 `@Async` 的位置（这是「旧 jar」的属性，不是源码现状）**：
+⚠️ **`@Async` 的位置 —— 交付树（树 A）和 portal/SVN 树（树 B）不一样**：
 
-`javap -v` 显示，部署产物 `rtdata-module-3.0.0.jar` 里带 `@Async` 的方法是：
+`javap -v` 显示，**部署产物** `rtdata-module-3.0.0.jar`（= 树 A 编译的）里
+带 `@Async` 的方法是：
 
 ```
 RedisRealDataServiceImpl.wirteOmsPip          -> @Async("consumerRunExecutor")
@@ -465,27 +593,35 @@ OmsWriteByKafkaServiceImpl.batchWirte         -> @Async("consumerRunExecutor")
 OmsWriteByKafkaServiceImpl.batchWirtePip      -> @Async("consumerRunExecutor")
 ```
 
-所以在**这个旧 jar** 里，异常发生在 `wirteOmsPip` 所在的**另一个线程**上
+所以在这个 jar 里，异常发生在 `wirteOmsPip` 所在的**另一个线程**上
 （`@Async` 把它挪到了 `consumerRunExecutor` 线程池），
 调用方（`batchWirtePip`）更无从察觉。
 
-> 📌 **当前源码树里的位置已经不一样了**，别拿源码去推断旧 jar 的行为：
->
-> | | 部署产物（旧 jar） | 当前源码树 |
-> |---|---|---|
-> | `RedisRealDataServiceImpl.wirteOmsPip` | 带 `@Async` | **不带** `@Async`（类的 javadoc 明写「本类不再标注 @Async」，方法注释写「本方法为同步执行，异常直接抛给调用方」） |
-> | `OmsWriteByKafkaServiceImpl.batchWirte` / `batchWirtePip` | 带 `@Async` | 同样带 `@Async(value = "consumerRunExecutor")`（第 63、183 行） |
-> | 谁 `join()` | **没有人** | `writeWithRetry(...)` 里 `.join()`（第 75、195 行） |
->
-> 也就是说：**「@Async 挂在 `wirteOmsPip` 上」只是旧 jar 的样子**。
-> 源码已经把 `@Async` 收到 Kafka 写入入口、并补上了 `.join()` ——
-> 重建之后异常就不会再被吞了。
-> 但 D7-b 要记的是**「丢弃 future」这个错误处理习惯本身**：
-> 只要将来又有哪个 `@Async` 方法返回一个没人观察的 future，
-> 同样的静默失败就会再来一次。**这条不会因为重建 jar 而自动消失**，
-> 所以要按「代码约定」修，而不是按「旧 jar 的现状」修。
+**两棵树的对照**（这是本条的关键 —— 别拿树 B 去推断交付树的行为）：
 
-同一次测量（部署产物 `rtdata-module-3.0.0.jar`）：
+| | **树 A（交付树）** | **树 B（portal/SVN 树）** |
+|---|---|---|
+| `RedisRealDataServiceImpl.wirteOmsPip` | **仍带 `@Async`** | 不带 `@Async`（类的 javadoc 明写「本类不再标注 @Async」，方法注释写「本方法为同步执行，异常直接抛给调用方」） |
+| `OmsWriteByKafkaServiceImpl.batchWirte` / `batchWirtePip` | **仍带 `@Async`**（2 处） | 同样带 `@Async(value = "consumerRunExecutor")` |
+| 谁 `join()` | **没有人**（`.join()` = 0） | `writeWithRetry(...)` 里 `.join()`（2 处，`writeWithRetry` 4 处） |
+| `isCluster` | **0** | 6 |
+
+> 📌 **也就是说：D7-b 是交付树（树 A）里的一个活的缺陷**，
+> **不是**「树 B 已经修好了、只是 jar 没重建」：
+> > - 交付树里 `wirteOmsPip` **还挂着 `@Async`**，
+> >   `OmsWriteByKafkaServiceImpl` **还是没有 `.join()`**。
+> >
+> > ⇒ **从交付树重新编译，这个静默失败照样存在** ——
+> >   D7-a 修完（集群分支移植进来）之后，
+> >   `executePipelined` 在集群模式下**会**开始抛
+> >   `UnsupportedOperationException`，而**这个异常仍然会被静默吞掉**。
+> >   也就是说 D7-b 必须**跟着 D7-a 一起修**，否则修完 D7-a 之后的症状是
+> >   「从『静默丢数据』变成『静默丢数据，但原因换了』」。
+>
+> 修 D7-b 时要**一并把树 B 的 `.join()` + `writeWithRetry` 那套移植过来**
+> （或等价的写法），**不能只修树 B**。
+
+同一次测量（部署产物 `rtdata-module-3.0.0.jar`，= 树 A 的产物）：
 
 ```
 RedisRealDataServiceImpl   : A=0  B=0  C=0   Async=1  consumerRunExecutor=1  CompletableFuture.join=0
@@ -500,27 +636,39 @@ OmsWriteByKafkaServiceImpl : A=0  B=0  C=0   Async=1  consumerRunExecutor=1  Com
 数据一条不写、日志一行不留。这比「报错」危险得多 ——
 报错至少说明出事了，静默说明「一切正常」而实际上什么都没发生。
 
+⚠️ 而且它**跟 D7-a 是叠加的**：D7-a 让写路径在集群模式下失效，
+D7-b 让这个失效**连日志都不留**。只修 D7-a 不修 D7-b，
+现场会从「静默丢数据」变成「静默丢数据（异常被吞，但异常换了一个）」。
+
 #### 修法
 
-跟 `OmsWriteByKafkaServiceImpl.writeWithRetry` 的思路一致：
+跟树 B 的 `OmsWriteByKafkaServiceImpl.writeWithRetry` 的思路一致，
+**但要移植进交付树（树 A）**：
 
 1. `wirteOmsPip` **不要**返回 `CompletableFuture`（或者调用方必须 `join()`）；
 2. 异常要**显式**落到日志里：重试次数、最后一次的异常、失败条数；
 3. `@Async` 的方法**返回 `CompletableFuture` 时**，异常必须通过
-   `join()` / `whenComplete()` 被观察，否则 Spring 不会替你记。
+   `join()` / `whenComplete()` 被观察，否则 Spring 不会替你记；
+4. 交付树里 `wirteOmsPip` 上的 `@Async` 要**去掉**
+   （树 B 已经把它收到 Kafka 写入入口了），
+   或者调用方改成同步调用并 `join()`。
 
-> 📌 **源码树里这三条已经做到了**（`writeWithRetry(...)` + `.join()`，
-> 见上面那张对照表），但**部署的 jar 还没重建**（见 D7-a）。
+> 📌 **树 B 已经做到了**（`writeWithRetry(...)` + `.join()`，
+> 见上面那张对照表），但**树 A（交付树）还没有**，
+> 而**部署的 jar 正是树 A 编译的**。
 > 所以：
-> - **重建 jar 之后，当前这个「旧 jar 丢 future」的现场会消失** ——
->   异常不会再被吞，rtdata-consumer 的失败会变成**看得见**的报错；
-> - 但 D7-b 要立的是**「别再返回一个没人观察的 future」这条约定**。
->   它不会因为重建 jar 而自动消失：只要将来又有哪个 `@Async` 方法
->   返回一个没人 `join()` 的 future，同样的静默失败就会再来一次。
+> - **光重新编译没用** —— 树 A 现在编译出来的 jar 与部署的那个字节相同；
+>   必须把树 B 的 `.join()` / `writeWithRetry` / 去 `@Async` **移植进树 A**。
+> - 移植之后，rtdata-consumer 的集群模式写失败会从「静默」变成**看得见的报错**，
+>   这才是 D7-b 想要的终态；
+> - 顺带把「别再返回一个没人观察的 future」立成**约定**：
+>   只要将来又有哪个 `@Async` 方法返回一个没人 `join()` 的 future，
+>   同样的静默失败就会再来一次。
 >   建议配一条静态检查（grep 出「返回 `CompletableFuture` 但调用方不 `join()`」）。
 >
-> ⇒ **两条要分开看**：D7-a 是「部署产物过期」，重建即可；
-> D7-b 是「代码约定」，要靠约定 + 检查来防复发。
+> ⇒ **两条要分开看，但必须一起修**：
+> D7-a 是「集群补丁没进交付树」，D7-b 是「交付树里的静默失败」。
+> **只修 D7-a 的话，失败会从『静默丢数据』变成『静默丢数据（异常换了一个）』。**
 
 ---
 
@@ -534,5 +682,5 @@ OmsWriteByKafkaServiceImpl : A=0  B=0  C=0   Async=1  consumerRunExecutor=1  Com
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
 | D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行** |
-| D7-a | 🔴 | **部署产物过期**（源码 2026-10-31 已打补丁，部署 jar 没重建） | **待修**：重新编译并重新部署 `monitor` + `rtdata-module`；并加 CI 门禁断言部署 jar 里带集群分支 |
-| D7-b | 🔴 | **代码约定**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞） | **待修**：显式 `join()` / 记日志。源码树**已**改成 `writeWithRetry(...)` + `.join()`，但部署的 jar 还没重建；重建后当前现场消失，**但「别返回没人观察的 future」这条约定要单独立起来**（建议加静态检查） |
+| D7-a | 🔴 | **集群补丁从未进入 napstar2.0 交付树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code`；补丁只在 portal/SVN 树 `D:\javawork\1.2\cpscloud1.0\code` 和共享的 `realserver-oms` / `model-service` 二进制里） | **待修**：把集群分支**移植进交付树**（或让调用点走 `realserver/common/oms` 的 `RedisPipelineUtil` / `RedisClusterHashPipeline` —— 那两个类现在**不在**交付树里，oms 目录是空的），**然后**重新编译并重新部署；并加 CI 门禁（查 jar + 查交付树的调用点） |
+| D7-b | 🔴 | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | **待修**：把树 B 的 `.join()` + `writeWithRetry` + 去 `@Async` 移植进交付树；异常要显式记日志。**光重新编译修不掉**，且**必须跟 D7-a 一起修** |
