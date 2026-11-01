@@ -176,11 +176,19 @@ cleanup() {
 #                                  有的是立刻触发，有的会被推迟到前台子进程
 #                                  结束才处理。实测（本容器 bash 5.1.16）：
 #                                  脚本正在等外部子进程时，SIGINT 被**推迟**，
-#                                  脚本会**跑完**，清理在正常退出时发生。
+#                                  脚本会**跑完**，清理在正常退出时发生，
+#                                  退出码 0（**不算失败**）。
 #                                  真实的 Ctrl-C 是给**整个进程组**发 SIGINT，
 #                                  同样会被推迟 —— 所以 Ctrl-C 之后脚本
 #                                  通常还是会把活干完再清理。
 #   - SIGKILL (kill -9)          -> 捕不到（内核直接杀），残留无法避免。
+#
+# ⚠️ 收到 TERM/INT/HUP 时，脚本会以 **128+n** 的退出码结束
+#    （TERM=143 / INT=130 / HUP=129）—— 见下面那三个显式的信号 trap。
+#    所以那种情况下**不会**再打印 "FAIL=0"：
+#    EXIT trap 会看到非零的 $_e，把 FAIL 加到 >=1 再打 SUMMARY。
+#    （这就是下面为什么要显式 trap 信号：光靠 EXIT trap 里的 $?，
+#      被信号杀死时它是 0，bump 不会触发 —— 详见下面那三个 trap 的注释。）
 #
 # 所以「Ctrl-C 之后一定没有残留」这个说法只在脚本正常跑完时成立；
 # kill -9 之后可能留残留，需要手工再跑一次本脚本（或手工 DEL）。
@@ -199,6 +207,28 @@ trap '_e=$?; cleanup; if [ "$DONE" -eq 0 ]; then
         fi
         echo; echo "SUMMARY: PASS=$P FAIL=$F"
       fi; exit $_e' EXIT
+
+# ⚠️ **必须显式处理信号**，否则被信号杀死时还是假绿。
+#
+# 坑在哪：bash 被信号杀死时，EXIT trap 里的 `$?` 是 **0**，不是 128+n ——
+# bash 是在 trap **返回之后**才把信号状态（128+n）算进去的。
+# 所以光靠上面那个 `[ "$_e" -ne 0 ]` 的判断，被信号杀死时它是 0，
+# 永远不加 FAIL —— 于是脚本中途被杀，却打印出 "SUMMARY: PASS=25 FAIL=0"
+# 然后带着 143/129 的退出码走人。计划里就是靠 grep "FAIL=0" 判断成败的，
+# 那种假绿会直接骗过人。
+#
+# 这三个 trap 的作用就是把信号**转成一个普通的非零退出**：
+# 收到 TERM/INT/HUP -> exit 128+n -> 触发 EXIT trap 时 $_e 就是 143/130/129
+# -> 上面的 bump 生效 -> FAIL >= 1。
+#
+# ⚠️ **位置很重要**：这三个 trap 必须写在 EXIT trap **之后**
+#    （也就是 `fi; exit $_e' EXIT` 这一行的下面）。
+#    插到 EXIT trap 的多行 body 里面会把 trap 弄坏 ——
+#    那样连正常路径都会挂（body 会被当成脚本文本执行）。
+#    而且 `bash -n` **查不出**这种错误，只能实跑看正常路径还对不对。
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
 echo
 echo "############ L0 — 连通性前置检查 ############"
@@ -635,7 +665,7 @@ EOF
   if [ "$L6_CONTROL" -eq 1 ]; then
     echo "    混合（2 本地 + 2 跨槽）的 --pipe 输出:"
   else
-    echo "    全跨槽（2 条）的 --pipe 输出:"
+    echo "    全跨槽（2 条，没有本节点槽的命令可混入）的 --pipe 输出:"
   fi
   echo "$pipe_cross" | sed 's/^/      /'
   n_moved=$(echo "$pipe_cross" | grep -c 'MOVED')
@@ -656,13 +686,19 @@ EOF
   #    所以「本节点槽的那两条成功了」不能靠看到值来判断，
   #    要靠回复数：发了 N 条，收到 N 条回复，其中只有 2 条是错误
   #    —— 另外 N-2 条（本地槽的）就是成功的。
-  chk "L6 混合 pipeline 的回复数 = 发出的命令数" "$rep_line" "$n_cmd"
-  if [ "$rep_line" -eq "$n_cmd" ] && [ "${err_line:-0}" -eq "$n_cmd" ] && [ "$n_local" -eq 0 ]; then
-    ok "L6 同一条 pipeline 里本节点槽的命令成功了（$n_cmd 条命令 - $err_line 个错误 = $n_local 条成功）"
-  elif [ "$rep_line" -eq "$n_cmd" ] && [ "${err_line:-0}" -eq 2 ] && [ "$n_local" -eq 2 ]; then
-    ok "L6 同一条 pipeline 里本节点槽的命令成功了（$n_cmd 条命令 - 2 个错误 = 2 条成功）"
+  if [ "$L6_CONTROL" -eq 1 ]; then
+    chk "L6 混合 pipeline 的回复数 = 发出的命令数" "$rep_line" "$n_cmd"
+    if [ "$rep_line" -eq "$n_cmd" ] && [ "${err_line:-0}" -eq 2 ]; then
+      ok "L6 同一条 pipeline 里本节点槽的命令成功了（$n_cmd 条命令 - 2 个错误 = 2 条成功）"
+    else
+      bad "L6 同一条 pipeline 里本节点槽的命令应该成功（replies=$rep_line errors=$err_line）"
+    fi
   else
-    bad "L6 同一条 pipeline 里本节点槽的命令应该成功（replies=$rep_line errors=$err_line）"
+    # ⚠️ 没有本节点槽的 key -> 这条 pipeline 里**一条本地命令都没有**，
+    #    「0 条成功」在算术上没错，但等于宣称了一个从没验证过的成功 ——
+    #    那是「永远不会失败的检查」。所以这里不报 PASS，只说明跳过。
+    chk "L6 跨槽 pipeline 的回复数 = 发出的命令数" "$rep_line" "$n_cmd"
+    echo "    （没有本节点槽的命令可验证对照组 —— 对照组已跳过，见上面）"
   fi
   # ⚠️ 这里**不用** ok/bad 报「结论」—— 结论跟上面的断言是同一批数据，
   #    再报一次 ok 只会让人以为又多了一项独立的证据，
