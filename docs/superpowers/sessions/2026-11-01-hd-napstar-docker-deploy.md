@@ -15,14 +15,18 @@
 Redis（双实例）+ ZooKeeper（2 节点）+ Kafka（2 broker）+ Nacos + PostgreSQL 全部就绪，
 **11 个应用里 9 个起来了**，上一轮改的代码**逐项验证完毕**。
 
-**但实跑暴露了 4 个缺陷**，其中 🔴 D1 是**上一轮 PG 迁移引入的真实回归**：
+**但实跑暴露了 4 个缺陷**，其中 🔴 D1 是**上一轮 PG 迁移引入的真实回归**
+—— 但**用户决定不修**（`hisDataProducer` / `hisDataSend` 不做修改）：
 
 | # | 缺陷 | 严重度 | 谁引入 | 状态 |
 |---|---|---|---|---|
-| **D1** | `hisDataProducer` / `hisDataSend` 的 jar 里**没有 PG 驱动** | 🔴 | **上一轮 PG 迁移** | 未修（要重新构建 jar） |
-| **D2** | 安装包的 Nacos 导出包**少 3 个 dataId** | 🟡 | 安装包 | 本轮脚本补齐 |
+| **D1** | `hisDataProducer` / `hisDataSend` 的 jar 里**没有 PG 驱动** | 🔴 | **上一轮 PG 迁移** | **🚫 不修**（用户决定）→ 这两个应用在本环境**预期起不来**，属已知且已接受 |
+| **D2** | 安装包的 Nacos 导出包**少 3 个 dataId**（实际补 2 个） | 🟡 | 安装包 | 本轮脚本补齐（`ext_base.yaml` + `share_base.yaml`） |
 | **D3** | `initPostgresDB.sql` **没改 `pg_hba.conf`** | 🟡 | 安装包 | 本轮部署时补 |
 | **D4** | datasource 指向 `node2`，但 PG 只在一台机器上 | 🟡 | 安装包（按生产拓扑写的） | 本轮改（Nacos + 命令行覆盖） |
+
+> **D1 不影响本轮任何结论**：这两个应用的历史数据链路（`hisdata`）依赖 `hds` schema
+> 的 HIS 历史表，**而那些表不在安装包里** → **即使驱动装上了也没有数据可跑**。
 
 > **门户（cpsweb）的 Docker 全程未受影响** —— 前后快照逐项比对，只有 uptime 变了
 > （说明**没被重启**）。见 §六。
@@ -87,7 +91,10 @@ Redis（双实例）+ ZooKeeper（2 节点）+ Kafka（2 broker）+ Nacos + Post
 |---|---|
 | **1** | `web-controller`、`realalarmconsumer`、`rtdata-consumer` |
 | **1b** | `realserver`、`model-controller` |
-| **2** | `commitDataIncreProducer`、`realalarmproducer`、`hisDataProducer`、`hisDataSend`、`transformNapstarModel`、`sche-viewer-server` |
+| **2** | `commitDataIncreProducer`、`realalarmproducer`、`transformNapstarModel`、`sche-viewer-server` |
+
+> 🚫 **`hisDataProducer` / `hisDataSend` 不启动** —— 用户决定这两个模块**不做修改**，
+> 它们的 jar 里没有 PG 驱动（D1）→ 本环境**预期起不来**，属已知且已接受的状态。
 
 ---
 
@@ -260,14 +267,14 @@ SUMMARY: PASS=43 FAIL=0 SKIP=3
 | `transformNapstarModel` | 8080 | ✅ 起来 | — | **B5 预期**：失败原因精确 = `relation "modelversion" does not exist` |
 | `realserver` | 8096 | ✅ 起来 | **`10.137.220.191` timeout 2000/3000** | ⚠️ **`OmsConfig` 硬编码**（用户排除项，但影响面确认了） |
 | `model-controller` | 8090 | ✅ 起来 | — | 需要补的 `ext_base.yaml` / `share_base.yaml`（D2） |
-| `hisDataProducer` | 8199 | ❌ | — | **D1**：jar 里没有 PG 驱动 |
-| `hisDataSend` | 27000 | ❌ | — | **D1**：同上 |
+| `hisDataProducer` | 8199 | ❌ | — | **D1**：jar 里没有 PG 驱动 —— **不修，预期起不来** |
+| `hisDataSend` | 27000 | ❌ | — | **D1**：同上 —— **不修，预期起不来** |
 
 ---
 
 ## 五、发现的缺陷（详见 `docker/hd-napstar/DEFECTS.md`）
 
-### 🔴 D1 —— 上一轮 PG 迁移引入的真实回归
+### 🔴 D1 —— 上一轮 PG 迁移引入的真实回归（**🚫 不修**）
 
 `hisDataProducer` / `hisDataSend` 的 pom **只声明了** `kingbase8` 和 `DmJdbcDriver18`，
 **没有声明** `org.postgresql:postgresql`：
@@ -283,7 +290,16 @@ ERROR ... IllegalStateException: Cannot load driver class: org.postgresql.Driver
 但只有 3 个模块**真的声明**了它：
 `transnapstardata-dao`、`commitDataIncreModule`、`commitDataIncreProducer`。
 
-**修法**（下一轮）：两个 pom 各加
+> **🚫 用户决定：这两个模块不做修改。**
+> 所以它们在本环境里**预期起不来**，属于**已知且已接受的状态**。
+>
+> **这不影响本轮任何验证结论**：它们的 `hisdata` 链路依赖 `hds` schema 的
+> HIS 历史表，**而那些表不在安装包里** → **即使驱动装上了也没有数据可跑**。
+
+<details>
+<summary>如果将来要修（当前不做）</summary>
+
+两个 pom 各加：
 
 ```xml
 <dependency>
@@ -296,16 +312,23 @@ ERROR ... IllegalStateException: Cannot load driver class: org.postgresql.Driver
 → **加依赖不需要联网**。
 ⚠️ 改完要**重新构建这两个模块并重打 jar** —— 本轮用的是**已构建的旧 jar**。
 
+</details>
+
 ### 🟡 D2 —— 安装包少 3 个 Nacos dataId
 
 `ext_base.yaml` / `share_base.yaml` / `hisdataSend-ext.yaml`
 → 详见 `docker/hd-napstar/NACOS-GAPS.md`。
-`scripts/import-hd-nacos-configs.sh` 现在会补齐它们。
 
-> `hisdataSend-ext.yaml` 的坑：**`hisDataSend.*` 和 `hisdataproducer.*` 是两套不同的键**。
-> `hisDataSend` 独有 `thread-pool-size`（源码 `JsonDataSendServiceImpl` 读
-> `${hisDataSend.thread-pool-size}`）→ 少了它就
-> `Could not resolve placeholder 'hisDataSend.thread-pool-size'`。
+**实际补了 2 个**（`ext_base.yaml` + `share_base.yaml`），
+`scripts/import-hd-nacos-configs.sh` 现在会生成它们。
+
+> 🚫 **`hisdataSend-ext.yaml` 不补** —— 只有 `hisDataSend` 读它，
+> 而那个模块**用户决定不做修改** → 那个应用预期起不来 → 这个 dataId
+> 对本轮没有任何作用。
+>
+> （键集细节记在 `NACOS-GAPS.md` 里，作为将来要支持 `hisDataSend` 时的参考：
+> `hisDataSend.*` 和 `hisdataproducer.*` 是两套不同的键，
+> `hisDataSend` 独有 `thread-pool-size`。）
 
 ### 🟡 D3 —— `initPostgresDB.sql` 没改 `pg_hba.conf`
 
@@ -431,14 +454,17 @@ fb4bb00 feat(hd): add the Dockerfile and the two entrypoints
 
 | # | 事 | 严重度 | 说明 |
 |---|---|---|---|
-| **1** | **D1：给 `hisDataProducer` / `hisDataSend` 加 PG 驱动依赖，重新构建** | 🔴 | 本轮唯一的真实回归。加依赖不用联网（`mvnRepo` 有 42.2.14 / 42.7.x）。⚠️ 华盾树**不是 git 仓库** → **先备份** |
-| **2** | **`sac` / `cmt` / `hds` 的建表 DDL** | 🔴 | 挡住 `transformNapstarModel`（上一轮 §七 #1 遗留）。平台上 `SystemTable.sql` 是 **MySQL 方言** |
-| **3** | **`hds`（HIS 历史库）的表** | 🟡 | 上一轮 §七 #2 遗留。由 HIS 数据服务器提供，不在安装包 → B1 验不了 |
-| **4** | **华盾的模型定义**（`model_objecttype` / `model_attribute`） | 🟡 | 安装包 seed 里**是空的** → 曲线等接口在查模型阶段就失败 → **B2 只能在 SQL 层验** |
-| **5** | **`OmsConfig` 硬编码 `10.137.220.191`** | 🔴 | 用户上一轮明确排除。**本轮实测确认 `realserver` 确实受影响**（A2 显示 `10.137.220.191` + `2000/3000ms`） |
-| **6** | **安装包那 3 个缺陷要不要修进交付物** | 🟡 | D2（缺 dataId）/ D3（pg_hba）/ D4（node2 指向）。修它们要改安装包或加部署脚本 |
-| **7** | **`hisDataProducer` / `hisDataSend` 的 `database: 0` vs `1`** | 🟡 | 上一轮 §七 #6 的陷阱，本轮没验（这两个应用起不来） |
-| **8** | **`application/backend-gd`** | 🟡 | 逐字副本，同一套问题。本轮**没碰** |
+| **1** | **`sac` / `cmt` / `hds` 的建表 DDL** | 🔴 | 挡住 `transformNapstarModel`（上一轮 §七 #1 遗留）。平台上 `SystemTable.sql` 是 **MySQL 方言** |
+| **2** | **`hds`（HIS 历史库）的表** | 🟡 | 上一轮 §七 #2 遗留。由 HIS 数据服务器提供，不在安装包 → B1 验不了 |
+| **3** | **华盾的模型定义**（`model_objecttype` / `model_attribute`） | 🟡 | 安装包 seed 里**是空的** → 曲线等接口在查模型阶段就失败 → **B2 只能在 SQL 层验** |
+| **4** | **`OmsConfig` 硬编码 `10.137.220.191`** | 🔴 | 用户上一轮明确排除。**本轮实测确认 `realserver` 确实受影响**（A2 显示 `10.137.220.191` + `2000/3000ms`） |
+| **5** | **安装包那 3 个缺陷要不要修进交付物** | 🟡 | D2（缺 dataId）/ D3（pg_hba）/ D4（node2 指向）。修它们要改安装包或加部署脚本 |
+| **6** | **`application/backend-gd`** | 🟡 | 逐字副本，同一套问题。本轮**没碰** |
+
+> **🚫 明确不做**：`hisDataProducer` / `hisDataSend` 的 PG 驱动缺失（D1）。
+> 用户决定**不修改这两个模块** → 它们在本环境**预期起不来**，
+> 属**已知且已接受的状态**，不影响本轮任何验证结论。
+> 详见 `docker/hd-napstar/DEFECTS.md` D1。
 
 ---
 

@@ -145,48 +145,31 @@ read_cfg "ext_base" "DEFAULT_GROUP" > /tmp/hd-ext-base-src.yaml 2>/dev/null || t
 post "DEFAULT_GROUP" "ext_base.yaml" /tmp/hd-ext_base.yaml
 
 # ---- hisdataSend-ext.yaml ----
-# hisDataSend 与 hisDataProducer 共用一套 hisdata 配置，但**键名不同**：
-# bootstrap.yml 读的是 `hisDataSend.thread-pool-size`，
-# 所以两个键都要有（实测：只给 hisdataproducer 会报
-#   Could not resolve placeholder 'hisDataSend.thread-pool-size'）。
-cat > /tmp/hd-hisdataSend-ext.yaml <<'EOF'
-hisDataSend:
-  partition-path: /home
-  diskcheck-interval-minutes: 5
-  threshold-percentage: 95
-  low-threshold-percentage: 90
-  delete-nums: 300
-  disk-check-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/out/
-  csv-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/
-  history-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/history/
-  history-time-minutes: 259200
-  core-pool-size: 16
-  queue-capacity: 200
-  parase-data-queue-size: 100
-  process-count: 4
-  page-size: 500000
-  # ⚠️ hisDataSend 独有（源码 JsonDataSendServiceImpl 读 ${hisDataSend.thread-pool-size}）
-  #    hisdataproducer 那份没有这个键 -> 少了它就
-  #    "Could not resolve placeholder 'hisDataSend.thread-pool-size'"
-  thread-pool-size: 16
-hisdataproducer:
-  partition-path: /home
-  diskcheck-interval-minutes: 5
-  threshold-percentage: 95
-  low-threshold-percentage: 90
-  delete-nums: 300
-  disk-check-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/out/
-  csv-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/
-  history-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/history/
-  history-time-minutes: 259200
-  core-pool-size: 16
-  queue-capacity: 300
-  parase-data-queue-size: 100
-  process-count: 4
-  page-size: 500000
-  thread-pool-size: 16
-EOF
-post "DEFAULT_GROUP" "hisdataSend-ext.yaml" /tmp/hd-hisdataSend-ext.yaml
+# 🚫 **不导入** —— 只有 `hisDataSend` 这个应用读它，而那个模块
+#    （和 `hisDataProducer` 一起）**用户决定不做修改**，
+#    在本环境里预期起不来（jar 里没有 PG 驱动，见 docker/hd-napstar/DEFECTS.md D1）。
+#    所以这个 dataId 对本轮没有任何作用，不引入。
+#
+# 参考（如果将来 hisDataSend 要能跑，键集与 hisdataproducer 不同：
+#       源码 JsonDataSendServiceImpl 读 ${hisDataSend.thread-pool-size}，
+#       而 hisdataproducer-ext.yaml 里没有这个键）：
+#
+#   hisDataSend:
+#     partition-path: /home
+#     diskcheck-interval-minutes: 5
+#     threshold-percentage: 95
+#     low-threshold-percentage: 90
+#     delete-nums: 300
+#     disk-check-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/out/
+#     csv-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/
+#     history-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/history/
+#     history-time-minutes: 259200
+#     core-pool-size: 16
+#     queue-capacity: 200
+#     parase-data-queue-size: 100
+#     process-count: 4
+#     page-size: 500000
+#     thread-pool-size: 16
 
 echo "=== final count ==="
 curl -s -m 20 "$NACOS/v1/cs/configs?search=accurate&dataId=&group=&pageNo=1&pageSize=100" \

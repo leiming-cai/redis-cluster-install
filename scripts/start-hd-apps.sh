@@ -16,6 +16,8 @@ mkdir -p "$LOG_DIR"
 JAVA_OPTS="-Xms64m -Xmx192m -server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:MaxMetaspaceSize=160m -Dfile.encoding=UTF-8"
 
 # 停止上一批：按 jar 名匹配，**绝不用 pkill -f java**（会杀掉中间件的 Kafka/ZK/Nacos）
+# ⚠️ hisDataProducer / hisDataSend 仍列在停止名单里 —— 万一之前跑起来了要能停掉。
+#    但**不启动**它们（见 BATCH2 的注释）。
 APP_JARS="web-controller|realalarmconsumer|realalarmproducer|rtdata-consumer|realserver-conntroller|model-controller|commitDataIncreProducer|hisDataProducer|hisDataSend|transformNapstarModel|sche-viewer-server"
 stop_apps() {
   pkill -f "[-]jar .*(${APP_JARS}).*\.jar" 2>/dev/null || true
@@ -51,6 +53,9 @@ declare -A APPS=(
   [commitDataIncreProducer]="commitDataIncreProducer-3.0.0.jar"
   [realalarmproducer]="realalarmproducer-3.0.0.jar"
   [realalarmconsumer]="realalarmconsumer-3.0.0.jar"
+  # 🚫 hisDataProducer / hisDataSend **不启动** —— 用户决定这两个模块不做修改，
+  #    它们的 jar 里没有 PG 驱动（docker/hd-napstar/DEFECTS.md D1）→ 预期起不来。
+  #    这里只保留映射，供手动排查时用。
   [hisDataProducer]="hisDataProducer-3.2.3.jar"
   [hisDataSend]="hisDataSend-3.2.3.jar"
   [transformNapstarModel]="transformNapstarModel-3.0.0.jar"
@@ -59,7 +64,7 @@ declare -A APPS=(
 
 BATCH1="web-controller realalarmconsumer rtdata-consumer"
 BATCH1B="realserver model-controller"
-BATCH2="commitDataIncreProducer realalarmproducer hisDataProducer hisDataSend transformNapstarModel sche-viewer-server"
+BATCH2="commitDataIncreProducer realalarmproducer transformNapstarModel sche-viewer-server"
 
 case "$BATCH" in
   1) LIST="$BATCH1";;

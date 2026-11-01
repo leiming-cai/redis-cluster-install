@@ -7,6 +7,11 @@
 
 ## 🔴 D1（上一轮 PG 迁移引入）`hisDataProducer` / `hisDataSend` 的 jar 里**没有 PG 驱动**
 
+> **🚫 本轮决定：不修改这两个模块。**
+> 用户明确要求「`hisDataProducer` / `hisDataSend` 不做修改」。
+> 所以下面记录的是**事实与影响面**，**不作为待办**。
+> 这两个应用在本环境里**预期起不来**，属于**已知且已接受的状态**。
+
 ### 现象
 
 ```
@@ -43,10 +48,20 @@ ERROR ... IllegalStateException: Cannot load driver class: org.postgresql.Driver
 → **配置说 PG，jar 里却没有 PG 驱动** → 启动即失败。
 
 > 这正是「只改配置不改依赖」的经典后果。
-> `mvnRepo` 里 `org/postgresql/postgresql` 有 42.2.14 / 42.3.x / 42.7.x / 9.4.x，
-> **加依赖不需要联网**。
 
-### 修法
+### 影响面（已知并接受）
+
+| 应用 | 端口 | 状态 |
+|---|---|---|
+| `hisDataProducer` | 8199 | ❌ 起不来 —— `Cannot load driver class: org.postgresql.Driver` |
+| `hisDataSend` | 27000 | ❌ 起不来 —— 同上 |
+
+**这两个应用不参与本轮的验证目标**：
+- 它们的历史数据处理链路（`hisdata`）依赖 `hds` schema 的 HIS 历史表，
+  而**那些表不在安装包里**（见上一轮 §七 #2）→ **即使驱动装上了也没有数据可跑**
+- 所以「起不来」**不影响本轮任何验证结论**
+
+### 如果将来要修（**当前不做**）
 
 在 `hisDataProducer/pom.xml` 和 `hisDataSend/pom.xml` 的 `<dependencies>` 里加：
 
@@ -58,11 +73,8 @@ ERROR ... IllegalStateException: Cannot load driver class: org.postgresql.Driver
 ```
 
 （版本由父 pom 的 `dependencyManagement` 给，**不需要写 `<version>`**）
-
-> ⚠️ 改完要重新构建这两个模块并**重新打 jar**。
-> 本轮用的是**已构建的旧 jar**（`target/hisDataProducer-3.2.3.jar`），
-> 所以装不上驱动 —— 这也是本轮**没有修**的原因（不是 git 仓库，
-> 改了没有 patch 留痕）。**下一轮修。**
+`mvnRepo` 里 `org/postgresql/postgresql` 有 42.2.14 / 42.3.x / 42.7.x / 9.4.x，
+**加依赖不需要联网**；改完要**重新构建这两个模块并重新打 jar**。
 
 ---
 
@@ -70,16 +82,15 @@ ERROR ... IllegalStateException: Cannot load driver class: org.postgresql.Driver
 
 详见 [`NACOS-GAPS.md`](NACOS-GAPS.md)。
 
-| 缺的 dataId | 谁要它 | 后果 |
-|---|---|---|
-| `ext_base.yaml` | model-controller | 启动失败 `perms is null` |
-| `share_base.yaml` | model-controller | 没有数据源和 Kafka 配置 |
-| `hisdataSend-ext.yaml` | hisDataSend | `Could not resolve placeholder 'hisDataSend.thread-pool-size'` |
+| 缺的 dataId | 谁要它 | 后果 | 本轮处理 |
+|---|---|---|---|
+| `ext_base.yaml` | model-controller | 启动失败 `perms is null` | ✅ 脚本补齐 |
+| `share_base.yaml` | model-controller | 没有数据源和 Kafka 配置 | ✅ 脚本补齐 |
+| `hisdataSend-ext.yaml` | hisDataSend | `Could not resolve placeholder 'hisDataSend.thread-pool-size'` | 🚫 **不补**（那个模块不做修改，预期起不来） |
 
-> `hisdataSend-ext.yaml` 还有个细节：源码要的键是 **`hisDataSend.*`**，
-> 而 `hisdataproducer-ext.yaml` 里是 `hisdataproducer.*` —— **两个模块的键集不一样**。
-> 派生成 `hisdataSend-ext.yaml` 时**两个键都要给**，且 `hisDataSend` 独有
-> `thread-pool-size`。
+> `hisdataSend-ext.yaml` 的键集细节（`hisDataSend.*` 与 `hisdataproducer.*` **不一样**，
+> `hisDataSend` 独有 `thread-pool-size`）记在 `NACOS-GAPS.md` 里，
+> 作为将来要支持 `hisDataSend` 时的参考。
 
 ---
 
@@ -166,7 +177,7 @@ entrypoint 的提交记录。`node2` 必须指向 hd-node2 容器的**真实 IP*
 
 | # | 严重度 | 谁引入 | 状态 |
 |---|---|---|---|
-| D1 | 🔴 | **上一轮 PG 迁移** | 未修（要重新构建 jar） |
+| D1 | 🔴 | **上一轮 PG 迁移** | **🚫 不修**（用户决定：`hisDataProducer` / `hisDataSend` 不做修改）→ 这两个应用在本环境预期起不来，属已知且已接受 |
 | D2 | 🟡 | 安装包 | 本轮用脚本补齐（`import-hd-nacos-configs.sh`） |
 | D3 | 🟡 | 安装包 | 本轮部署时补（`pg_hba.conf` + reload） |
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |

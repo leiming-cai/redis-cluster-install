@@ -70,6 +70,12 @@ url: jdbc:postgresql://webdb:5432/cpspg?...
 
 这不是本轮引入的问题，是**安装包本身的缺口**。
 
+> 🚫 **`hisdataSend-ext.yaml` 本轮不补** —— 只有 `hisDataSend` 这个应用读它，
+> 而那个模块**用户决定不做修改**（jar 里没有 PG 驱动，预期起不来，
+> 见 [`DEFECTS.md`](DEFECTS.md) D1）→ 这个 dataId 对本轮没有任何作用。
+>
+> 实际补的是 **2 个**：`ext_base.yaml` + `share_base.yaml`。
+
 ## 三、本轮怎么处理的
 
 **不改华盾树、不改安装包**（本轮是「验证」，不是「改造」）。
@@ -79,9 +85,11 @@ url: jdbc:postgresql://webdb:5432/cpspg?...
 - `ext_base.yaml` ← 门户的 `ext_base`，但把 `datasource` / `oms` 等**指向华盾的值**
   （`napstar` 库 + 4 schema + `node1:6379`），并**去掉 `shiroconfig`**（那是门户的）
 - `share_base.yaml` ← 门户的 `share_base`，datasource 同样改成 `napstar` 库
-- `hisdataSend-ext.yaml` ← 由 `hisdataproducer-ext.yaml` 派生（两个模块共用一套 hisdata 配置）
 
-> 生成脚本：`scripts/import-hd-nacos-configs.sh`（负责导入 + 补齐这 3 个）。
+> 🚫 `hisdataSend-ext.yaml` **不补**（理由见 §二）。
+
+> 生成脚本：`scripts/import-hd-nacos-configs.sh`（负责导入 + 补齐这 2 个 +
+> 把 `node2:5432` 改写成 `node1:5432`）。
 
 ## 四、华盾版的 datasource 该长什么样
 
