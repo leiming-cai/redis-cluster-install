@@ -171,3 +171,45 @@ post "DEFAULT_GROUP" "hisdataSend-ext.yaml" /tmp/hd-hisdataSend-ext.yaml
 echo "=== final count ==="
 curl -s -m 20 "$NACOS/v1/cs/configs?search=accurate&dataId=&group=&pageNo=1&pageSize=100" \
   | tr ',' '\n' | grep -c '"dataId"'
+
+# ==============================================================
+# 把所有指向 node2:5432 的 PG URL 改成 node1:5432
+#
+# 原因: PG 只跑在 hd-node1；hd-node2 是 ZK/Kafka 那个节点。
+# 安装包的 icms-controller.yaml / napstarweb-controller.yaml 里
+# sac / cmt / hds 三个 datasource 写的是 node2:5432 ->
+#   PSQLException: Connection to node2:5432 refused（实测）
+# ==============================================================
+echo "=== fixing node2:5432 -> node1:5432 ==="
+fix_node2() {
+  local dataId="$1" group="$2"
+  local body new resp back
+  body=$(curl -s -m 20 -G "$NACOS/v1/cs/configs" --data-urlencode "dataId=$dataId" --data-urlencode "group=$group")
+  if [ -z "$body" ] || [ "$body" = "config data not exist" ]; then
+    echo "  $group/$dataId : 不存在，跳过"; return
+  fi
+  if ! echo "$body" | grep -q 'node2:5432'; then
+    echo "  $group/$dataId : 无 node2:5432，跳过"; return
+  fi
+  new=$(printf '%s' "$body" | sed 's#node2:5432#node1:5432#g')
+  printf '%s' "$new" > /tmp/hd-fix.yaml
+  resp=$(curl -s -m 20 -X POST "$NACOS/v1/cs/configs" \
+    --data-urlencode "dataId=$dataId" --data-urlencode "group=$group" \
+    --data-urlencode "type=yaml" --data-urlencode "content@/tmp/hd-fix.yaml")
+  back=$(curl -s -m 20 -G "$NACOS/v1/cs/configs" --data-urlencode "dataId=$dataId" --data-urlencode "group=$group")
+  if echo "$back" | grep -q 'node2:5432'; then
+    echo "  $group/$dataId : ⚠️ 仍然有 node2:5432"
+  else
+    echo "  $group/$dataId : ✅ 已改为 node1:5432"
+  fi
+}
+fix_node2 "napstarweb-controller.yaml" "NAPSTARWEB_GROUP"
+fix_node2 "scheviewer.yaml" "NAPSTARWEB_GROUP"
+fix_node2 "icms-controller.yaml" "MODELSERVER_GROUP"
+fix_node2 "icms-real-controller.yaml" "MODELSERVER_GROUP"
+fix_node2 "icms-rtdataconsumer.yaml" "MODELSERVER_GROUP"
+fix_node2 "icms-commitDataIncreProducer.yaml" "MODELSERVER_GROUP"
+fix_node2 "icms-hisDataProducer.yaml" "MODELSERVER_GROUP"
+fix_node2 "icms-hisDataSend" "MODELSERVER_GROUP"
+fix_node2 "share_base.yaml" "DEFAULT_GROUP"
+fix_node2 "ext_base.yaml" "DEFAULT_GROUP"

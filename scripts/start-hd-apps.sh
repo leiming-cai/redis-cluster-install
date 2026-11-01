@@ -12,8 +12,8 @@ LOG_DIR=/opt/hd/logs
 mkdir -p "$LOG_DIR"
 
 # ⚠️ 堆参数比生产小很多（本机 3.9GB，且要给中间件留位置）。
-#    -Xmx256m 是能跑起来的下限；生产是 4G/2G。
-JAVA_OPTS="-Xms96m -Xmx256m -server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:MaxMetaspaceSize=192m -Dfile.encoding=UTF-8"
+#    -Xmx192m 是能跑起来的下限；生产是 4G/2G。
+JAVA_OPTS="-Xms64m -Xmx192m -server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:MaxMetaspaceSize=160m -Dfile.encoding=UTF-8"
 
 # 停止上一批：按 jar 名匹配，**绝不用 pkill -f java**（会杀掉中间件的 Kafka/ZK/Nacos）
 APP_JARS="web-controller|realalarmconsumer|realalarmproducer|rtdata-consumer|realserver-conntroller|model-controller|commitDataIncreProducer|hisDataProducer|hisDataSend|transformNapstarModel|sche-viewer-server"
