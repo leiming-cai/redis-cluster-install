@@ -49,8 +49,21 @@ CREATE_TMO=60
 # 容器内可达的地址 —— 必须不是 127.0.0.1
 # ⚠️ 不能用 `hostname -i`：它返回**空格分隔的多个值**（"172.22.0.2 172.22.0.2"），
 #    传给 redis-cli -h 会变成 "Could not connect to Redis at 172.22.0.2 172.22.0.2:16379"。
-#    `getent hosts node1 | awk '{print $1}'` 稳定返回单个 IP（实测一致）。
-ANNOUNCE_IP="${HD_CLUSTER_IP:-$(getent hosts node1 | awk '{print $1}')}"
+# ⚠️ `awk '{print $1}'` 也不行：它打印**每一行**的第一个字段，
+#    多行输出（getent ahosts node1 在这台机器上就是 3 行 STREAM/DGRAM/RAW）
+#    会得到多个 IP -> 命令行被拆开 -> 集群配置静默写错。
+#    `awk 'NF{print $1; exit}'` 只取第一个非空行。
+#    三个脚本（hd-redis-cluster.sh / hd-cluster-verify.sh / start-hd-apps.sh）
+#    必须用**同一种**写法，否则 IP 推导会分叉。
+#
+# ⚠️ 用 `${VAR-...}`（只认**没设**）而不是 `${VAR:-...}`（没设**或**空串都算）：
+#    显式设了空值是一种"我以为配了"的错误状态，应该报错，
+#    而不是悄悄回退到 getent 的结果 —— 那会让操作的人以为设成功了。
+if [ -n "${HD_CLUSTER_IP+set}" ]; then
+  ANNOUNCE_IP="$HD_CLUSTER_IP"
+else
+  ANNOUNCE_IP="$(getent hosts node1 | awk 'NF{print $1; exit}')"
+fi
 PORTS="16379 16380 16381"
 
 # 每个节点 64MB 上限 —— 宿主只剩 ~1.7GB，不能让 Redis 吃光
@@ -317,7 +330,16 @@ status() {
 # ⚠️ 拿不到容器 IP 就直接失败：空 IP 传给 redis-cli -h 会报
 #    "Could not connect to Redis at :16379: Name or service not known"，
 #    看起来像 DNS 出问题，其实是自己没拿到地址 —— 换个说法，别误导人。
-[ -n "$ANNOUNCE_IP" ] || { echo "!! 拿不到容器 IP（getent hosts node1 无结果，HD_CLUSTER_IP 也没给）。" >&2; exit 1; }
+# ⚠️ 光判空**不够**：HD_CLUSTER_IP 可能是"多个值"（空格分隔或换行分隔），
+#    那会被 redis-cli -h 当成一个畸形的 host -> 报一个更难懂的错。
+#    所以这里要求它是**单个** IP（只含数字和点）。
+case "$ANNOUNCE_IP" in
+  ''|*' '*|*$'\n'*|*[!0-9.]*)
+    echo "!! 容器 IP 解析失败或含多个值: '$ANNOUNCE_IP'" >&2
+    echo "   （getent hosts node1 的输出或 HD_CLUSTER_IP 有问题）" >&2
+    exit 1
+    ;;
+esac
 
 case "${1:-start}" in
   start)  start_nodes; create_cluster ;;

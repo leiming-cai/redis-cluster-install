@@ -16,9 +16,31 @@ set -uo pipefail
 REDIS_HOME=/opt/software/redis-8.10.0
 RC="$REDIS_HOME/bin/redis-cli"
 PASS="${HD_CLUSTER_PASS:-HdClusterPw2026}"
-# getent hosts node1 | awk '{print $1}' -> 单个 IP。
 # ⚠️ 不要用 `hostname -i`：它返回空格分隔的多个地址。
-IP="${HD_CLUSTER_IP:-$(getent hosts node1 | awk '{print $1}')}"
+# ⚠️ `awk '{print $1}'` 也不行：它打印**每一行**的第一个字段，
+#    多行输出（getent ahosts node1 在这台机器上就是 3 行 STREAM/DGRAM/RAW）
+#    会得到多个 IP -> 命令行被拆开 -> 断言打到错误的节点上。
+#    `awk 'NF{print $1; exit}'` 只取第一个非空行。
+#    三个脚本（hd-cluster-verify.sh / hd-redis-cluster.sh / start-hd-apps.sh）
+#    必须用**同一种**写法，否则 IP 推导会分叉。
+#
+# ⚠️ 用 `${VAR-...}`（只认**没设**）而不是 `${VAR:-...}`（没设**或**空串都算）：
+#    显式设了空值是一种"我以为配了"的错误状态，应该报错，
+#    而不是悄悄回退到 getent 的结果 —— 那会让操作的人以为设成功了。
+if [ -n "${HD_CLUSTER_IP+set}" ]; then
+  IP="$HD_CLUSTER_IP"
+else
+  IP="$(getent hosts node1 | awk 'NF{print $1; exit}')"
+fi
+# ⚠️ 必须是**单个** IP：多个值会让 redis-cli -h 拿到一个畸形 host，
+#    报出更难懂的错，而且断言可能悄悄打到别的节点上。
+case "$IP" in
+  ''|*' '*|*$'\n'*|*[!0-9.]*)
+    echo "!! 容器 IP 解析失败或含多个值: '$IP'" >&2
+    echo "   （getent hosts node1 的输出或 HD_CLUSTER_IP 有问题）" >&2
+    exit 1
+    ;;
+esac
 P1=16379; P2=16380; P3=16381
 TMO=5
 P=0; F=0
