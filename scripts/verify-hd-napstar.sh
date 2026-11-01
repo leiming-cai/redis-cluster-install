@@ -197,6 +197,70 @@ echo "############ B9 — 建库脚本一致性 ############"
 n=$($PSQL -d napstar -Atc "select count(*) from information_schema.tables where table_schema='info'" 2>/dev/null)
 chk "B9 HD info 表数" "${n:-0}" "30"
 
+# ---------------------------------------------------------------
+# C — 容器内 Redis 集群（可选段）
+#
+# ⚠️ **只有集群在跑的时候才跑这一段** —— 集群没起来时 hd-cluster-verify.sh
+#    会在 L0 探活那里 FAIL（"这个 master 没起来"），那是**环境状态**，
+#    不是回归失败。回归矩阵的判据是「既有行为不退化」，
+#    所以集群不在的时候整段跳过，而不是把它算成 FAIL。
+#
+# ⚠️ **计数必须并进外层，只由外层打一行 SUMMARY**：
+#    hd-cluster-verify.sh 自己也会打 "SUMMARY: PASS=.. FAIL=.."。
+#    如果直接把它整段输出出去，一次回归里会出现**两行 SUMMARY**，
+#    人和脚本都分不清哪行是结论 —— 而且外层的那行会漏掉集群的计数，
+#    看起来像「集群一条都没验」。
+#    所以这里：捕获它的输出 + 退出码，把它的 PASS/FAIL **加到外层的
+#    $PASS / $FAIL 上**，它自己的 SUMMARY 行**过滤掉**（不显示、也不计数）。
+#
+# ⚠️ 取**最后一行** SUMMARY，不是第一行：hd-cluster-verify.sh 在
+#    「L0 探活失败提前退出」的路径上也会打一行 SUMMARY，
+#    而它的 EXIT trap 在异常退出时还会**再补打一行**。
+#    只有最后一行是最终结论。
+# ---------------------------------------------------------------
+if [ -x /opt/hd/hd-redis-cluster.sh ] || [ -f /opt/hd/hd-redis-cluster.sh ]; then
+  if bash /opt/hd/hd-redis-cluster.sh status >/dev/null 2>&1; then
+    echo
+    echo "############ C — 容器内 Redis 集群 ############"
+    CV_OUT=$(mktemp /tmp/hd-cluster-verify-out.XXXXXX 2>/dev/null)
+    if [ -z "${CV_OUT:-}" ]; then
+      CV_OUT="/tmp/hd-cluster-verify-out.$$"
+    fi
+    bash /opt/hd/hd-cluster-verify.sh >"$CV_OUT" 2>&1
+    CV_RC=$?
+    # 把它的明细（PASS/FAIL 行、上下文）显示出来，但**滤掉它自己的 SUMMARY**。
+    grep -v '^SUMMARY: ' "$CV_OUT" | sed 's/^/  /'
+    # 取最后一行 SUMMARY 里的 PASS/FAIL 计数。
+    CV_SUM=$(grep '^SUMMARY: ' "$CV_OUT" | tail -1)
+    CV_P=$(echo "$CV_SUM" | grep -oP 'PASS=\K[0-9]+' || true)
+    CV_F=$(echo "$CV_SUM" | grep -oP 'FAIL=\K[0-9]+' || true)
+    CV_P=${CV_P:-0}; CV_F=${CV_F:-0}
+    if [ -z "$CV_SUM" ]; then
+      # 脚本崩了 / 没来得及打 SUMMARY —— 不能当成「0 个失败」。
+      bad "C 集群验证没有产出 SUMMARY（退出码 $CV_RC）—— 集群验证本身异常"
+    else
+      PASS=$((PASS + CV_P))
+      FAIL=$((FAIL + CV_F))
+      echo "  (集群验证已并入本轮计数: PASS +$CV_P, FAIL +$CV_F)"
+      # ⚠️ 退出码与它自己的 FAIL 计数不一致时要点名 ——
+      #    「计数说 0 个失败，但退出码非 0」意味着它的判定逻辑和它的输出打架了，
+      #    这时候不能只信计数。
+      if [ "$CV_RC" -ne 0 ] && [ "$CV_F" -eq 0 ]; then
+        bad "C 集群验证退出码非 0（$CV_RC）但它自己报 FAIL=0 —— 计数与退出码不一致"
+      fi
+    fi
+    rm -f "$CV_OUT" 2>/dev/null
+  else
+    echo
+    echo "############ C — 容器内 Redis 集群（跳过：集群没在跑）############"
+    skip "C 集群没在跑（hd-redis-cluster.sh status 非 0）—— 不计入本轮回归"
+  fi
+else
+  echo
+  echo "############ C — 容器内 Redis 集群（跳过：没有 hd-redis-cluster.sh）############"
+  skip "C 容器里没有 /opt/hd/hd-redis-cluster.sh"
+fi
+
 echo
 echo "SUMMARY: PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ "$FAIL" -eq 0 ]

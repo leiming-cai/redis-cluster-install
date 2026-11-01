@@ -791,6 +791,126 @@ D7-b 让这个失效**连日志都不留**。只修 D7-a 不修 D7-b，
 
 ---
 
+## 🟡 D8（交付包差异）`model-controller` 的 jar 被换成过一份 —— 换回来之后它**在 standalone 模式下起不来**
+
+> **发现于 Task 6（回归验证轮）。**
+> 这条**不是**本轮集群工作引入的，也不是 D7 的一部分 ——
+> 它解释的是「为什么回归矩阵的 A 段现在跑不出基线的 `PASS=47 FAIL=0`」。
+> **不修它，回归矩阵就有 2 条恒定 FAIL（`A2 model-controller` / `A2b model-controller`）**，
+> 而那 2 条 FAIL 会**永久掩盖**真正的回归。
+
+### 现象
+
+Task 6 跑回归矩阵（`scripts/verify-hd-napstar.sh`），只起批次 1：
+
+```
+SUMMARY: PASS=84 FAIL=2 SKIP=3
+  FAIL  A2 model-controller Redis 连接行异常: <none>
+  FAIL  A2b model-controller Redis 模式
+```
+
+而基线（2026-11-01）是 `SUMMARY: PASS=47 FAIL=0 SKIP=3`。
+
+### 根因（逐字节核实过）
+
+容器里 `/opt/napstar_app/model-controller-3.0.0.jar` 有**两个版本**：
+
+| jar | md5 | mtime | `BOOT-INF/classes/application.yml` 里的 `oms:` 块 |
+|---|---|---|---|
+| **当前部署的** | `c41735d81db324e1a69dc4aa3e47ada2` | Nov 1 **15:15** | **没被注释** —— `redisMode: cluster` + `clusters: [127.0.0.1:6379]` + `password: ""` |
+| **D2 备份的** | `064ba5fa05266dcf5b2e14c594abbfed` | Nov 1 00:16 | **被注释掉了** —— 只有一行 `# oms:` |
+
+两份 jar 的 `oms:` 块差的就是**一个注释符**。后果：
+
+- **备份那份（基线部署的）**：`oms:` 不生效 → 回落读 Nacos 的 `oms:` → 拿到 `node1:6379` + `sac888` → **standalone 正常起**（基线 `A2` / `A2b` 全 PASS）
+- **当前这份**：`oms:` 生效，但值是**占位符**（`cluster` + `127.0.0.1:6379` + 空密码）→ 连本机 standalone 6379 直接 **NOAUTH**：
+
+```
+=== per-app startup result ===
+  FAILED   model-controller  Caused by: redis.clients.jedis.exceptions.JedisDataException: NOAUTH Authentication required.
+```
+
+### 为什么基线能过、现在过不了 —— **不是 jar 变坏了，是「谁来启动它」变了**
+
+`model-controller` 现在**只能**在集群模式下起来（`HD_REDIS_CLUSTER=1` 会用命令行覆盖掉 jar 里的占位符）：
+
+```
+HD_REDIS_CLUSTER=1 → 起得来（Task 5 实测）
+不带                 → NOAUTH，起不来
+```
+
+而 `scripts/start-hd-apps.sh` 的批次 1 **不含** `model-controller`（它在批次 `1b`），
+且 `start-hd-apps.sh` 的 `stop_apps()` 会停掉**所有** app jar
+→ 批次 `1` 和 `1b` **不能**用这个脚本串起来跑。
+
+⇒ 于是回归矩阵跑的时候，`model-controller` 要么**没在跑**（`A1` 读到**上一轮留下的旧日志**，
+`A2`/`A2b` 因为旧日志里没有 standalone 那行而 FAIL），
+要么**压根起不来**（`A1` / `A1b` / `A2` / `A2b` 四条一起 FAIL）。
+
+### 判据（可复现）
+
+```bash
+# 哪份 jar 装着？
+md5sum /opt/napstar_app/model-controller-3.0.0.jar
+# 期望（当前部署）: c41735d81db324e1a69dc4aa3e47ada2
+# 基线那一份:      064ba5fa05266dcf5b2e14c594abbfed  (在 /opt/hd/jar-backup-d2/)
+
+# jar 里的 oms: 块是什么？
+cd /tmp && rm -rf mcyml && mkdir mcyml
+unzip -o -q /opt/napstar_app/model-controller-3.0.0.jar \
+  'BOOT-INF/classes/application.yml' -d mcyml
+awk '/^oms:/{f=1} f&&/^[a-zA-Z]/&&!/^oms:/{exit} f' mcyml/BOOT-INF/classes/application.yml
+# 当前部署的这份: redisMode: cluster / clusters: [127.0.0.1:6379] / password: ""
+```
+
+### 对照实验（Task 6 实测，已还原）
+
+| jar | 应用集合 | 矩阵结果 |
+|---|---|---|
+| 当前部署的（`c41735d8`） | 批次 1（model-controller 没起） | `PASS=84 FAIL=2 SKIP=3`（**2 条 FAIL 全在 model-controller**） |
+| **D2 备份的（`064ba5fa`）** | 批次 1 **+ model-controller** | **`PASS=86 FAIL=0 SKIP=3`**（base 47 + 集群 39，**FAIL=0**） |
+| 当前部署的（`c41735d8`，jar 已还原） | 批次 1 **+ model-controller**（进程还是用旧 jar 起的） | `PASS=47 FAIL=0 SKIP=4`（**集群已停 → C 段跳过**） |
+
+⇒ **结论：既有验证矩阵本身没有退化。** 换成基线那份 jar、让 4 个应用都在跑，
+   base 矩阵精确回到 **47 PASS / 0 FAIL / 3 SKIP**（与基线逐条一致），
+   Task 6 新加的 C 段再并进 **39 PASS / 0 FAIL**。
+   ⇒ 之前那 2 条 FAIL **100% 是 jar 差异 + 应用集合差异**造成的，**与集群工作无关**。
+
+> ⚠️ **对照实验已完全还原**：jar 文件的 md5 已改回 `c41735d81db324e1a69dc4aa3e47ada2`，
+> 宿主侧留有 `mc-current-jar-backup.jar` 副本。
+>
+> ⚠️ **但有个 JVM 层面的残留要说清楚**：把 jar 文件换回去**不等于**把
+> 已经跑起来的 JVM 换回去 —— JVM 启动时就把 jar 里的 class 读进内存了，
+> 之后改磁盘上的 jar 对**已在运行的进程**没有任何影响。
+> ⇒ 所以「jar 已还原」之后，`model-controller` 那个进程**仍然是**用
+> `064ba5fa` 那份起的（它的日志里还是 `Using Redis Standalone at node1:6379`）。
+> ⇒ **下次重启 `model-controller` 时，它会重新读当前那份 `c41735d8` 的 jar，
+> 就会又变成「起不来」。** 这不是回归，是 D8 本身。
+> ⇒ **在 D8 修掉之前，任何一轮回归都必须显式确认 model-controller 是怎么起来的**
+> （用哪份 jar、有没有 `HD_REDIS_CLUSTER=1`），否则 A 段的数字不可比。
+
+### 影响面
+
+- **对集群工作本身**：无影响。D7 的两条 FAIL 是「集群补丁没进交付树」，
+  与这条**独立**。
+- **对回归验证**：**有影响** —— 只要 `model-controller` 用当前这份 jar，
+  验证矩阵的 A 段就**必然**有 2~4 条 FAIL。
+  跑回归之前要么①把 `model-controller` 的 `oms:` 块修成 standalone（或注释掉），
+  要么②跑矩阵时用 `HD_REDIS_CLUSTER=1` 起 `model-controller`
+  并**相应改掉 A2/A2b 的判据**（它们现在写死了「必须是 STANDALONE」）。
+
+### 修法（**本轮不做**，Task 7 决定）
+
+1. **正解**：把 jar 里 `oms:` 块的占位符换成**真配置**（或直接注释掉，让它回落读 Nacos），
+   重新打包。这样 `model-controller` 在两种模式下都能起来，验证矩阵的判据也不用改。
+2. **临时绕过**：跑回归前把 `/opt/hd/jar-backup-d2/model-controller-3.0.0.jar` 拷回去
+   （**注意：这会让 `model-controller` 用旧二进制**，D7 说的「集群补丁没进交付树」依然成立）。
+3. **改判据**：让 A2/A2b 接受「STANDALONE 或 CLUSTER」——
+   ⚠️ **不推荐**：A2 的本意是「**走对了配置路径**」（`node1:6379` + `timeout=5000`），
+   放宽成「两种都行」就把「意外走了硬编码 `10.137.220.191`」这条真正的失败判据一起放松了。
+
+---
+
 ## 📋 汇总
 
 | # | 严重度 | 谁引入 | 状态 |
@@ -803,3 +923,4 @@ D7-b 让这个失效**连日志都不留**。只修 D7-a 不修 D7-b，
 | D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行** |
 | D7-a | 🔴 | **集群补丁从未进入 napstar2.0 交付树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code`；补丁只在 portal/SVN 树 `D:\javawork\1.2\cpscloud1.0\code` 和共享的 `realserver-oms` / `model-service` 二进制里） | **待修**：把集群分支**移植进交付树的 5 个调用点**（照树 B 的 `if (redisClusterHelper.isCluster()) {…} else {executePipelined(…)}` 写法；`RedisClusterHelper` / `RedisClusterHashPipeline` 从交付树**现有**的 `realserver-oms` 依赖就能拿到 —— 那份二进制**本身已带集群分支**，**不需要新增模块**），**然后**重新编译并重新部署；并加 CI 门禁（查 jar + 查**限定范围后**的 5 个调用点） |
 | D7-b | 🔴 | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | **待修**：把树 B 的 `.join()` + `writeWithRetry` + 去 `@Async` 移植进交付树；异常要显式记日志。**光重新编译修不掉**，且**必须跟 D7-a 一起修** |
+| D8 | 🟡 | **交付包差异**（`model-controller` 的 jar 被换成过一份：`oms:` 块从「注释掉」变成「cluster + `127.0.0.1:6379` + 空密码」的占位符） | **待定**：不修它，验证矩阵的 A 段**恒定**有 2~4 条 FAIL（`A2`/`A2b` model-controller），会掩盖真正的回归。**Task 6 实测：换回基线那份 jar + 让 4 个应用都在跑 → base 矩阵精确回到 47 PASS / 0 FAIL / 3 SKIP** ⇒ 矩阵本身没退化 |
