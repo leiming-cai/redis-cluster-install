@@ -293,6 +293,167 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块，实测优先级是：
 
 ---
 
+## 🔴 D7（集群模式接入实测）部署的 jar 早于集群补丁 —— 集群模式下功能静默失效
+
+> **2026-11-01 实测**（`scripts/hd-cluster-app-test.sh`，三个应用各一条判据）。
+> 本条记录两个**互相独立**的缺陷：
+> **D7-a** 是部署产物过期，**D7-b** 是代码本身漏了错误处理。
+> D7-b **在重建 jar 之后依然存在**，所以两条必须分开记、分开修。
+
+### D7-a — 部署的 jar 没有集群分支（补丁没编译进去）
+
+#### 现象
+
+集群模式下（`HD_REDIS_CLUSTER=1`），两个应用写 Redis 的路径**完全没生效**：
+
+| 应用 | 现象 |
+|---|---|
+| `web-controller` | 日志里每次调用都抛 `UnsupportedOperationException`（一次启动 20～60 处） |
+| `rtdata-consumer` | **一条数据都没写进集群，而且日志里连异常都没有** |
+
+而 `model-controller` 一切正常（它用的 `model-service-1.0.14.jar` **是**带集群分支的）。
+
+#### 根因
+
+**部署的 jar 早于 2026-10-31 的集群补丁，从来没重新编译过。**
+
+用 `javap` / class 常量池直接查两个产物里的同一个 class：
+
+| class | 部署产物 `monitor-3.0.0.jar` | 本地产物 `monitor-1.0.14.jar`（2026/10/31 06:33） |
+|---|---|---|
+| `SVGCacheServiceImpl` | `isCluster=0` `RedisClusterHelper=0` | **`isCluster=2` `RedisClusterHelper=2`** |
+| `RTListener` | `isCluster=0` `RedisClusterHelper=0` | **`isCluster=2` `RedisClusterHelper=2`** |
+| `SVGParseService` | `isCluster=0` `RedisClusterHelper=0` | **`isCluster=3` `RedisClusterHelper=2` `RedisClusterHashPipeline=2`** |
+| `CalculateService` | `isCluster=0` `RedisClusterHelper=0` | **`isCluster=2` `RedisClusterHelper=2` `RedisClusterHashPipeline=2`** |
+
+`rtdata-module-3.0.0.jar`（部署产物）里的 `RedisRealDataServiceImpl` 同样是
+`isCluster=0` `RedisClusterHashPipeline=0`。
+
+对照**源码树**（`application/backend/napstarweb`、`platform/backend/realserver`）：
+10 处 `executePipelined` **全部**已经加了 `isCluster()` 集群分支；
+本地编译出来的 `monitor-1.0.14.jar`（2026/10/31 06:33）**也**带这些分支。
+
+⇒ 也就是说：**补丁在源码里、也在本地产物里，唯独不在部署产物里。**
+
+#### 影响面
+
+1. **web-controller**：`SVGCacheServiceImpl.loadRTConfigKafka()`、
+   `CalculateService.batchDoRTDataCache()`、`CalculateService.batchGetParam()`
+   这三条路径在集群模式下**每次调用都抛**：
+
+   ```
+   java.lang.UnsupportedOperationException: Pipeline is currently not supported
+   for JedisClusterConnection.
+     at org.springframework.data.redis.connection.jedis.JedisClusterConnection.openPipeline(JedisClusterConnection.java:849)
+     at org.springframework.data.redis.core.RedisTemplate.lambda$executePipelined$1(RedisTemplate.java:320)
+   ```
+
+   应用**照样启动成功、照样注册到 Nacos**（这正是设计文档 §2.3 说的
+   「启动正常 ≠ 能用」），但 `real_graph:*` 那批缓存一个都写不进去。
+
+2. **rtdata-consumer**：**静默丢数据**。`batchWirtePip` →
+   `RedisRealDataServiceImpl.wirteOmsPip` → `executePipelined` →
+   `openPipeline()` 抛异常，而异常被 D7-b 吞掉 ——
+   **集群里一条 `real_data:*` 都没有，日志里一行错误都没有**。
+   A/B 实测（**同一条**消息）：
+   - 单机模式 → `real_data:31249:134213433032705`，`HGET` = `"3.14,2026-11-01 00:00:00,2"` ✅
+   - 集群模式 → **什么都没有** ❌（Kafka 侧确认消息已送达：`INCDATA-0` offset 5→6，lag 0）
+
+   ⚠️ 这条是**实时数据**通道 —— 集群模式下等于**全部实时数据都丢**，
+   而且监控盯日志是**发现不了**的。
+
+#### ⚠️ 不要拿 `real_graph:realscope` 缺失当本条的证据
+
+那个 key **即使在单机模式下也不会出现**，原因是**数据缺口**不是集群问题：
+
+`loadRTConfigKafka()` 只在 `modelDataService.matchOType(oname)` 返回非 null 时
+才执行 `hSet`；而 `matchOType` 查的 `info.model_objecttype` /
+`info.model_attribute` / `info.model_objectattribute`
+在这个安装包里**全是 0 行**，于是每个模型名都抛
+`OTypeException: oType数值非法或不存在：XXX`，`continue` 掉。
+
+实测（**同一个 jar**、**单机**模式、pipeline 完全正常、**0 个** UOE）：
+
+```
+Using Redis Standalone at node1:6379
+UOE count = 0
+loadRTConfigKafka DID run（3 处栈帧）
+real_graph:* key 数 = 0      ← 单机模式也没有
+```
+
+⇒ 所以 `real_graph:realscope` 缺失**不能**用来证明 jar 过期
+（重建 jar 之后它**照样**缺）。**本条的证据是 `javap` 里的 `isCluster=0`**，
+以及上面那条 web-controller 的 UOE 栈。
+
+（`scripts/hd-cluster-app-test.sh` 的 A2 判据已经按这个事实改成
+「元数据表是空就**跳过**并说明原因」，不再报 FAIL。）
+
+#### 修法
+
+1. **重新编译并重新部署** `monitor`（napstarweb）和 `rtdata-module`（realserver）两个模块。
+2. **加一道 CI 门禁**：部署前对 jar 里的 class 断言集群分支存在，例如
+
+   ```bash
+   # 部署 jar 里必须能查到集群分支的痕迹
+   unzip -p <app>.jar BOOT-INF/lib/monitor-*.jar > /tmp/m.jar && unzip -q /tmp/m.jar -d /tmp/m
+   # 然后在 /tmp/m 里 grep class 常量池里的 isCluster / RedisClusterHelper
+   ```
+
+   —— 没有这道门禁，「改了源码忘了重建」会**静默**再次发生。
+
+### D7-b — `batchWirtePip` 把 `CompletableFuture` 丢掉了（重建 jar 之后依然存在）
+
+#### 现象
+
+`rtdata-consumer` 在集群模式下写 Redis 失败，**日志里一个异常都没有**。
+
+#### 根因
+
+部署产物里 `OmsWriteByKafkaServiceImpl.batchWirtePip` 的字节码：
+
+```
+142: invokeinterface  // RedisRealDataService.wirteOmsPip(...)Ljava/util/concurrent/CompletableFuture;
+147: pop              ← 返回的 CompletableFuture 被直接丢掉
+```
+
+`wirteOmsPip` 返回的是 `CompletableFuture`，**没人 `join()`** ——
+实测整个 class 里 `CompletableFuture.join` 出现 **0 次**。
+于是方法体里抛出来的异常被**封在这个 future 里**，没有任何人观察它 ——
+既不进日志，也不进 stderr。
+
+（`javap` 可见 `RedisRealDataServiceImpl.wirteOmsPip` 上带
+`@Async("consumerRunExecutor")`，所以异常发生在**另一个线程**上，
+调用方更无从察觉。）
+
+同一次测量（部署产物 `rtdata-module-3.0.0.jar`）：
+
+```
+RedisRealDataServiceImpl : isCluster=0  RedisClusterHashPipeline=0  Async=1
+OmsWriteByKafkaServiceImpl : CompletableFuture.join 出现 0 次
+```
+
+#### 影响面
+
+**集群模式下任何一条写路径失败都是完全静默的**：
+数据一条不写、日志一行不留。这比「报错」危险得多 ——
+报错至少说明出事了，静默说明「一切正常」而实际上什么都没发生。
+
+#### 修法
+
+跟 `OmsWriteByKafkaServiceImpl.writeWithRetry` 的思路一致：
+
+1. `wirteOmsPip` **不要**返回 `CompletableFuture`（或者调用方必须 `join()`）；
+2. 异常要**显式**落到日志里：重试次数、最后一次的异常、失败条数；
+3. `@Async` 的方法**返回 `CompletableFuture` 时**，异常必须通过
+   `join()` / `whenComplete()` 被观察，否则 Spring 不会替你记。
+
+> 📌 源码树里 `OmsWriteByKafkaServiceImpl` 已经改成 `writeWithRetry(...)` +
+> `.join()` 了 —— 但**部署的 jar 还没重建**（见 D7-a）。
+> 也就是说：**D7-a 修完之后，D7-b 才会真正暴露成需要单独修的问题**。
+> 两条都要改，不能以为重建 jar 就完事了。
+
+---
+
 ## 📋 汇总
 
 | # | 严重度 | 谁引入 | 状态 |
@@ -303,3 +464,5 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块，实测优先级是：
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
 | D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行** |
+| D7-a | 🔴 | **部署产物过期**（源码 2026-10-31 已打补丁，部署 jar 没重建） | **待修**：重新编译并重新部署 `monitor` + `rtdata-module`；并加 CI 门禁断言部署 jar 里带集群分支 |
+| D7-b | 🔴 | **代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞） | **待修**：显式 join / 记日志。**重建 jar 之后依然存在**，跟 D7-a 是两件事 |

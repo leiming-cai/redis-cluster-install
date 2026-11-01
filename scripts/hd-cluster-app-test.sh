@@ -8,20 +8,33 @@
 #      == 我们配的列表（**逐字、含顺序**比较）。
 #   ② 一次**真实的读写往返**成功 —— 不是只看「连上了」。
 #      教训：oms.clusters 填错时启动正常、第一次读写才炸
-#      （docs/HANDOFF.md:3462-3467，设计文档 §2.3）。
+#      （设计文档 docs/superpowers/specs/2026-11-01-hd-redis-cluster-test-design.md §2.3；
+#        同一个坑在 docs/HANDOFF.md 里也有记述，但行号已经漂移，别按行号引用）。
 #
 # 【判据 ② 怎么测才算数】
 #   光用 redis-cli 写读只能证明**集群**能用，证明不了**应用**能用。
-#   所以这里测的是**应用自己**在集群里留下的痕迹：
+#   所以这里测的是**应用自己**在集群里留下的痕迹 —— 即**应用自己写的 key**
+#   出现在集群里，而且能读回应用自己那份载荷：
 #     - web-controller   : StartupRunner -> SVGCacheServiceImpl.loadRTConfigKafka()
 #                          写 hash `real_graph:realscope`
 #     - model-controller : CacheServiceImpl 的 @Cacheable 写 `model:*` 前缀
 #                          （POST /model/modelData/getEnumDictTypes 触发）
 #     - rtdata-consumer  : RTListener.onMessage(INCDATA) -> batchWirtePip()
 #                          写 hash `real_data:<otype>:<obid>`，field=<atype>
-#   再加一条**集群侧的独立证据**：三个 master 的
-#   `INFO stats` 里的 total_commands_processed 增量 > 0
-#   —— 那是**应用**发过来的命令（redis-cli 自己的调用不计入这个窗口）。
+#
+#   这就是判据 ② 的**全部**依据 —— 「应用自己的 key + 应用自己的载荷」。
+#
+#   ⚠️ 曾经还有一个「三个 master 的 total_commands_processed 增量 > 0」的判据，
+#      **已删除**：它是**空判**（不可能失败）。每个 `INFO stats` 本身就是要查的
+#      那个节点上**被计数的命令**，所以脚本自己取的快照就自带增量 ——
+#      实测「没有应用、什么都不做、隔 3 秒取两次快照」增量就已经是 2。
+#      而且这个计数器是**节点级全局**的（所有客户端的命令都算进去），
+#      根本没法把流量归属到应用身上。现在它只作为**诊断信息**打印，不作判据。
+#
+# 【判据的「可执行性」前提】
+#   有些判据在某些环境里**根本跑不起来**（数据缺失），这时必须**跳过并说清楚原因**，
+#   不能报 FAIL —— 否则会把「环境缺数据」误报成「应用有 bug」。
+#   本脚本里 web-controller 的 A2 就是这种情况（见下面 A2 段的说明）。
 #
 # 【JVM 层的 UnsupportedOperationException 限制】
 #   SDR 2.7.18 的 JedisClusterConnection.openPipeline() 直接抛
@@ -79,9 +92,10 @@ case "$IP" in
     ;;
 esac
 
-P=0; F=0
+P=0; F=0; S=0
 ok()  { echo "  PASS  $*"; P=$((P+1)); }
 bad() { echo "  FAIL  $*"; F=$((F+1)); }
+skip(){ echo "  SKIP  $*"; S=$((S+1)); }
 chk() { if [ "$2" = "$3" ]; then ok "$1 ($2)"; else bad "$1 (got '$2', want '$3')"; fi; }
 
 # ⚠️ **每一次** redis-cli 调用都要套 timeout：
@@ -148,23 +162,27 @@ trap '_e=$?; cleanup; if [ "$DONE" -eq 0 ]; then
           F=$((F+1))
           echo "  FAIL  脚本异常退出（exit=$_e）—— 上面那条错误才是根因"
         fi
-        echo; echo "SUMMARY: PASS=$P FAIL=$F"
+        echo; echo "SUMMARY: PASS=$P FAIL=$F SKIP=$S"
       fi; exit $_e' EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
 
 # ---------------------------------------------------------------
-# 集群侧的独立证据：三个 master 的 total_commands_processed。
+# 集群侧的**诊断信息**（不是判据）。
 #
-# 用它来证明「**应用**真的往集群发了命令」：
-# 取快照 -> 触发应用动作 -> 再取快照 -> 增量必须 > 0。
+# ⚠️ 这个计数器**不能**当判据用 —— 原因写在文件头的说明里：
+#    每个 `INFO stats` 本身就是要查的那个节点上**被计数的命令**，
+#    所以脚本自己取的快照就自带增量（实测空闲集群隔 3 秒取两次 = 2），
+#    「增量 > 0」是个**永远不会失败**的空判；
+#    而且计数器是**节点级全局**的（所有客户端的命令都算进去），
+#    无法把流量归属到应用。
+#
+#    所以这里只把它**打印出来**，供人判断「应用到底有没有在跟集群说话」：
+#    应用真的在写时，增量会明显高于「脚本自己那几条命令」的量级。
 #
 # ⚠️ 三个 master 都要看：应用写的 key 可能落在任意一个 master 上，
 #    只看 16379 会漏掉「应用只碰到了 16379」以外的情况。
-#
-# ⚠️ 用 INFO stats 的 total_commands_processed（一行就能取到），
-#    不用 INFO commandstats（要自己解析一堆 cmdstat_* 行）。
 cmd_counter() {
   local p="$1" v
   v=$(r "$p" INFO stats | grep -m1 '^total_commands_processed:' | cut -d: -f2 | tr -d '\r')
@@ -187,6 +205,43 @@ counter_delta() {
     [ "$i" = "-1" ] && { echo "-1"; return; }
   done
   echo $(( (a1-b1) + (a2-b2) + (a3-b3) ))
+}
+# 打印动作窗口里的命令增量（**仅供参考**，不是判据 —— 见上面的说明）
+report_counter_delta() {
+  local name="$1" delta="$2"
+  echo "    [诊断] 三个 master 的命令增量合计 = $delta"
+  echo "           （参考值，不是判据：脚本自己的 INFO/EXISTS 命令也计入；"
+  echo "             应用真在写时会明显高于这个量级）"
+}
+
+# ---------------------------------------------------------------
+# 前置条件：模型元数据表里有没有行。
+#
+# ⚠️ 为什么需要它：web-controller 的写路径
+#    `SVGCacheServiceImpl.loadRTConfigKafka()` 会对每个模型类型调
+#    `modelDataService.matchOType(oname)`；**只有 matchOType 返回非 null
+#    才会执行 hSet**。而 matchOType 查的是 `info.model_objecttype` 等表 ——
+#    这个安装包里这些表**是空的**（0 行），于是每个模型名都抛
+#    `OTypeException: oType数值非法或不存在：XXX`，`continue` 掉，
+#    **hSet 一次都不执行**。
+#
+#    实测（同一个 jar，**单机**模式，pipeline 完全正常、0 个 UOE）：
+#      `real_graph:*` key 数 = 0
+#    ⇒ 也就是说这个 key 在**单机模式也不会出现**。
+#    它**不是**集群模式的问题，是**数据缺口**。
+#    所以 A2 判据必须**跳过**，不能报 FAIL ——
+#    否则重建 jar 之后它还是会 FAIL，就把「环境缺数据」误报成「应用有 bug」。
+#
+# 用法：model_metadata_rows -> 打印 `info.model_objecttype` 的行数（读不到则 -1）
+model_metadata_rows() {
+  local n
+  n=$(PGPASSWORD="${PGPASSWORD:-postgres}" \
+       psql -U postgres -h 127.0.0.1 -d napstar -Atc \
+       "select count(*) from info.model_objecttype" 2>/dev/null | tr -d '\r')
+  case "$n" in
+    ''|*[!0-9]*) echo "-1" ;;
+    *) echo "$n" ;;
+  esac
 }
 
 # ---------------------------------------------------------------
@@ -213,6 +268,14 @@ check_cluster_mode() {
   chk "$name 集群节点列表" "$nodes" "$EXPECTED_NODES"
   # 顺带把模式行也钉住 —— 集群模式那行必须在，
   # 并且 Standalone 那行**不该**在同一次启动里出现。
+  #
+  # ⚠️ 这里扫的是**整个日志文件**，所以它依赖一个前提：
+  #    `start-hd-apps.sh` 用 `>`（**截断**）写日志，不是 `>>`（追加）。
+  #    截断 => 每次启动的日志里只有本次的模式行 => 判据成立。
+  #    万一哪天改成追加（或有人手工 `>>` 续写），上一轮单机启动留下的
+  #    Standalone 行会留在文件里 -> 这里会误报 FAIL。
+  #    所以这条判据的可靠性**依赖日志被截断**；真要改成追加的话，
+  #    这里必须改成只扫「本次启动之后」的那一段。
   local standalone
   standalone=$(grep -a -oE '\*\*\* Using Redis Standalone at [^)]*\)' "$log" 2>/dev/null | tail -1)
   if [ -n "$standalone" ]; then
@@ -246,16 +309,31 @@ check_cluster_mode() {
 #    （模型不支持之类），跟 Redis 的那个没关系，不能一起算。
 #    所以只认 `java.lang.UnsupportedOperationException` 这个全限定名
 #    以及 JedisClusterConnection 那句原文。
+#
+# ⚠️⚠️ 两种写法（限定名 / SDR 原文）**合成一条断言**，不要拆成两条。
+#    实测：每一条 SDR 原文都带着那个全限定名，反之亦然（57 = 57，
+#    两个方向都没有例外）。所以它们量的是**同一件事** ——
+#    拆成两条就是把**同一个缺陷数了两遍**，
+#    计数会虚高一倍（缺陷数 2 却报 FAIL=3），读的人也会以为有两个问题。
+#    保留两种写法是为了防「将来某个 SDR 版本只打印其中一种」，
+#    但它们必须**共用一个 ok/bad**，所以只能失败一次。
 check_no_pipeline_exception() {
   local name="$1" log="$2"
   [ -f "$log" ] || { bad "$name 没有日志文件 $log"; return 1; }
-  local n
-  n=$(grep -ac 'java\.lang\.UnsupportedOperationException' "$log" 2>/dev/null)
-  chk "$name 无 java.lang.UnsupportedOperationException（没踩 openPipeline 的雷）" "${n:-0}" "0"
-  # SDR 集群 pipeline 的原文（有些版本只打这一句而不打类名）
-  local m
-  m=$(grep -ac 'not supported for JedisClusterConnection' "$log" 2>/dev/null)
-  chk "$name 日志里没有 'not supported for JedisClusterConnection'" "${m:-0}" "0"
+  # 两种写法都数一遍，取**并集**的条数（一条异常行会被两种写法各数一次，
+  # 所以这里要数「行」而不是「次」，否则会翻倍）。
+  local n_fqn n_sdr n
+  n_fqn=$(grep -ac 'java\.lang\.UnsupportedOperationException' "$log" 2>/dev/null)
+  n_sdr=$(grep -ac 'not supported for JedisClusterConnection' "$log" 2>/dev/null)
+  # ⚠️ 两个计数里**较小**的那个才是「异常出现的次数」——
+  #    实测两者恒等（同一个异常行同时被两种写法命中），
+  #    取 min 在「相等」时就是真实次数，在「将来只打印一种」时也不会翻倍。
+  if [ "${n_fqn:-0}" -le "${n_sdr:-0}" ] 2>/dev/null; then
+    n="${n_fqn:-0}"
+  else
+    n="${n_sdr:-0}"
+  fi
+  chk "$name 无 java.lang.UnsupportedOperationException（没踩 openPipeline 的雷；限定名计数 ${n_fqn:-0} / SDR 原文计数 ${n_sdr:-0}）" "${n:-0}" "0"
 }
 
 # ---------------------------------------------------------------
@@ -292,29 +370,38 @@ start_batch() {
 }
 
 # ---------------------------------------------------------------
-# 「应用往集群发了命令吗」的判据（三个 master 的命令增量）。
-# ⚠️ 这只是**必要条件**（证明应用确实跟集群说话了），
-#    不等于「数据写对了」—— 后者由下面「应用自己的 key」那条来证。
-assert_app_talked() {
+# 「应用往集群发了命令吗」的**诊断输出**（不是判据）。
+#
+# ⚠️ 这里**故意**不做断言：命令增量是个**空判**（脚本自己的 INFO/EXISTS
+#    命令就计入那个计数器，空闲集群的增量都不是 0），
+#    而且它是节点级全局计数器，**无法**把流量归属到应用。
+#    判据 ② 的依据是「**应用自己的 key + 应用自己的载荷**」，见 assert_app_key_present。
+report_app_talked() {
   local name="$1" delta="$2"
-  echo "    三个 master 的命令增量合计: $delta"
-  if [ "$delta" -gt 0 ] 2>/dev/null; then
-    ok "$name 应用往集群发了命令（增量 $delta > 0）"
-  else
-    bad "$name 应用**没有**往集群发任何命令（增量 $delta）—— 应用没真正用上集群"
-  fi
+  report_counter_delta "$name" "$delta"
 }
 
 # 应用自己的 key 在集群里吗（用 -c 跟随 MOVED，三个 master 都查）
 #
+# ⚠️ 这**才是**判据 ② 的依据：key 是**应用自己写的**，
+#    载荷也是**应用自己的**格式（比如 model:enumdicts:folder:user_sex
+#    读回来是 EnumDict 的 JSON）。
+#    缺了它就只剩「redis-cli 自己写的 key」—— 那证明不了应用。
+#
 # ⚠️ 找不到的时候要把**最可能的原因**一起打出来，
 #    否则只看到「key 不在」还得自己从头查一遍。
-#    最常见的原因有两个：
-#      ① 应用那条路径在集群模式下被 SDR 的 pipeline 限制打掉了
-#         （JedisClusterConnection.openPipeline 抛 UnsupportedOperationException），
-#         数据一条都没写进去 —— 日志里通常能看到那个异常；
-#      ② 应用那条路径整个被异常吞掉了（@Async + CompletableFuture 不 join），
-#         连日志都没有 —— 只能靠「集群侧命令数没涨」来旁证。
+#    两种原因要分清楚（别把「没验证过的猜测」写成结论）：
+#      ① 日志里有 UnsupportedOperationException
+#         -> 已验证：那条代码路径在集群模式下走的是裸 executePipelined，
+#            SDR 2.7.18 的 JedisClusterConnection.openPipeline() 直接抛异常，
+#            回调体一次都不执行（数据根本没发出去）。
+#      ② 日志里没有异常
+#         -> **不能**断言「被 @Async 吞了」—— 那只是**候选原因之一**。
+#            已验证的事实是「部署的 jar 里那条路径压根没有集群分支，
+#            所以它永远走不到能报错的分支」，异常则被
+#            「CompletableFuture 被丢弃（没人 join）」这一步吞掉，
+#            于是什么都留不下。其它可能（路径没被触发、数据本身不合法）
+#            也不能排除，所以这里只陈述已验证的部分 + 列出其它可能。
 assert_app_key_present() {
   local name="$1" key="$2" log="${3:-}"
   local p n found=0
@@ -332,20 +419,27 @@ assert_app_key_present() {
     local n1
     n1=$(grep -ac 'not supported for JedisClusterConnection\|java\.lang\.UnsupportedOperationException' "$log" 2>/dev/null)
     if [ "${n1:-0}" -gt 0 ] 2>/dev/null; then
-      echo "        原因：日志里有 $n1 处 'UnsupportedOperationException / not supported for JedisClusterConnection'"
-      echo "              —— 该代码路径在集群模式下走的是裸 executePipelined，"
-      echo "                 SDR 2.7.18 的 JedisClusterConnection.openPipeline() 直接抛异常，"
-      echo "                 回调体一次都不执行（数据根本没发出去）。"
-      echo "              出处（去重后）："
+      echo "        已验证的原因：日志里有 $n1 处 'UnsupportedOperationException / not supported for JedisClusterConnection'"
+      echo "          —— 那条代码路径在集群模式下走的是裸 executePipelined，"
+      echo "             SDR 2.7.18 的 JedisClusterConnection.openPipeline() 直接抛异常，"
+      echo "             回调体一次都不执行（数据根本没发出去）。"
+      echo "          出处（去重后）："
       grep -a -A25 'not supported for JedisClusterConnection' "$log" 2>/dev/null \
         | grep -a -oE 'at com\.sac\.[A-Za-z0-9_.$]+\([A-Za-z0-9_.$]+\.java:[0-9]+\)' \
         | sort -u | sed 's/^/                /'
     else
-      echo "        原因：日志里没有 UnsupportedOperationException ——"
-      echo "              写入是在异步线程里被吞掉的（@Async + CompletableFuture 没人 join），"
-      echo "              所以既没有异常日志，也没有数据。"
-      echo "              佐证：上面那条「命令增量」如果只有连接/鉴权级别的量，"
-      echo "              说明应用连上了但写命令一条都没发出去。"
+      echo "        日志里**没有** UnsupportedOperationException —— 也就是说"
+      echo "        「集群模式下 SDR pipeline 抛异常」这条路径**没有**被走到。"
+      echo "        已验证的事实："
+      echo "          · 部署的 jar 里这条写路径**没有集群分支**"
+      echo "            （RedisRealDataServiceImpl 里没有 isCluster / RedisClusterHashPipeline），"
+      echo "            所以它走不到「集群分支里按 slot 分组 pipeline」那条路；"
+      echo "          · 抛出的异常又被「CompletableFuture 被丢弃（没人 join）」吞掉，"
+      echo "            所以日志里、stderr 里都没有痕迹 —— 失败是完全静默的。"
+      echo "        其它候选原因（**未**验证，不能当结论）："
+      echo "          · 写路径压根没被触发（Kafka 消息没到 / 没被消费）；"
+      echo "          · 数据本身不合法，被解析层跳过了。"
+      echo "        排查入口：应用日志里的「每秒从kafka接收的数量」是否 > 0。"
     fi
   fi
   return 1
@@ -368,7 +462,7 @@ for port in $P1 $P2 $P3; do
   esac
 done
 if [ "$down" -gt 0 ]; then
-  echo "SUMMARY: PASS=$P FAIL=$F"
+  echo "SUMMARY: PASS=$P FAIL=$F SKIP=$S"
   DONE=1
   exit 1
 fi
@@ -388,32 +482,75 @@ echo
 echo "=== 判据 A2：真实读写（应用自己写进集群的痕迹）==="
 echo "  --- 写路径: StartupRunner -> SVGCacheServiceImpl.loadRTConfigKafka()"
 echo "      写 hash 'real_graph:realscope'（field=<objType>_<attrType>）---"
-A_BEFORE=$(counters_snapshot)
-echo "    写前计数器: $A_BEFORE"
-# 主动触发一次：StartupRunner 在启动时就跑过一次 loadRTConfigKafka；
-# 这里再调它的 HTTP 入口（SVGCacheController.initGraph），
-# 确保写路径被**主动**触发，而不是「碰巧启动时跑过」。
-A_TOK=$(cat /tmp/hd-token.txt 2>/dev/null)
-if [ -n "$A_TOK" ]; then
-  A_CODE=$(curl -s -m 30 -o /tmp/hd-svg-resp.txt -w '%{http_code}' \
-    -X POST -H "Authorization: $A_TOK" -H 'Content-Type: application/json' -d '{}' \
-    "http://127.0.0.1:8099/napstarweb/svgCache/initGraph" 2>/dev/null)
-  echo "    触发 svgCache/initGraph -> HTTP $A_CODE"
-  if [ "$A_CODE" = "404" ] || [ "$A_CODE" = "000" ]; then
-    echo "    （这个入口不存在 —— 不用它，启动时 StartupRunner 已经跑过同一条写路径）"
-  fi
+#
+# ⚠️⚠️ **前置条件**：这条写路径是**有条件的**。
+#
+#   `loadRTConfigKafka()` 对每个模型类型调 `modelDataService.matchOType(oname)`，
+#   **只有 matchOType 返回非 null 才会执行 hSet**。
+#   matchOType 查的是 `info.model_objecttype` / `info.model_attribute` /
+#   `info.model_objectattribute` —— 这个安装包里这些表**全是 0 行**，
+#   于是每个模型名都抛 `OTypeException: oType数值非法或不存在：XXX`，
+#   `continue` 掉，**hSet 一次都不执行**。
+#
+#   实测（**同一个 jar**，**单机**模式 —— pipeline 完全正常、0 个 UOE）：
+#     `real_graph:*` key 数 = 0
+#   ⇒ 这个 key 在**单机模式也不会出现**。它是**数据缺口**，不是集群模式的问题。
+#
+#   所以：元数据表是空的时候，这条判据**不可执行** —— 必须**跳过**并说清原因。
+#   报 FAIL 是错的：重建 jar 之后它**还会** FAIL，
+#   那样就把「环境缺数据」误报成「应用有 bug」（见 docker/hd-napstar/DEFECTS.md D7）。
+#
+A_META_ROWS=$(model_metadata_rows)
+echo "    前置检查: info.model_objecttype 行数 = $A_META_ROWS"
+if [ "$A_META_ROWS" = "-1" ]; then
+  echo "    （读不到 PG —— 前置条件无法判定，按「不可执行」处理，跳过 A2）"
+  skip "A2 web-controller 应用层读写 —— 前置条件无法判定（读不到 info.model_objecttype 的行数）"
+elif [ "$A_META_ROWS" -eq 0 ] 2>/dev/null; then
+  skip "A2 web-controller 应用层读写 —— 判据不可执行：模型元数据表是空的"
+  echo "        （info.model_objecttype / model_attribute / model_objectattribute 都是 0 行，"
+  echo "          所以 matchOType() 对每个模型名都抛 OTypeException，"
+  echo "          loadRTConfigKafka() 的 hSet 一次都不会执行 ——"
+  echo "          这个 key 在**单机**模式下也不会出现，是数据缺口，不是集群模式的问题。"
+  echo "          详见 docker/hd-napstar/DEFECTS.md D7 的说明。）"
 else
-  echo "    （没有 token，跳过主动触发；启动时的 StartupRunner 已经跑过同一条写路径）"
+  echo "    前置条件满足（元数据表有 $A_META_ROWS 行），执行 A2"
+  A_BEFORE=$(counters_snapshot)
+  echo "    写前计数器: $A_BEFORE"
+  # 主动触发一次：StartupRunner 在启动时就跑过一次 loadRTConfigKafka；
+  # 这里再调它的 HTTP 入口（SVGCacheController.initGraph），
+  # 确保写路径被**主动**触发，而不是「碰巧启动时跑过」。
+  A_TOK=$(cat /tmp/hd-token.txt 2>/dev/null)
+  if [ -n "$A_TOK" ]; then
+    A_CODE=$(curl -s -m 30 -o /tmp/hd-svg-resp.txt -w '%{http_code}' \
+      -X POST -H "Authorization: $A_TOK" -H 'Content-Type: application/json' -d '{}' \
+      "http://127.0.0.1:8099/napstarweb/svgCache/initGraph" 2>/dev/null)
+    echo "    触发 svgCache/initGraph -> HTTP $A_CODE"
+    # ⚠️ 404 = 入口不存在 = **判据没法执行**。
+    #    这里**不能**像之前那样「打个招呼就跳过」—— 那会让 A2 悄悄退化成
+    #    「希望 StartupRunner 跑过了」，判据形同虚设。
+    #    跟 B2 的处理保持一致：不可达就是不可执行，明确报出来。
+    if [ "$A_CODE" = "404" ] || [ "$A_CODE" = "000" ] || [ -z "$A_CODE" ]; then
+      skip "A2 web-controller 触发入口不可达（HTTP $A_CODE）—— 判据没法执行"
+      echo "        （POST /napstarweb/svgCache/initGraph 不可达；"
+      echo "          入口要是挪了地方，这里要跟着改）"
+    else
+      sleep 3
+      A_AFTER=$(counters_snapshot)
+      echo "    写后计数器: $A_AFTER"
+      report_app_talked "A2" "$(counter_delta "$A_BEFORE" "$A_AFTER")"
+      echo "  --- 应用自己的 key 在集群里吗 ---"
+      assert_app_key_present "A2" "real_graph:realscope" "$A_LOG"
+    fi
+  else
+    skip "A2 web-controller 没有 token（/tmp/hd-token.txt），没法触发应用写入"
+  fi
 fi
-sleep 3
-A_AFTER=$(counters_snapshot)
-echo "    写后计数器: $A_AFTER"
-A_DELTA=$(counter_delta "$A_BEFORE" "$A_AFTER")
-assert_app_talked "A2" "$A_DELTA"
-echo "  --- 应用自己的 key 在集群里吗 ---"
-assert_app_key_present "A2" "real_graph:realscope" "$A_LOG"
 echo
 echo "=== 判据 A3：JVM 层的 UnsupportedOperationException ==="
+# ⚠️ A3 **不受** A2 的前置条件影响：它查的是**应用日志**，
+#    而那些异常是 SDR 在 `openPipeline()` 里抛的，
+#    发生在 hSet 之前 —— 跟元数据表空不空**无关**。
+#    所以 A3 依然是有效的回归判据。
 check_no_pipeline_exception "web-controller" "$A_LOG"
 
 echo
@@ -429,6 +566,10 @@ echo
 echo "=== 判据 B2：真实读写（应用自己写进集群的痕迹）==="
 echo "  --- 写路径: CacheServiceImpl.getEnumDictTypes() 上的 @Cacheable"
 echo "      （RedisCacheManager，key 前缀 'model:' + 缓存名 + ':'）---"
+#
+# ⚠️ B2 没有 A2 那种前置条件问题：@Cacheable 的写入不依赖模型元数据表
+#    （`info.model_enumdict` 有 102 行，folder 级别的 'user_sex' 就在里面），
+#    所以这条判据**在本环境里都可执行**，测的是真东西。
 B_BEFORE=$(counters_snapshot)
 echo "    写前计数器: $B_BEFORE"
 B_TOK=$(cat /tmp/hd-token.txt 2>/dev/null)
@@ -437,7 +578,7 @@ if [ -n "$B_TOK" ]; then
     -X POST -H "Authorization: $B_TOK" -H 'Content-Type: application/json' -d '{"list":["user_sex"]}' \
     "http://127.0.0.1:8090/model/modelData/getEnumDictTypes" 2>/dev/null)
   echo "    触发 modelData/getEnumDictTypes -> HTTP $B_CODE"
-  if [ "$B_CODE" = "404" ] || [ "$B_CODE" = "000" ]; then
+  if [ "$B_CODE" = "404" ] || [ "$B_CODE" = "000" ] || [ -z "$B_CODE" ]; then
     bad "B2 触发写入的接口不可达（HTTP $B_CODE）—— 应用层读写没法验"
   fi
 else
@@ -446,8 +587,7 @@ fi
 sleep 3
 B_AFTER=$(counters_snapshot)
 echo "    写后计数器: $B_AFTER"
-B_DELTA=$(counter_delta "$B_BEFORE" "$B_AFTER")
-assert_app_talked "B2" "$B_DELTA"
+report_app_talked "B2" "$(counter_delta "$B_BEFORE" "$B_AFTER")"
 echo "  --- 应用自己的 key 在集群里吗（model: 前缀）---"
 B_FOUND=0
 for p in $P1 $P2 $P3; do
@@ -518,8 +658,7 @@ fi
 sleep 15
 C_AFTER=$(counters_snapshot)
 echo "    写后计数器: $C_AFTER"
-C_DELTA=$(counter_delta "$C_BEFORE" "$C_AFTER")
-assert_app_talked "C2" "$C_DELTA"
+report_app_talked "C2" "$(counter_delta "$C_BEFORE" "$C_AFTER")"
 echo "  --- 应用自己的 key 在集群里吗 ---"
 if assert_app_key_present "C2" "$C_KEY" "$C_LOG"; then
   # 再读回那个 field，确认真实数据而不是空壳
@@ -541,8 +680,17 @@ echo "############ D — 分片分布（key 确实散到多个 master 上）####
 #    不能只看 DBSIZE（DBSIZE 统计的是该节点上**所有** key，
 #    混着别人的；而且应用刚跑过，基线不是 0）。
 # ⚠️ 用 KEYS 数**我们自己的** key（名字前缀唯一），不受别人影响。
+#
+# ⚠️⚠️ 前缀必须是**本脚本专属**的。
+#    之前这里用的是 `hd:test:cluster:spread` —— **跟
+#    `scripts/hd-cluster-verify.sh`（Task 2）的 L5 段用的前缀一模一样**，
+#    而 Task 2 的 L5 断言数的正是 `hd:test:cluster:spread*`。
+#    两个脚本一旦同时跑（或者前后脚跑、有一个没清干净），
+#    本脚本的 D 段计数会把 Task 2 的 key 算进来，
+#    Task 2 的 L5 也会把本脚本的算进去 —— 两边的断言一起坏。
+#    现在改用 `hd:test:apptest:spread`，跟 Task 2 完全不重叠。
 NK=30
-SPREAD_PREFIX="hd:test:cluster:spread"
+SPREAD_PREFIX="hd:test:apptest:spread"
 i=1
 while [ "$i" -le "$NK" ]; do
   CLEAN_KEYS+=("${SPREAD_PREFIX}${i}")
@@ -586,9 +734,14 @@ echo
 echo "############ E — 清理 ############"
 cleanup
 CLEAN_KEYS=()
+# ⚠️ 清理模式必须**只**匹配本脚本自己的前缀。
+#    之前这里用的是 `hd:test:cluster:*` —— 那会连 Task 2
+#    （scripts/hd-cluster-verify.sh）的 `hd:test:cluster:spread*` /
+#    `hd:test:cluster:pipe*` 一起删掉，把别的脚本的现场给毁了。
+#    现在只清 `hd:test:apptest:*`（本脚本专属）。
 left=0
 for p in $P1 $P2 $P3; do
-  n=$(r "$p" KEYS 'hd:test:cluster:*' | grep -c 'hd:test:cluster:')
+  n=$(r "$p" KEYS 'hd:test:apptest:*' | grep -c 'hd:test:apptest:')
   echo "    $p 残留 $n 个测试 key"
   left=$((left+n))
 done
@@ -621,5 +774,5 @@ chk "E 清理后三个 master 的 key 总数为 0" "$total" "0"
 
 DONE=1
 echo
-echo "SUMMARY: PASS=$P FAIL=$F"
+echo "SUMMARY: PASS=$P FAIL=$F SKIP=$S"
 [ "$F" -eq 0 ]
