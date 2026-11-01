@@ -6,6 +6,10 @@
 #    任何改动都会同时改掉回归矩阵的计数。
 #    真要改，先跑 scripts/test-hd-cluster-summary.sh（它 source 的是**这个文件**）。
 #
+# ⚠️ 这是一个**被 source 的库**，不是独立脚本：
+#    所以它**不开** `set -e`（那会连累 source 它的矩阵），
+#    也不自己跑任何检查。
+#
 # 用法：
 #   source /opt/hd/hd-cluster-summary.sh
 #   merge_cluster_summary <子脚本输出文件> <子脚本退出码>

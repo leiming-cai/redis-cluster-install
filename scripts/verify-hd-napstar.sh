@@ -218,15 +218,22 @@ chk "B9 HD info 表数" "${n:-0}" "30"
 #    （scripts/test-hd-cluster-summary.sh source 的是**那个文件本身**，
 #      不是它的复制品）。
 #    改逻辑请先跑那个测试。
+#
+# ⚠️ 找这个文件要**多找几个地方**：容器里部署的那份（/opt/hd/）、
+#    仓库里那份（/repo/scripts/）。找不到就**直接退出** ——
+#    没有它，C 段的计数就没法合并，那这一轮回归的结果**不能信**，
+#    比「跑不成」更糟（跑不成至少是显性的）。
 # ---------------------------------------------------------------
-HD_CLUSTER_SUMMARY_HELPER=/opt/hd/hd-cluster-summary.sh
-if [ -f "$HD_CLUSTER_SUMMARY_HELPER" ]; then
-  # shellcheck source=/dev/null
-  . "$HD_CLUSTER_SUMMARY_HELPER"
-else
-  echo "!! 找不到 $HD_CLUSTER_SUMMARY_HELPER —— 计数合并逻辑缺失" >&2
+HD_CLUSTER_SUMMARY_HELPER=""
+for cand in /opt/hd/hd-cluster-summary.sh /repo/scripts/hd-cluster-summary.sh ; do
+  if [ -f "$cand" ]; then HD_CLUSTER_SUMMARY_HELPER="$cand"; break; fi
+done
+if [ -z "$HD_CLUSTER_SUMMARY_HELPER" ]; then
+  echo "!! 找不到 hd-cluster-summary.sh（试过 /opt/hd/ 和 /repo/scripts/）—— 计数合并逻辑缺失" >&2
   exit 3
 fi
+# shellcheck source=/dev/null
+. "$HD_CLUSTER_SUMMARY_HELPER"
 
 if [ -x /opt/hd/hd-redis-cluster.sh ] || [ -f /opt/hd/hd-redis-cluster.sh ]; then
   if bash /opt/hd/hd-redis-cluster.sh status >/dev/null 2>&1; then
