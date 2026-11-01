@@ -31,3 +31,143 @@ curl -s -m 20 "$NACOS/v1/cs/configs?search=accurate&dataId=&group=&pageNo=1&page
 echo "=== count ==="
 curl -s -m 20 "$NACOS/v1/cs/configs?search=accurate&dataId=&group=&pageNo=1&pageSize=100" \
   | tr ',' '\n' | grep -c '"dataId"'
+
+# ==============================================================
+# 补齐安装包导包里缺的 3 个 dataId
+#   ext_base.yaml / share_base.yaml / hisdataSend-ext.yaml
+# 详见 docker/hd-napstar/NACOS-GAPS.md
+#
+# 模板来自镜像预置的门户版 ext_base / share_base（无扩展名），
+# 但 datasource 改成华盾的 napstar 库 + 4 schema，PG 全走 node1
+# （PG 只跑在 hd-node1；node2 是 ZK/Kafka 那个节点）。
+# ==============================================================
+echo "=== filling the 3 missing dataIds ==="
+
+PG_URL_BASE="jdbc:postgresql://node1:5432/napstar?currentSchema="
+read_cfg() {  # $1=dataId $2=group
+  curl -s -m 20 -G "$NACOS/v1/cs/configs" --data-urlencode "dataId=$1" --data-urlencode "group=$2"
+}
+
+# ---- share_base.yaml ----
+{
+  echo "spring:"
+  echo "  cloud:"
+  echo "    config:"
+  echo "      override-none: true"
+  echo "      allow-override: true"
+  echo "      override-system-properties: false"
+  echo "  servlet:"
+  echo "    multipart:"
+  echo "      max-file-size: 200MB"
+  echo "      max-request-size: 1000MB"
+  echo "  datasource:"
+  echo "    info:"
+  echo "      url: ${PG_URL_BASE}info&stringtype=unspecified&characterEncoding=UTF-8"
+  echo "      driver-class-name: org.postgresql.Driver"
+  echo "      type: com.alibaba.druid.pool.DruidDataSource"
+  echo "      username: info"
+  echo "      password: info"
+  echo "    sac:"
+  echo "      url: ${PG_URL_BASE}sac&stringtype=unspecified&characterEncoding=UTF-8"
+  echo "      driver-class-name: org.postgresql.Driver"
+  echo "      type: com.alibaba.druid.pool.DruidDataSource"
+  echo "      username: sac"
+  echo "      password: sac"
+  echo "    his:"
+  echo "      url: ${PG_URL_BASE}hds&stringtype=unspecified&characterEncoding=UTF-8"
+  echo "      driver-class-name: org.postgresql.Driver"
+  echo "      type: com.alibaba.druid.pool.DruidDataSource"
+  echo "      username: hds"
+  echo "      password: hds"
+  echo "    cmt:"
+  echo "      url: ${PG_URL_BASE}cmt&stringtype=unspecified&characterEncoding=UTF-8"
+  echo "      driver-class-name: org.postgresql.Driver"
+  echo "      type: com.alibaba.druid.pool.DruidDataSource"
+  echo "      username: cmt"
+  echo "      password: cmt"
+  echo "  kafka:"
+  echo "    bootstrap-servers: node1:9092,node2:9092"
+  echo "    producer:"
+  echo "      retries: 6"
+  echo "      batch-size: 20"
+  echo "      buffer-memory: 33554432"
+  echo "      acks: all"
+  echo "      properties:"
+  echo "        linger.ms: 1"
+  echo "        enable.idempotence: true"
+  echo "    listener:"
+  echo "      type: batch"
+  echo "      concurrency: 1"
+  echo "    consumer:"
+  echo "      bootstrap-servers: node1:9092,node2:9092"
+  echo "      group-id: sac"
+  echo "      enable-auto-commit: false"
+  echo "      auto-offset-reset: latest"
+  echo "      max-poll-records: 100000"
+  echo "mybatis:"
+  echo "  configuration:"
+  echo "    map-underscore-to-camel-case: true"
+  echo "pagehelper:"
+  echo "  helper-dialect: postgresql"
+  echo "  reasonable: true"
+  echo "  support-methods-arguments: true"
+  echo "  params: count=countSql"
+} > /tmp/hd-share_base.yaml
+post "DEFAULT_GROUP" "share_base.yaml" /tmp/hd-share_base.yaml
+
+# ---- ext_base.yaml ----
+# 模板取镜像预置的 ext_base（门户版），但：
+#   - datasource 换成华盾的（share_base 里已有，这里不重复定义）
+#   - 删掉门户的 shiroconfig（那是门户的权限表）
+#   - oms 指向 node1:6379，redisMode standalone
+read_cfg "ext_base" "DEFAULT_GROUP" > /tmp/hd-ext-base-src.yaml 2>/dev/null || true
+{
+  echo "hisdataproducer:"
+  echo "  path: /home/cps/CPS_Project/linx/data/db_rep/server1/hts/bak/"
+  echo "  bak: /home/cps/CPS_Project/linx/data/db_rep/server1/hts/consumer/"
+  echo "  thread-pool-size: 16"
+  echo "  delTime: 1"
+  echo "hisDataSendArea:"
+  echo "  impl: ningxia"
+  echo "oms:"
+  echo "  redisMode: standalone"
+  echo "  database: 0"
+  echo "  hostname: node1"
+  echo "  port: 6379"
+  echo "  password: sac888"
+  echo "  timeout: 5000"
+  echo "orm:"
+  echo "  database: pg"
+  echo "  datasource: sac"
+  echo "task:"
+  echo "  url: http://node1:27000"
+} > /tmp/hd-ext_base.yaml
+post "DEFAULT_GROUP" "ext_base.yaml" /tmp/hd-ext_base.yaml
+
+# ---- hisdataSend-ext.yaml ----
+# hisDataSend 与 hisDataProducer 共用一套 hisdata 扩展配置
+read_cfg "hisdataproducer-ext.yaml" "DEFAULT_GROUP" > /tmp/hd-hisdataSend-ext.yaml 2>/dev/null || true
+if [ ! -s /tmp/hd-hisdataSend-ext.yaml ]; then
+  cat > /tmp/hd-hisdataSend-ext.yaml <<'EOF'
+hisdataproducer:
+  partition-path: /home
+  diskcheck-interval-minutes: 5
+  threshold-percentage: 95
+  low-threshold-percentage: 90
+  delete-nums: 300
+  disk-check-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/out/
+  csv-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/
+  history-path: /home/cps/CPS_Project/linx/data/db_rep/web/hts/history/
+  history-time-minutes: 259200
+  core-pool-size: 16
+  queue-capacity: 300
+  parase-data-queue-size: 100
+  process-count: 4
+  page-size: 500000
+EOF
+fi
+post "DEFAULT_GROUP" "hisdataSend-ext.yaml" /tmp/hd-hisdataSend-ext.yaml
+
+echo "=== final count ==="
+curl -s -m 20 "$NACOS/v1/cs/configs?search=accurate&dataId=&group=&pageNo=1&pageSize=100" \
+  | tr ',' '\n' | grep -c '"dataId"'
