@@ -90,11 +90,15 @@ Redis（双实例）+ ZooKeeper（2 节点）+ Kafka（2 broker）+ Nacos + Post
 | 批次 | 应用 |
 |---|---|
 | **1** | `web-controller`、`realalarmconsumer`、`rtdata-consumer` |
-| **1b** | `realserver`、`model-controller` |
+| **1b** | `model-controller` |
 | **2** | `commitDataIncreProducer`、`realalarmproducer`、`transformNapstarModel`、`sche-viewer-server` |
 
 > 🚫 **`hisDataProducer` / `hisDataSend` 不启动** —— 用户决定这两个模块**不做修改**，
 > 它们的 jar 里没有 PG 驱动（D1）→ 本环境**预期起不来**，属已知且已接受的状态。
+>
+> 🚫 **`realserver` 不启动** —— 用户说明它**没用**，不需要跑。
+> （它**确实能起来** —— `Started RealServerRestApplication in 20.135 seconds` ——
+> 但 Redis 走的是 `OmsConfig` 硬编码那条路，见 §四·8 的应用启动总表。）
 
 ---
 
@@ -142,6 +146,10 @@ PASS  A1  realalarmconsumer 启动成功  (Started RealAlarmConsumer in 43.385 s
 PASS  A2  realalarmconsumer Redis 连的是 node1:6379 且 timeout=5000
 PASS  A1  rtdata-consumer 启动成功  (Started PointtabproducerApplication in 35.447 seconds)
 PASS  A2  rtdata-consumer Redis 连的是 node1:6379 且 timeout=5000
+PASS  A1  model-controller 启动成功  (Started ModelserverRestApplication in 13.523 seconds)
+PASS  A1b model-controller 无致命错误 (0)
+PASS  A2  model-controller Redis 连的是 node1:6379 且 timeout=5000
+PASS  A2b model-controller Redis 模式 = STANDALONE
 PASS  A4  PG 错误数（应用启动后） (0)
 PASS  A3  应用有 PG 连接
 ```
@@ -150,7 +158,9 @@ PASS  A3  应用有 PG 连接
 > `node1:6379` + `timeout=5000` = 走了正确的配置路径。
 > `10.137.220.191` + `2000ms/3000ms` = 走了 `OmsConfig` 硬编码那条路
 > （**用户上一轮明确排除的问题**）。
-> 本轮实测：`realserver` **确实**走了硬编码那条 → 那是该问题的**实际影响面**。
+> 本轮实测：**唯一**走硬编码那条路的是 `realserver`
+> → 那就是该问题的**实际影响面**（其余应用都不受影响）。
+> 而 `realserver` **用户说明没用、不启动** → **这个硬编码在本环境里不产生影响**。
 
 ### 4.3 V4 —— 决定性证据（那个「没报错但数据错了」的静默 bug）
 
@@ -243,7 +253,7 @@ PORTAL: info 30 | base_menu=24 base_opitem=6 base_process=6 base_role=2
 ### 4.7 最终验证结果
 
 ```
-SUMMARY: PASS=43 FAIL=0 SKIP=3
+SUMMARY: PASS=47 FAIL=0 SKIP=3
 ```
 
 3 个 SKIP 都是**有据可查的数据缺口**，不是代码缺陷：
@@ -265,8 +275,8 @@ SUMMARY: PASS=43 FAIL=0 SKIP=3
 | `realalarmproducer` | 8991 | ✅ | — | |
 | `sche-viewer-server` | 8097 | ✅ | `node1:6379` timeout 5000 | |
 | `transformNapstarModel` | 8080 | ✅ 起来 | — | **B5 预期**：失败原因精确 = `relation "modelversion" does not exist` |
-| `realserver` | 8096 | ✅ 起来 | **`10.137.220.191` timeout 2000/3000** | ⚠️ **`OmsConfig` 硬编码**（用户排除项，但影响面确认了） |
-| `model-controller` | 8090 | ✅ 起来 | — | 需要补的 `ext_base.yaml` / `share_base.yaml`（D2） |
+| `model-controller` | 8090 | ✅ | `node1:6379` timeout 5000 | 依赖补的 `ext_base.yaml` / `share_base.yaml`（D2） |
+| `realserver` | 8096 | 🚫 不启动 | — | 用户说明**没用**。（它能起来，但 Redis 走 `OmsConfig` 硬编码：`10.137.220.191` + `2000/3000ms`） |
 | `hisDataProducer` | 8199 | ❌ | — | **D1**：jar 里没有 PG 驱动 —— **不修，预期起不来** |
 | `hisDataSend` | 27000 | ❌ | — | **D1**：同上 —— **不修，预期起不来** |
 
@@ -412,6 +422,95 @@ his-dao-1.0.14.jar         fe7312aba83bb33beae83b083ac2991c  46181   ← 前后�
 
 ---
 
+## 七·五、会话结束时的现场状态（**下一个会话可以直接接着用**）
+
+### 容器（**都还在跑**）
+
+```
+hd-node1|Up 4 hours|hd-napstar-env:1.0     ← PG + Redis×2 + ZK#1 + Kafka#1 + Nacos + 应用
+hd-node2|Up 4 hours|hd-napstar-env:1.0     ← ZK#2 + Kafka#2
+cpsweb|Up 18 hours|cpsweb-env:1.0          ← 门户（**没被动过**）
+rc-cpsweb-node-a/b|Up 38 hours|rc-cpsweb-node:local
+```
+
+### 会话结束时的应用状态
+
+**批次 1 在跑**（最近一次跑的）：
+
+```
+web-controller       :8099  ✅  Started NapstarWebRestApplication in 41.005 seconds
+realalarmconsumer    :8992  ✅  Started RealAlarmConsumer in 39.127 seconds
+rtdata-consumer      :8092  ✅  Started PointtabproducerApplication in 31.138 seconds
+```
+
+**批次 1b / 2 已验证可起**，但**同一时刻只能跑一批**（内存约束）→ 切批次用：
+
+```powershell
+docker exec hd-node1 bash /opt/hd/start-hd-apps.sh 1b   # 或 2
+```
+
+### Docker 资源
+
+| 类型 | 名字 | ID / 备注 |
+|---|---|---|
+| 镜像 | `hd-napstar-env:1.0` | `b8819a1eb51a`（6.88 GB，从 `cpsweb-env:1.0` 派生） |
+| 网络 | `hd-net` | bridge，两个容器都在里面 |
+| 卷 | `hd-app-jars` | 应用 jar（11 个） |
+| 卷 | `hd-pgdata` | PG 数据目录 |
+| 卷 | `hd-mwdata` | 中间件数据（当前**没用上** —— ZK/Kafka 的数据目录没挂出来） |
+
+### 宿主端口映射
+
+| 宿主 | 容器内 | 服务 |
+|---|---|---|
+| 15432 | 5432 | PostgreSQL |
+| 18849 | 18848 | Nacos |
+| 19092 / 19093 | 9092 | Kafka broker #1 / #2 |
+| 12181 / 12182 | 2181 | ZooKeeper #1 / #2 |
+| 26379 / 26389 | 6379 / 6389 | Redis master / slave |
+| 18090 / 18091 / 18092 / 18096 / 18097 / 18099 | 同名 | 各应用 |
+| 18991 / 18992 | 8991 / 8992 | realalarmproducer / consumer |
+| 27000 | 27000 | hisDataSend（**不会起**） |
+
+### 下一轮怎么接着跑
+
+```powershell
+# 1) 确认容器还活着
+docker ps --filter "name=hd-"
+
+# 2) 起一批应用（中间件不用重启）
+docker exec hd-node1 bash /opt/hd/start-hd-apps.sh 1     # web-controller/realalarmconsumer/rtdata-consumer
+docker exec hd-node1 bash /opt/hd/start-hd-apps.sh 1b    # model-controller
+docker exec hd-node1 bash /opt/hd/start-hd-apps.sh 2     # 其余 4 个
+
+# 3) 铸 token（Shiro 要 JWT）
+docker exec hd-node1 bash /opt/hd/mint-token.sh
+
+# 4) 跑验证矩阵
+docker exec hd-node1 bash /opt/hd/verify.sh
+
+# 5) 证明门户没被动
+docker run --rm -v "D:\work\rediscluterproject:/repo:ro" `
+  -v "D:\work\rediscluterproject\.hd-work:/out" `
+  -v /var/run/docker.sock:/var/run/docker.sock rc-e2e-runner:local `
+  bash /repo/scripts/verify-hd-portal-untouched.sh /out/portal-snapshot-now.txt
+```
+
+### ⚠️ 三个「重建时会踩」的点
+
+| # | 坑 | 说明 |
+|---|---|---|
+| 1 | **重建 `hd-node1` 会丢 PG 库** | `initPostgresDB.sql` **不可重复执行**（`CREATE SCHEMA` 没 IF NOT EXISTS + `DROP SCHEMA public CASCADE`）→ 重建后必须 `docker volume rm hd-pgdata` 再重新初始化 |
+| 2 | **Nacos 配置会丢** | Nacos 用 embedded storage，配置在 `hd-node1` 的容器可写层里 → **重建容器就没了**，要重跑 `import-hd-nacos-configs.sh` |
+| 3 | **Kafka 的 ZK session 要等过期** | 重建后 broker 注册会报 `NodeExists` → 等 ~25 秒再启动（entrypoint 里有重试，但手工重启 broker 时要注意） |
+
+### 备份在哪
+
+`.hd-work/backup-20261101-081424/` —— 华盾树 + 安装包的完整备份
+（**这两个都不是 git 仓库**，下一轮动它们之前先备份）。
+
+---
+
 ## 八、留痕
 
 | 东西 | 位置 |
@@ -457,7 +556,7 @@ fb4bb00 feat(hd): add the Dockerfile and the two entrypoints
 | **1** | **`sac` / `cmt` / `hds` 的建表 DDL** | 🔴 | 挡住 `transformNapstarModel`（上一轮 §七 #1 遗留）。平台上 `SystemTable.sql` 是 **MySQL 方言** |
 | **2** | **`hds`（HIS 历史库）的表** | 🟡 | 上一轮 §七 #2 遗留。由 HIS 数据服务器提供，不在安装包 → B1 验不了 |
 | **3** | **华盾的模型定义**（`model_objecttype` / `model_attribute`） | 🟡 | 安装包 seed 里**是空的** → 曲线等接口在查模型阶段就失败 → **B2 只能在 SQL 层验** |
-| **4** | **`OmsConfig` 硬编码 `10.137.220.191`** | 🔴 | 用户上一轮明确排除。**本轮实测确认 `realserver` 确实受影响**（A2 显示 `10.137.220.191` + `2000/3000ms`） |
+| **4** | **`OmsConfig` 硬编码 `10.137.220.191`** | 🔴 | 用户上一轮明确排除。**本轮实测：唯一走硬编码那条路的是 `realserver`**（A2 显示 `10.137.220.191` + `2000/3000ms`）→ 那是该问题的**实际影响面**。但 `realserver` **用户说明没用、不启动** → **本环境不受影响** |
 | **5** | **安装包那 3 个缺陷要不要修进交付物** | 🟡 | D2（缺 dataId）/ D3（pg_hba）/ D4（node2 指向）。修它们要改安装包或加部署脚本 |
 | **6** | **`application/backend-gd`** | 🟡 | 逐字副本，同一套问题。本轮**没碰** |
 

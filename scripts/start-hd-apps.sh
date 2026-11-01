@@ -47,6 +47,8 @@ start_one() {
 
 declare -A APPS=(
   [web-controller]="web-controller-3.0.0.jar"
+  # 🚫 realserver **不启动** —— 用户说明它没用，不需要跑。
+  #    只保留映射，供手动排查时用。
   [realserver]="realserver-conntroller-3.0.0.jar"
   [model-controller]="model-controller-3.0.0.jar"
   [rtdata-consumer]="rtdata-consumer-3.0.0.jar"
@@ -63,7 +65,8 @@ declare -A APPS=(
 )
 
 BATCH1="web-controller realalarmconsumer rtdata-consumer"
-BATCH1B="realserver model-controller"
+# 🚫 realserver 不在这里 —— 用户说明它没用，不需要启动
+BATCH1B="model-controller"
 BATCH2="commitDataIncreProducer realalarmproducer transformNapstarModel sche-viewer-server"
 
 case "$BATCH" in

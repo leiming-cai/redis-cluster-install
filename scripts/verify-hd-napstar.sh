@@ -47,7 +47,10 @@ if [ "${n:-0}" -gt 0 ]; then ok "M8d pg_hba 放行了容器 IP（安装包的 in
 echo "############ A — 应用 ############"
 # ⚠️ app 日志里混进了二进制内容（3MB+，有控制字符）→ grep 默认会说
 #    "binary file matches" 什么都不输出。用 grep -a 强制按文本处理。
-for n in web-controller realalarmconsumer rtdata-consumer; do
+#
+# ⚠️ realserver **不在名单里** —— 用户说明它没用，不需要启动。
+#    （它确实能起来，但 Redis 走的是 OmsConfig 硬编码那条路，见 DEFECTS.md）
+for n in web-controller realalarmconsumer rtdata-consumer model-controller; do
   L="$LOGDIR/$n.log"
   [ -f "$L" ] || { skip "A1 $n 没日志"; continue; }
   if grep -aqE 'Started .* in .* seconds' "$L"; then
