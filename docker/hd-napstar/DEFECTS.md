@@ -249,6 +249,50 @@ entrypoint 的提交记录。`node2` 必须指向 hd-node2 容器的**真实 IP*
 
 ---
 
+## 🟡 D6（运维可接受，但生产要改）Redis 密码出现在 JVM 命令行上
+
+> **本轮不阻塞。** 记录下来是因为 Task 7 要在这里写文档，
+> 而且生产环境的最终答案跟这里不一样。
+
+### 现象
+
+应用用集群模式启动时，密码是通过命令行参数传进去的：
+
+```
+--oms.password=HdClusterPw2026
+```
+
+`ps` / `/proc/<pid>/cmdline` 能看到它，**进程活多久就能看多久**。
+
+### 根因
+
+jar 内的 `application.yml` 硬编码了 `oms:` 块，实测优先级是：
+
+```
+命令行 --oms.*   >   jar 内 application.yml   >   Nacos dataId
+```
+
+（jar 里的 `oms.redisMode=cluster` + `clusters:[127.0.0.1:6379]` 压不过 Nacos，
+所以只能走命令行 —— 见 `scripts/start-hd-apps.sh`。）
+
+### 本轮接受的理由
+
+仓库里已经有同样的做法（`redis-cli -a`、`sac888` 明写在
+`scripts/import-hd-nacos-configs.sh` 里），`docs/OPERATIONS.md` §4.4.5
+也正是记录这种命令行传参形式 —— 跟现有惯例一致。
+
+### 生产的真正解法（**本轮不做**）
+
+不是靠命令行参数，而是改 jar 里的 `oms:` 块本身：
+
+1. 改 `application.yml` 里的 `oms.clusters` / `oms.password`，或
+2. 走 `bootstrap.yml` 的 override 开关，把敏感值从 Nacos 侧注入，**不进命令行**。
+
+> 📌 无论走哪条，**都不要**把密码写进版本库里的默认值 ——
+> 现在的 `HdClusterPw2026` 是本环境的测试口令。
+
+---
+
 ## 📋 汇总
 
 | # | 严重度 | 谁引入 | 状态 |
@@ -258,3 +302,4 @@ entrypoint 的提交记录。`node2` 必须指向 hd-node2 容器的**真实 IP*
 | D3 | 🟡 | 安装包 | 本轮部署时补（`pg_hba.conf` + reload） |
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
+| D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行** |
