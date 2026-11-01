@@ -218,51 +218,104 @@ chk "B9 HD info 表数" "${n:-0}" "30"
 #    （scripts/test-hd-cluster-summary.sh source 的是**那个文件本身**，
 #      不是它的复制品）。
 #    改逻辑请先跑那个测试。
-#
-# ⚠️ 找这个文件要**多找几个地方**：容器里部署的那份（/opt/hd/）、
-#    仓库里那份（/repo/scripts/）。找不到就**直接退出** ——
-#    没有它，C 段的计数就没法合并，那这一轮回归的结果**不能信**，
-#    比「跑不成」更糟（跑不成至少是显性的）。
 # ---------------------------------------------------------------
-HD_CLUSTER_SUMMARY_HELPER=""
-for cand in /opt/hd/hd-cluster-summary.sh /repo/scripts/hd-cluster-summary.sh ; do
-  if [ -f "$cand" ]; then HD_CLUSTER_SUMMARY_HELPER="$cand"; break; fi
-done
-if [ -z "$HD_CLUSTER_SUMMARY_HELPER" ]; then
-  echo "!! 找不到 hd-cluster-summary.sh（试过 /opt/hd/ 和 /repo/scripts/）—— 计数合并逻辑缺失" >&2
-  exit 3
-fi
-# shellcheck source=/dev/null
-. "$HD_CLUSTER_SUMMARY_HELPER"
-
 if [ -x /opt/hd/hd-redis-cluster.sh ] || [ -f /opt/hd/hd-redis-cluster.sh ]; then
   if bash /opt/hd/hd-redis-cluster.sh status >/dev/null 2>&1; then
     echo
     echo "############ C — 容器内 Redis 集群 ############"
+    # ⚠️ **找 helper 要在「集群在跑」这个分支里面做**。
+    #    集群没跑的时候这一段根本不会用到它 —— 那时候为一个用不到的文件
+    #    硬依赖（找不到就 exit 3），等于让**既有的门禁**因为一个
+    #    **跟本轮无关的新文件**而中止。
+    #    ⇒ 集群没跑 → 整段跳过，base 矩阵照跑照出 SUMMARY；
+    #      集群跑了 → 必须有这个文件，缺了就**大声失败**。
+    HD_CLUSTER_SUMMARY_HELPER=""
+    for cand in /opt/hd/hd-cluster-summary.sh /repo/scripts/hd-cluster-summary.sh ; do
+      if [ -f "$cand" ]; then HD_CLUSTER_SUMMARY_HELPER="$cand"; break; fi
+    done
+    if [ -z "$HD_CLUSTER_SUMMARY_HELPER" ]; then
+      echo "!! 找不到 hd-cluster-summary.sh（试过 /opt/hd/ 和 /repo/scripts/）—— 计数合并逻辑缺失" >&2
+      echo "!! 这一轮回归的集群部分**没法计入**，结果不可信。" >&2
+      exit 3
+    fi
+    # ⚠️⚠️ **source 的结果必须检查** ——
+    #    `. file` 在「文件是空的」或「文件有语法错误」时都会**失败**，
+    #    但**不会中断脚本**（没有 set -e 的时候）。
+    #    ⇒ 结果就是：merge_cluster_summary 压根没被定义，
+    #      调用它 → "command not found" → 集群的 FAIL 计数**永远并不进来**，
+    #      而矩阵照样打印 "SUMMARY: PASS=47 FAIL=0" 并 exit 0。
+    #    **这就是一个假绿**：集群验证报了 FAIL，回归说全绿。
+    #
+    #    触发条件很现实：`docker cp` 被中断 → 文件被截断；
+    #    容器里有人手滑打了个错字。
+    #
+    #    ⇒ 所以这里必须 ①检查 source 的返回值，
+    #      ②检查函数**确实被定义了**。
+    #      两条都要 —— 只查一条不够：
+    #        - 只查 source 返回值：source 成功但文件里没有那个函数 → 漏；
+    #        - 只查函数：source 失败时函数当然也没有 → 也能覆盖。
+    #      但两条都查，才能在**错误发生的那一刻**给出准确的诊断。
+    if ! . "$HD_CLUSTER_SUMMARY_HELPER"; then
+      echo "!! 加载失败: $HD_CLUSTER_SUMMARY_HELPER" >&2
+      echo "!! 计数合并逻辑没加载进来 —— 集群的失败会被**悄悄丢掉**，这一轮不可信。" >&2
+      exit 3
+    fi
+    if ! command -v merge_cluster_summary >/dev/null 2>&1; then
+      echo "!! merge_cluster_summary 未定义（$HD_CLUSTER_SUMMARY_HELPER 里没有这个函数）" >&2
+      echo "!! 集群的失败会被**悄悄丢掉**，这一轮不可信。" >&2
+      exit 3
+    fi
+
     CV_OUT=$(mktemp /tmp/hd-cluster-verify-out.XXXXXX 2>/dev/null)
     if [ -z "${CV_OUT:-}" ]; then
       CV_OUT="/tmp/hd-cluster-verify-out.$$"
     fi
+    # ⚠️ **临时文件一定要清掉** —— 下面那条「计数没并进来」的 exit 3
+    #    会在 rm 之前就退出 → 不清就会在 /tmp 里留垃圾。
+    #    （一次回归留一个文件，跑几十轮就攒几十个。）
+    #    用 trap 而不是到处写 rm —— exit 的路径太多，漏一个就漏一个文件。
+    #    ⚠️ trap 里只删**自己那个**文件（CV_OUT 是具体路径，不是通配符）。
+    trap 'rm -f "${CV_OUT:-}" 2>/dev/null' EXIT
     bash /opt/hd/hd-cluster-verify.sh >"$CV_OUT" 2>&1
     CV_RC=$?
     # 把它的明细（PASS/FAIL 行、上下文）显示出来，但**滤掉它自己的 SUMMARY**。
     grep -v '^SUMMARY: ' "$CV_OUT" | sed 's/^/  /'
-    # 取最后一行 SUMMARY 里的 PASS/FAIL 计数。
-    CV_SUM=$(grep '^SUMMARY: ' "$CV_OUT" | tail -1)
-    CV_P=$(echo "$CV_SUM" | grep -oP 'PASS=\K[0-9]+' || true)
-    CV_F=$(echo "$CV_SUM" | grep -oP 'FAIL=\K[0-9]+' || true)
-    CV_P=${CV_P:-0}; CV_F=${CV_F:-0}
     # 计数合并（逻辑在 hd-cluster-summary.sh 里，可被测试 source）。
     # ⚠️ merge_cluster_summary 自己会把异常**计入 $FAIL**，
     #    并把说明写进 $CLUSTER_SUMMARY_NOTES ——
     #    这里**只打印**，不能再调 bad()（那会重复计数）。
     CLUSTER_SUMMARY_NOTES=""
+    CLUSTER_SUMMARY_PASS=0
+    CLUSTER_SUMMARY_FAIL=0
     merge_cluster_summary "$CV_OUT" "$CV_RC"
     if [ -n "$CLUSTER_SUMMARY_NOTES" ]; then
       echo "$CLUSTER_SUMMARY_NOTES" | sed '/^$/d; s/^/  FAIL  /'
     fi
-    echo "  (集群验证已并入本轮计数: PASS +$CV_P, FAIL +$CV_F)"
+    # ⚠️ 计数**只从 helper 拿**（它才是唯一的解析源）。
+    #    这里**绝不能**再自己解析一遍 SUMMARY ——
+    #    两处解析各走各的，异常路径下就会打印出
+    #    「已并入本轮计数: FAIL +0」而最终 SUMMARY 里是 FAIL=1，
+    #    **自相矛盾**。
+    echo "  (集群验证已并入本轮计数: PASS +${CLUSTER_SUMMARY_PASS:-0}, FAIL +${CLUSTER_SUMMARY_FAIL:-0})"
+
+    # ⚠️ **断言计数真的动了** —— 这是「合并有没有生效」的最后一道检查。
+    #    前面已经保证函数存在、source 成功，但万一函数内部**没有改计数器**
+    #    （比如被人改坏了），计数就还是 0，而集群报了 FAIL。
+    #    ⇒ 拿子脚本自己的 SUMMARY 做对照：它说有 N 个 FAIL，
+    #    合并后外层的 FAIL 至少也得比合并前多 N。
+    #    差得不够 → 说明没并进来 → **大声失败**，不打印绿 SUMMARY。
+    #    ⚠️ 用的是**合并后的实际增量**（$CLUSTER_SUMMARY_FAIL），
+    #    不是解析出来的原始计数 —— 异常路径上原始计数是 0，
+    #    但实际并进去 1（异常本身算一个失败）。
+    CV_CLAIMED_F=$(grep '^SUMMARY: ' "$CV_OUT" 2>/dev/null | tail -1 | grep -oP 'FAIL=\K[0-9]+' || true)
+    CV_CLAIMED_F=${CV_CLAIMED_F:-0}
+    if [ "${CLUSTER_SUMMARY_FAIL:-0}" -lt "$CV_CLAIMED_F" ]; then
+      echo "!! 集群验证报了 $CV_CLAIMED_F 个 FAIL，但合并进来的只有 ${CLUSTER_SUMMARY_FAIL:-0} 个" >&2
+      echo "!! 计数没并进来 —— 这一轮不可信。" >&2
+      exit 3
+    fi
     rm -f "$CV_OUT" 2>/dev/null
+    trap - EXIT
   else
     echo
     echo "############ C — 容器内 Redis 集群（跳过：集群没在跑）############"

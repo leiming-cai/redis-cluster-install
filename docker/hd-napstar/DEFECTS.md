@@ -1032,6 +1032,52 @@ DBSIZE=0 记为**已解释的 OK**；如果变成**非 0** 就报 NOTE（不判�
 3. 门户 Redis 的 `maxmemory-policy` 是 `noeviction`、`maxmemory` 是 0
    → **不可能**是内存淘汰把 key 干掉的。
 
+### 📌 附记：把逻辑抽成「被 source 的文件」会**新造出一个假绿**
+
+> **Task 6 的自查发现的**（不是缺陷清单里的，是自己写出来的）。
+> 记在这里是因为它跟 D8 一样，是「**门禁自己骗自己**」那一类。
+
+**怎么发生的**：把「解析集群验证的 SUMMARY 并把计数并进来」这段逻辑
+从 `verify-hd-napstar.sh` 里抽到 `scripts/hd-cluster-summary.sh`（为了能被测试）。
+抽取之后，矩阵变成了：
+
+```bash
+. "$HD_CLUSTER_SUMMARY_HELPER"          # ← 没检查返回值
+...
+merge_cluster_summary "$CV_OUT" "$CV_RC"   # ← 没检查函数是否存在
+```
+
+**`.` 在两种情况下会失败但**不会中断脚本**（没有 `set -e`）**：
+① 文件是**空的**；② 文件有**语法错误**。
+⇒ 于是 `merge_cluster_summary` 压根没被定义 → 调用它报 `command not found`
+→ **集群的 FAIL 计数永远并不进来** → 矩阵照样打印绿 SUMMARY 并 exit 0：
+
+```
+/opt/hd/verify.sh: line 260: merge_cluster_summary: command not found
+  (集群验证已并入本轮计数: PASS +38, FAIL +1)      ← 说 +1 FAIL
+SUMMARY: PASS=47 FAIL=0 SKIP=3                   ← 说 0 FAIL
+matrix exit=0                                   ← 绿！真实的失败被丢了
+```
+
+⚠️ **触发条件很现实**：`docker cp` 被中断 → 文件被截断；容器里有人手滑打个错字。
+
+**修法**（矩阵里现在有）：
+1. `. "$HELPER" || { 报错; exit 3; }` —— **检查 source 的返回值**；
+2. `command -v merge_cluster_summary >/dev/null || { 报错; exit 3; }`
+   —— **检查函数确实被定义了**（source 成功但里面没这个函数，也要拦）；
+3. 合并之后再**断言计数真的动了**（合并进去的 FAIL 至少要等于子脚本自称的 FAIL）
+   —— 防止「函数在，但内部没改计数器」。
+
+**回归防线**：`scripts/test-hd-cluster-merge-wiring.sh`
+——它跑的是**矩阵自己的那段接线**（把 helper 弄成缺失/空/语法错/没有那个函数四种坏样子，
+断言矩阵**必须**非 0 退出**且不能打印 FAIL=0 的 SUMMARY**）。
+
+> 📌 **通用教训**：
+> **`test-hd-cluster-summary.sh` 测不出这个假绿** —— 它测的是「helper 本身能不能用」，
+> 而假绿发生在「矩阵有没有正确地加载它、加载失败有没有被发现」这段**接线**上。
+> ⇒ **把逻辑抽出去的时候，要同时把「加载它」这件事也纳入测试。**
+> ⇒ 「更模块化」不等于「更安全」：**多一个 source，就多一个能静悄悄失败的地方。**
+
 ---
 
 ## 📋 汇总

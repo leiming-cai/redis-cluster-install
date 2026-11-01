@@ -14,15 +14,35 @@
 #   source /opt/hd/hd-cluster-summary.sh
 #   merge_cluster_summary <子脚本输出文件> <子脚本退出码>
 #   → 把 PASS/FAIL 加到调用方的 $PASS / $FAIL，
-#     异常情况记到 $CLUSTER_SUMMARY_NOTES（由调用方决定怎么打印）。
+#     异常情况记到 $CLUSTER_SUMMARY_NOTES（由调用方决定怎么打印），
+#     解析出来的计数放在 $CLUSTER_SUMMARY_PASS / $CLUSTER_SUMMARY_FAIL 里。
 #
 # ⚠️ 这里的函数**只做计数 + 记备注**，不打印 —— 打印由调用方决定，
 #    这样测试可以只测计数，不用解析输出。
 
+# ---------------------------------------------------------------
+# ⚠️ **被直接执行时的保护**（不是被 source 时）。
+#
+# 这个文件是**库**，直接 `bash hd-cluster-summary.sh` 什么都不会发生，
+# 而且**退出码是 0** —— 看着像「跑过了」，其实什么都没干。
+# 那是个假绿：调用方以为跑了，其实没有。
+#
+# 判据：`${BASH_SOURCE[0]}` 是「谁在执行这个文件」，`$0` 是「谁在跑这个进程」。
+# 被 source 时两者**不同**（BASH_SOURCE 是本文件，$0 是 source 它的那个脚本）；
+# 被直接执行时两者**相同**。
+# ---------------------------------------------------------------
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  echo "!! $0 是一个**库**（要被 source），不是可执行脚本。" >&2
+  echo "   它只定义 merge_cluster_summary，不跑任何检查 —— 直接跑它什么都不会做。" >&2
+  echo "   要测它请跑: bash scripts/test-hd-cluster-summary.sh" >&2
+  exit 2
+fi
+
 # 从子脚本的输出里解析出它自己的 SUMMARY 计数，并并进 $PASS / $FAIL。
 #
 # 参数：$1 = 子脚本输出文件；$2 = 子脚本退出码
-# 副作用：改 $PASS / $FAIL；往 $CLUSTER_SUMMARY_NOTES 追加说明行
+# 副作用：改 $PASS / $FAIL；往 $CLUSTER_SUMMARY_NOTES 追加说明行；
+#         设 $CLUSTER_SUMMARY_PASS / $CLUSTER_SUMMARY_FAIL（解析出来的计数）
 # 返回：0 = 一切正常；1 = 有异常（异常**已经**计入 $FAIL）
 #
 # ⚠️ **调用方必须提供 $PASS / $FAIL 这两个变量**（矩阵里有，测试里也有）。
@@ -47,6 +67,20 @@ merge_cluster_summary() {
   local cv_out="$1" cv_rc="$2"
   local cv_sum cv_p cv_f
 
+  # ⚠️ **把「实际并进计数器的增量」交出去** —— 调用方要打印
+  #    「已并入本轮计数」，而**不能自己再解析一遍**。
+  #    之前调用方自己又解析了一遍，两处解析各走各的：
+  #    异常路径下（没有 SUMMARY / 退出码与计数打架）helper 实际记了 +1 FAIL，
+  #    调用方那份独立解析却得到 0 → 打印出「FAIL +0」，
+  #    **跟最终 SUMMARY 里的 FAIL 数自相矛盾**。
+  #
+  # ⚠️ 而且要报的是**实际增量**，不是**解析出来的原始计数**：
+  #    「没有 SUMMARY」那条路径上，解析出来是 0（没有可解析的东西），
+  #    但 helper 实际给 $FAIL 加了 **1**（异常本身算一个失败）。
+  #    ⇒ 报 0 就是**报错了** —— 那正是「自己解析一遍」的老毛病。
+  #    ⇒ 所以这里记的是**计数器的前后差值**，不是解析结果。
+  local before_pass="$PASS" before_fail="$FAIL"
+
   cv_sum=$(grep '^SUMMARY: ' "$cv_out" 2>/dev/null | tail -1)
   cv_p=$(echo "$cv_sum" | grep -oP 'PASS=\K[0-9]+' || true)
   cv_f=$(echo "$cv_sum" | grep -oP 'FAIL=\K[0-9]+' || true)
@@ -57,6 +91,8 @@ merge_cluster_summary() {
     FAIL=$((FAIL + 1))
     CLUSTER_SUMMARY_NOTES="${CLUSTER_SUMMARY_NOTES:-}
 C 集群验证没有产出 SUMMARY（退出码 $cv_rc）—— 集群验证本身异常"
+    CLUSTER_SUMMARY_PASS=$((PASS - before_pass))
+    CLUSTER_SUMMARY_FAIL=$((FAIL - before_fail))
     return 1
   fi
 
@@ -70,7 +106,12 @@ C 集群验证没有产出 SUMMARY（退出码 $cv_rc）—— 集群验证本�
     FAIL=$((FAIL + 1))
     CLUSTER_SUMMARY_NOTES="${CLUSTER_SUMMARY_NOTES:-}
 C 集群验证退出码非 0（$cv_rc）但它自己报 FAIL=0 —— 计数与退出码不一致"
-    return 1
   fi
+
+  # ⚠️ **最后**再算增量 —— 这时候计数才是最终的
+  #    （异常路径上前面已经多加过一个 FAIL）。
+  CLUSTER_SUMMARY_PASS=$((PASS - before_pass))
+  CLUSTER_SUMMARY_FAIL=$((FAIL - before_fail))
+  [ "$cv_rc" -ne 0 ] && [ "$cv_f" -eq 0 ] && return 1
   return 0
 }

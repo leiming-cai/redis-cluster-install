@@ -145,6 +145,51 @@ echo "  -> PASS=$PASS FAIL=$FAIL rc=$rc"
 expect "场景8 文件不存在 -> 记 FAIL" 0 1 "$p0" "$f0"
 notes_present "场景8 点名了异常" yes
 
+echo "=== 场景9：导出的增量必须等于**实际并进计数器的数**（不是解析出来的原始数）==="
+# ⚠️ 这条是「已并入本轮计数」那行跟 SUMMARY 不自相矛盾的关键：
+#    「没有 SUMMARY」那条路径上，解析出来是 0（没东西可解析），
+#    但 helper 实际给 $FAIL 加了 **1**（异常本身算一个失败）。
+#    ⇒ 导出值必须是**实际增量**，报 0 就是报错。
+p0=$PASS; f0=$FAIL; reset_notes
+printf '  PASS  w\nsome error\n' > "$T/i"
+merge_cluster_summary "$T/i" 1; rc=$?
+dP=$((PASS-p0)); dF=$((FAIL-f0))
+echo "  -> 实际增量 PASS +$dP FAIL +$dF；导出 CLUSTER_SUMMARY_PASS=${CLUSTER_SUMMARY_PASS:-unset} CLUSTER_SUMMARY_FAIL=${CLUSTER_SUMMARY_FAIL:-unset}"
+if [ "${CLUSTER_SUMMARY_PASS:-unset}" = "$dP" ] && [ "${CLUSTER_SUMMARY_FAIL:-unset}" = "$dF" ]; then
+  ok "场景9 导出值 == 实际增量"
+else
+  bad "场景9 导出值 != 实际增量（导出 ${CLUSTER_SUMMARY_PASS:-unset}/${CLUSTER_SUMMARY_FAIL:-unset}，实际 $dP/$dF）"
+fi
+
+echo "=== 场景10：正常路径下导出值也必须等于实际增量 ==="
+p0=$PASS; f0=$FAIL; reset_notes
+printf 'SUMMARY: PASS=39 FAIL=2\n' > "$T/j"
+merge_cluster_summary "$T/j" 1; rc=$?
+dP=$((PASS-p0)); dF=$((FAIL-f0))
+echo "  -> 实际增量 PASS +$dP FAIL +$dF；导出 ${CLUSTER_SUMMARY_PASS:-unset}/${CLUSTER_SUMMARY_FAIL:-unset}"
+if [ "${CLUSTER_SUMMARY_PASS:-unset}" = "$dP" ] && [ "${CLUSTER_SUMMARY_FAIL:-unset}" = "$dF" ]; then
+  ok "场景10 导出值 == 实际增量"
+else
+  bad "场景10 导出值 != 实际增量（导出 ${CLUSTER_SUMMARY_PASS:-unset}/${CLUSTER_SUMMARY_FAIL:-unset}，实际 $dP/$dF）"
+fi
+
+echo "=== 场景11：被直接执行（非 source）时必须**非 0 退出**并说明原因 ==="
+# ⚠️ 这个文件是**库**。直接跑它什么都不做，退出码却是 0 ——
+#    看着像「跑过了」，其实什么都没干 ⇒ 假绿。
+out=$(bash "$HELPER" 2>&1); rc=$?
+echo "  -> 退出码 = $rc"
+echo "  -> 输出: $(echo "$out" | head -1)"
+if [ "$rc" -ne 0 ]; then
+  ok "场景11 直接执行时非 0 退出"
+else
+  bad "场景11 直接执行时退出码应为非 0，实得 0 —— 假绿"
+fi
+if echo "$out" | grep -q '库'; then
+  ok "场景11 说清楚了它是个库"
+else
+  bad "场景11 输出里没说明它是个库"
+fi
+
 echo
 echo "TEST SUMMARY: PASS=$TPASS FAIL=$TFAIL"
 [ "$TFAIL" -eq 0 ]

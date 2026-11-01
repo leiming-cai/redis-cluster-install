@@ -99,11 +99,90 @@ run "$T/modified.txt"
 expect_rc "场景5 值变了" yes "$rc"
 has_line "场景5 点名 DIFF" "DIFF"
 
-echo "=== 场景6：'### 1b.' 不能被当成 '### 1.'（字面量匹配，不是正则）==="
-sed 's/^### 1b\. oom \/ restarts$/### 1b. oom \/ restarts XX/' "$REAL" > "$T/1b.txt"
-run "$T/1b.txt"
-expect_rc "场景6 1b 噪声不影响判定" no "$rc"
-no_line "场景6 没有 MISS" "MISS"
+echo "=== 场景6：门户容器**被重启过** → 必须非 0（这是这个门禁最该证明的东西）==="
+sed 's/restarts=0/restarts=3/' "$REAL" > "$T/restarted.txt"
+run "$T/restarted.txt"
+expect_rc "场景6 门户被重启" yes "$rc"
+has_line "场景6 点名重启次数" "重启次数"
+has_line "场景6 点名被重启过" "被重启过"
+
+echo "=== 场景7：门户容器 OOM 标记变了（= 被重建过）→ 必须非 0 ==="
+sed 's/oom=true/oom=false/' "$REAL" > "$T/oom.txt"
+run "$T/oom.txt"
+expect_rc "场景7 OOM 标记变了" yes "$rc"
+has_line "场景7 点名被重建过" "被重建过"
+
+echo "=== 场景8：门户 Nacos 从 000 变成 200（**良性**变化）→ 不该报 DIFF ==="
+sed 's|^000$|200|' "$REAL" > "$T/nacos200.txt"
+run "$T/nacos200.txt"
+expect_rc "场景8 Nacos 恢复" no "$rc"
+no_line "场景8 没有 DIFF（门户恢复正常不是问题）" "DIFF"
+no_line "场景8 没有 MISS" "MISS"
+
+echo "=== 场景9：在 '--- java process count' 段里插噪声 → java 进程数不能被带偏 ==="
+# ⚠️ 噪声要插在**段的中间**（header 之后、下一段 header 之前），
+#    而且**不能自己长得像一个 header** —— 否则它就是**另一个段**了，
+#    那是合法的结构变化，不是噪声。
+#    （之前这个场景插的是 '--- extra' + 42 —— '--- extra' 自己就是个
+#      '--- ' 级的 header，它**开启了一个新段**，
+#      于是 '--- java process count' 段里只剩 42 → 取到 42。
+#      那是**正确**的行为，不是 bug。）
+awk '{
+  print
+  if (index($0, "--- java process count") == 1) { print "some noise here"; print "42" }
+  if (index($0, "--- redis dbsize (6379)") == 1) { print "another noise"; print "99" }
+}' "$REAL" > "$T/noisy2.txt"
+run "$T/noisy2.txt"
+expect_rc "场景9 段内噪声不改变判定" no "$rc"
+no_line "场景9 没有 MISS" "MISS"
+no_line "场景9 没有 DIFF" "DIFF"
+has_line "场景9 java 进程数仍是 2" "java 进程数 = 2"
+
+echo "=== 场景9b：'--- ' 级 header 开启**新段** → 前一段的值**取不到**，必须点名 MISS ==="
+# ⚠️ 这一条断言的是**诚实的行为**，不是「照样取到 2」：
+#    '--- extra' 自己就是一个 '--- ' 级的 header → 它**开启了一个新段**
+#    → '--- java process count' 段里**确实没有**那个值了。
+#    ⇒ 脚本必须说「MISS（取不到）」并 exit 非 0，
+#      **不能**去别的地方找一个 2 蒙混过关，也不能读成 42。
+awk '{
+  print
+  if (index($0, "--- java process count") == 1) { print "--- extra"; print "42" }
+}' "$REAL" > "$T/noisy3.txt"
+run "$T/noisy3.txt"
+expect_rc "场景9b 取不到就非 0" yes "$rc"
+has_line "场景9b 点名 MISS（没蒙混过关）" "MISS"
+no_line "场景9b 没有把 42 当成 java 进程数" "java 进程数 = 42"
+
+echo "=== 场景10：不传参数 → 用默认路径（/out/portal-snapshot-cluster.txt）==="
+out="$T/out.$$"
+bash "$SCRIPT" >"$out" 2>&1
+rc=$?
+expect_rc "场景10 默认路径" no "$rc"
+has_line "场景10 结论是逐项一致" "逐项一致"
+
+echo "=== 场景12：噪声里的数字**绝不能**被当成真值（回归：曾经会读成 42）==="
+# 在每个 header 后面插噪声 + 一个**别的数字**，真值仍在后面。
+# 判据：脚本必须读到**真值**，不能读到噪声里的那个数。
+awk '{
+  print
+  if (index($0, "### 2. cpspg info table count") == 1) { print "SOME NOISE"; print "42" }
+  if (index($0, "### 4. portal napstar info table count") == 1) { print "SOME NOISE"; print "42" }
+  if (index($0, "--- java process count") == 1) { print "some noise here"; print "42" }
+}' "$REAL" > "$T/noisy4.txt"
+run "$T/noisy4.txt"
+expect_rc "场景12 噪声数字没被当成真值" no "$rc"
+no_line "场景12 没有 MISS" "MISS"
+no_line "场景12 没有 DIFF" "DIFF"
+has_line "场景12 表数仍是 36（不是 42）" "cpspg info 表数 = 36"
+has_line "场景12 napstar 表数仍是 30（不是 42）" "门户 napstar info 表数 = 30"
+has_line "场景12 java 进程数仍是 2（不是 42）" "java 进程数 = 2"
+no_line "场景12 没有出现 42" "= 42"
+
+echo "=== 场景13：'### 2x.' 不能被当成 '### 2.'（字面量匹配，不是正则）==="
+sed 's/^### 2\. cpspg info table count$/### 2x. cpspg info table count/' "$REAL" > "$T/2x.txt"
+run "$T/2x.txt"
+expect_rc "场景13 标题被改 -> 那一项取不到" yes "$rc"
+has_line "场景13 点名 MISS" "MISS"
 
 echo
 echo "TEST SUMMARY: PASS=$TPASS FAIL=$TFAIL"

@@ -85,14 +85,39 @@ chk() {
 #        不会被当成通配符 → 不会误命中 `### 2x ...`；
 #      - `### 1b. oom / restarts` 里的 `b` 让它**不可能**被
 #        `### 1.` 命中（那正是要用字面量而不是正则的原因）。
-#    段落的**结束**用 `/^### /` 判定 —— 这里的 `###` 没有元字符，
-#    也不需要转义（`#` 不是正则元字符）。
+#    段落的**结束**分**两级**（这是快照的真实结构）：
+#
+#      ### N. xxx          ← **顶层**段，结束于下一个 '### '
+#        --- yyy           ← **子段**（只在 '### 7.' 里面），结束于下一个 '--- '
+#          zzz
+#
+#    ⚠️ 之前只在 '### ' 上结束 → '--- java process count' 那一段会
+#    一路吃到文件末尾，把 '--- java processes'、'--- listening ports'、
+#    '--- redis dbsize' 全吞进去 ⇒ 取出来的数是别的段的数。
+#    ⚠️ 但如果改成「'--- ' 也结束段落」，那 '--- ' 级噪声插在 header 和
+#    值之间时，段落会变成**空的** → 取不到值 → 又是误报。
+#
+#    ⇒ 正确做法：**按 header 自己的层级决定边界**：
+#      - header 是 '### ' → 结束于下一个 '### '；
+#      - header 是 '--- ' → 结束于下一个 '--- '（**子段**）。
+#      这样每个段只包含**自己那一小块**内容，互不干扰。
+#
+#    ⚠️ 取值取**第一个**匹配形状的值（段内的第一个）——
+#       噪声插在 header 和值之间是「多了一行」，不是「换了值」。
+#       （段边界正确之后，段内不会混进别的段的值。）
+#
+#    （`###` 和 `---` 都不是正则元字符，不需要转义。）
 # ---------------------------------------------------------------
 section() {
   local header="$1"
-  awk -v h="$header" '
+  # 边界由 header 的前缀决定：'### ' 找 '### '，'--- ' 找 '--- '。
+  local term='### '
+  case "$header" in
+    '--- '*) term='--- ' ;;
+  esac
+  awk -v h="$header" -v t="$term" '
     index($0, h) > 0 { insec=1; next }
-    insec && /^### / { insec=0 }
+    insec && index($0, t) == 1 { insec=0 }
     insec { print }
   ' "$SNAP"
 }
@@ -103,14 +128,31 @@ H_PING='### 3. redis ping'
 H_NAPSTAR='### 4. portal napstar info table count'
 H_NACOS='### 5. nacos readiness http code'
 H_IMAGE='### 6. image id'
+H_RESTARTS='### 1b. oom / restarts'
 H_JAVA='--- java process count'
 H_DBSIZE='--- redis dbsize (6379)'
 
-# 段里取「第一个纯数字」/「第一个 PONG」/「第一个像镜像 ID 的」/…
-num_in()   { grep -oE '[0-9]+'    | head -1; }
-pong_in()  { grep -oE 'PONG'      | head -1; }
-code_in()  { grep -oE '[0-9]{3}'  | head -1; }
-imgid_in() { grep -oE '[0-9a-f]{12}' | head -1; }
+# 段里取值：**取最后一个**匹配形状的值。
+#
+# ⚠️ 为什么不是「第一个」：
+#    header 和值之间插一行噪声（还带一个数字）时，「第一个」会取到**噪声里那个数**。
+#    实测（噪声插在 '### 2.' 和它的值之间）：
+#        第一个 → 42（❌ 应该是 36）
+#        最后一个 → 36（✅）
+#    ⇒ 取「最后一个」。
+#
+# ⚠️ 这个规则**只有在段落边界正确时才成立** ——
+#    边界按 header 的层级定（'### ' 找下一个 '### '，'--- ' 找下一个 '--- '），
+#    段里**不会**混进别的段的值，所以「最后一个」就是本段的值。
+#    ⚠️ 如果边界是「都吃到文件末尾」，'--- java process count' 段就会
+#    把后面的 '--- redis dbsize' 的 0 也吃进来 → 最后一个就变成 0（❌）。
+#    ⇒ **边界和取值规则是一套**，不能分开改。
+num_in()   { grep -oE '[0-9]+'      | tail -1; }
+pong_in()  { grep -oE 'PONG'        | tail -1; }
+code_in()  { grep -oE '[0-9]{3}'    | tail -1; }
+imgid_in() { grep -oE '[0-9a-f]{12}' | tail -1; }
+# 「key=value」形式的取值（比如 started=… / restarts=0 / oom=true）。
+kv_in() { echo "$1" | grep -oP "(?<=^|\s)$2=\K[^[:space:]]+"; }
 
 # 2. cpspg info 表数 —— 一个纯数字
 got=$(section "$H_CPSPG"   | num_in);  chk "cpspg info 表数" "36" "$got"
@@ -118,12 +160,77 @@ got=$(section "$H_CPSPG"   | num_in);  chk "cpspg info 表数" "36" "$got"
 got=$(section "$H_PING"   | pong_in); chk "门户 Redis PING" "PONG" "$got"
 # 4. portal napstar info 表数
 got=$(section "$H_NAPSTAR" | num_in);  chk "门户 napstar info 表数" "30" "$got"
-# 5. nacos readiness —— 3 位 http code（门户的 Nacos 早就被 OOM 杀了，恒为 000）
-got=$(section "$H_NACOS"  | code_in); chk "门户 Nacos readiness" "000" "$got"
+# 5. nacos readiness —— 3 位 http code
+# ⚠️ **000 和 200 都算通过**。
+#    门户的 Nacos 早就被宿主机 OOM killer 杀了（2026-11-01 01:10）→ 恒为 000。
+#    但如果哪次门户的 Nacos **活过来了**，那就是 200 ——
+#    那是个**良性变化**，不是「门户被人动过」。
+#    ⚠️ 别把它硬编码成 000：那会让「门户恢复正常」变成一条 DIFF，
+#    跟 DBSIZE=4 那个坑一模一样 —— 一个永远/经常误报的门禁等于没有门禁。
+got=$(section "$H_NACOS"  | code_in)
+case "$got" in
+  000|200) echo "  OK   门户 Nacos readiness = $got（000=被 OOM 杀掉，200=活着，都正常）" ;;
+  '')      echo "  MISS 门户 Nacos readiness —— 快照里找不到这一项"; fail=$((fail+1)) ;;
+  *)       echo "  DIFF 门户 Nacos readiness: 期望 000 或 200，现在='$got'"; fail=$((fail+1)) ;;
+esac
 # 6. image id —— 12 位十六进制
 got=$(section "$H_IMAGE"  | imgid_in); chk "镜像 ID" "07c4dac1a041" "$got"
 # 7. java 进程数
 got=$(section "$H_JAVA"   | num_in);  chk "java 进程数" "2" "$got"
+
+# ---------------------------------------------------------------
+# ⚠️ **门户容器有没有被重启过** —— 这一条**必须查**。
+#
+# 这个脚本取代的是 2026-11-01 会话文档 §六 的那套「前后各快照一次、
+# 逐项比对」的流程。那套流程的结论是：
+#
+#   「**唯一的差异是 uptime（14h → 15h）→ 说明容器从未被重启**」
+#
+# ⇒ 也就是说，**「容器没被重启」是那套流程真正证明的东西之一**。
+#    这个新脚本刚出来的时候**没有查** `### 1b. oom / restarts`
+#    （也没查 `### 1. container status` 和 `--- listening ports`）
+#    ⇒ 门户容器**被重启了**它照样报「逐项一致 —— 门户没被动过」。
+#    ⇒ 那是**把一个已经能证明的东西弄丢了**。
+#
+# 判据：`restarts=0`（docker 自己记的重启次数）。
+# ⚠️ 为什么不用 `started=`：那个时间戳**每次快照都不一样**（它是启动时刻，
+#    而快照之间隔了多久就差多久）→ 没法当基线比。
+#    `restarts=0` 才是「自启动以来一次都没重启过」的判据。
+#    `oom=` 也要看：它说明「这个容器**曾经**被 OOM 杀掉过」——
+#    门户的 oom=true 是 2026-11-01 之前就有的状态（宿主 OOM 杀的），
+#    如果它变成 false，说明门户**被重建过**（那更要紧了）。
+# ---------------------------------------------------------------
+# ⚠️ 取**最后一行**（跟其他段一个规则）：噪声插在 header 和这行之间时，
+#    「第一行」会取到噪声行。'### 1b.' 那一行本身是
+#    「started=… restarts=… oom=…」一整行，三个值都在里面。
+RESTART_LINE=$(section "$H_RESTARTS" | grep -v '^$' | tail -1)
+RESTARTS=$(kv_in "$RESTART_LINE" "restarts")
+OOM=$(kv_in "$RESTART_LINE" "oom")
+STARTED=$(kv_in "$RESTART_LINE" "started")
+if [ -z "$RESTARTS" ]; then
+  echo "  MISS 门户容器重启次数 —— 快照里读不到（快照不完整）"
+  fail=$((fail+1))
+elif [ "$RESTARTS" = "0" ]; then
+  echo "  OK   门户容器重启次数 = 0（自启动以来从未被重启）"
+else
+  echo "  DIFF 门户容器重启次数: 期望 0，现在='$RESTARTS' —— 门户**被重启过**！"
+  fail=$((fail+1))
+fi
+if [ -z "$OOM" ]; then
+  echo "  MISS 门户容器 OOM 标记 —— 快照里读不到（快照不完整）"
+  fail=$((fail+1))
+elif [ "$OOM" = "true" ]; then
+  echo "  OK   门户容器 OOM 标记 = true（2026-11-01 之前宿主 OOM 杀过门户的 Nacos，已知状态）"
+else
+  echo "  DIFF 门户容器 OOM 标记: 期望 true（历史状态），现在='$OOM' —— 门户**被重建过**！"
+  fail=$((fail+1))
+fi
+if [ -z "$STARTED" ]; then
+  echo "  MISS 门户容器启动时间 —— 快照里读不到（快照不完整）"
+  fail=$((fail+1))
+else
+  echo "  OK   门户容器启动时间 = $STARTED（每次快照都会不同，只作留痕，不作判据）"
+fi
 
 # ---------------------------------------------------------------
 # 门户 Redis 的 DBSIZE —— **不是跟「4」比**。
@@ -150,7 +257,7 @@ got=$(section "$H_JAVA"   | num_in);  chk "java 进程数" "2" "$got"
 #    说明门户的 Redis 里**又出现了数据** —— 那可能是门户真的活了，
 #    也可能是别的东西写进去了。**报出来，但不作为失败**。
 # ---------------------------------------------------------------
-DBSIZE_RAW=$(section "$H_DBSIZE" | grep -oE '[0-9]+' | head -1)
+DBSIZE_RAW=$(section "$H_DBSIZE" | grep -oE '[0-9]+' | tail -1)
 if [ -z "$DBSIZE_RAW" ]; then
   echo "  MISS 门户 Redis DBSIZE —— 快照里读不到（快照不完整）"
   fail=$((fail+1))
