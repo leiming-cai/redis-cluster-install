@@ -165,14 +165,14 @@ public class com.sac.platform.modelserver.service.impl.q implements CacheService
 
 树 A `application/backend/napstarweb/monitor`：
 
-| # | 文件（相对 `monitor/src/main/java/com/sac/application/napstarweb/monitor/`） | 行 | 形态 | 集群分支方案 |
+| # | 文件（相对 `monitor/src/main/java/com/sac/application/napstarweb/monitor/`） | 行 | 形态（实测回调体） | 集群分支方案 |
 |---|---|---|---|---|
-| 1 | `services/SVGParseService.java` | 653 | **单 key** 写（`BASE_SVG_PARAM+graphId+":RT"`） | 抽出 callback → `isCluster ? execute(cb) : executePipelined(cb)` |
-| 2 | `services/SVGParseService.java` | 2027 | **多 key** string 读（`BASE_SVG_SYMBOL+id`） | `isCluster ? getAllValues(keys) : executePipelined(...)` |
-| 3 | `services/CalculateService.java` | 686 | **多 key** hash 读（`BASE_SVG_CONNECTLINE+svgId`） | `isCluster ? getAllHashes(keys) : executePipelined(...)` |
-| 4 | `services/CalculateService.java` | 718 | **多 key** hash 读（`keyPrefix+param+":RT"`） | `isCluster ? getAllHashes(keys) : executePipelined(...)` |
-| 5 | `services/impl/SVGCacheServiceImpl.java` | 49 | **单 key** 写（`BASE_SVG_REALSCOPE`） | `isCluster ? execute(cb) : executePipelined(cb)` |
-| 6 | `kafka/RTListener.java` | 95 | **单 key** 写（`BASE_SVG_DATA`） | `isCluster ? execute(cb) : executePipelined(cb)` |
+| 1 | `services/SVGParseService.java`（方法 `parseAllUseTag`，回调体 653-1755） | 653 | **多 key 写**：`BASE_SVG_SYMBOL+symbolId`（每个 symbol 一个 key）、`BASE_SVG_SYMBOL+"TextClass:"+symbolId`、`BASE_SVG_DATA`、`BASE_SVG_PARAM+graphId+":RT"` | 抽出 callback → `isCluster ? execute(cb) : executePipelined(cb)`（非 pipeline 模式每条命令按槽路由，**多 key 也安全**） |
+| 2 | `services/SVGParseService.java`（方法 `batchGetSymbol`） | 2027 | **多 key** string 读（`BASE_SVG_SYMBOL+id`） | `isCluster ? getAllValues(keys) : executePipelined(...)` |
+| 3 | `services/CalculateService.java`（方法 `batchConnectLineDefCache`） | 686 | **多 key** hash 读（`BASE_SVG_CONNECTLINE+svgId`） | `isCluster ? getAllHashes(keys) : executePipelined(...)` |
+| 4 | `services/CalculateService.java`（方法 `batchGetParam`） | 718 | **多 key** hash 读（`keyPrefix+param+":RT"`） | `isCluster ? getAllHashes(keys) : executePipelined(...)` |
+| 5 | `services/impl/SVGCacheServiceImpl.java`（方法 `loadRTConfigKafka`） | 49 | **单 key** 写（`BASE_SVG_REALSCOPE`） | `isCluster ? execute(cb) : executePipelined(cb)` |
+| 6 | `kafka/RTListener.java`（方法 `commitDataIncre`） | 95 | **单 key** 写（`BASE_SVG_DATA`） | `isCluster ? execute(cb) : executePipelined(cb)` |
 
 **不需改**（已实测确认集群安全）：
 
@@ -200,6 +200,9 @@ public class com.sac.platform.modelserver.service.impl.q implements CacheService
   （调用方用 `results.get(list.indexOf(t))` 对齐）→ `getAllHashes`/`getAllValues` 满足。
 - **已知行为差异（接受）**：cluster 分支下 hSet **立即生效**，standalone 下攒到批次末才落库。
   树 B 的注释里已标为「风险 R2，本轮不修」→ 本轮照抄，不扩大范围。
+- **写路径统一用 `execute(cb)`**：非 pipeline 模式下 JedisCluster **按 key 路由**，
+  多 key 写（#1）也不会跨槽报错 —— 只是往返变多（每条命令一次 RTT）。
+  树 B 的注释已论证「往返变多可接受：每条记录都夹着一次 DB 查询，Redis 不是瓶颈」。
 
 ### 2.2 item 2（🔴）D7-b —— **二进制已修好，补源码对齐**
 
