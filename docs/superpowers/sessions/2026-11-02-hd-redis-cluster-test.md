@@ -935,3 +935,30 @@ b16a7e4 test(hd): add the redis cluster tool-level verification
 
 *本会话基于 2026-11-02 的实测结果。所有"通过"都有原始输出支撑。*
 *上一份存档：`docs/superpowers/sessions/2026-11-01-hd-napstar-docker-deploy.md`。*
+
+---
+
+## 十、2026-11-02 复核更正（本轮开工前查出来的）
+
+> 这一节记录**上一轮存档里的结论被实测推翻**的地方。
+> 留着不改，下一轮还会拿错前提做决策。
+> 完整的修复过程见 `docs/superpowers/sessions/2026-11-02-hd-redis-cluster-fix.md`。
+
+| # | 上一轮的说法 | 实测更正 |
+|---|---|---|
+| 1 | §3.1「jar 内 `application.yml` 赢过 Nacos → `OPERATIONS.md` §4.5 不生效」 | **只对门户树编的 jar 成立**（那条证据取自 D8 那个门户 jar `c41735d8…`）。**交付树**三个 app 的 `oms:` 是**注释着的**（`web-controller:108` / `modelserver/controller:92` / `rtdata-consumer:43`）→ **Nacos 赢** → §4.5 生效（前提已写回 OPERATIONS.md） |
+| 2 | §3.6「同一个交付 jar 里混了两版 platform」 | 更精确：**混的是「基线 1.0.14 + 应用侧自编 3.0.0」**，而**基线那份才是打过集群补丁的**。机制是**版本区间**：`platform.version=[1.0.0,2.0.0)` 不含 3.0.0 → Maven 不做 reactor 替换 → 交付物里的 platform **全部**是 1.0.14 |
+| 3 | §4.1·一「树 A 的 platform 源码根本没进包」 | **不准确**：树 A 的 platform 源码**整体不进包**（所有 `com.sac.platform` 依赖实测都是 1.0.14），但真正的原因不是「模块不存在」，而是**版本区间把 3.0.0 排除在外** |
+| 4 | §9 第 1 条「把集群分支移植进交付树的 **5 个调用点**」 | **4 个文件 6 处**（`SVGParseService` ×2 / `CalculateService` ×2 / `SVGCacheServiceImpl` / `RTListener`），且**不含**平台侧 —— 平台侧靠基线 1.0.14 解决 |
+| 5 | §9 第 2 条「把 `.join()` + `writeWithRetry` 移植进交付树」 | **二进制已由 `rtdata-module-1.0.14` 解决**（`javap` 实测有 `writeWithRetry` + `join()`）；剩下的是**源码对齐**（防切版本区间时回退） |
+| 6 | §9 第 6 条「同一个 jar 里混两版 platform，是有意的吗？」 | ✅ **有答案了**：不是有意的 —— 交付物里的 platform **全部**是基线 1.0.14；唯一自编的是 application 侧的 `monitor-3.0.0`，而它**没有**集群补丁 → 这才是 D7-a 的真正落点 |
+| 7 | 「5 个调用点」 | 是**文件数**；实际 **7 处**。且 `execute(cb, true, true)` 与 `executePipelined` 一样会 `openPipeline()` → 集群下一样炸（扫盲点时不能只扫 `executePipelined`） |
+
+**还有一条新增的事实**：`mvnRepo` 里的 `1.0.14` 是 **11-01 00:13–00:15 从基线树源码 install 的快照**，
+不是仓库里的正式发布产物 ⇒ 「1.0.14 带集群补丁」是**当前恰好成立**，**不是保证**
+（记为 **D9**，见 `docker/hd-napstar/DEFECTS.md`）。
+
+**⚠️ 本轮踩到的两个环境缺口**（不是代码缺陷，但会让判据**不可执行**）：
+容器被非正常停过之后 Kafka broker 起不来（ZK 残留 ephemeral）· JWT token 会过期。
+⇒ **下一轮开工前先确认这两件事**，否则会把环境问题误报成代码回归。
+详见 `docker/hd-napstar/DEFECTS.md` 的 `⚙️-A` / `⚙️-B`。

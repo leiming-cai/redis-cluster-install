@@ -11,6 +11,11 @@
 > | **D7-a**（含**依赖解析机制** + **修复点在 `monitor`**） | 2026-11-02 集群测试轮 | 同上 §3.6 / §3.7 / §4.1·一 / §4.1·二 / §4.1·三 |
 > | **D7-b** | 2026-11-02 集群测试轮 | 同上 §4.2 / §4.3 |
 > | **D8** | 2026-11-02 集群测试轮 | 同上 §4.4 |
+> | **D9**（版本区间会挑版本 → 切区间会静默降级） | 2026-11-02 修复轮 | `docs/superpowers/sessions/2026-11-02-hd-redis-cluster-fix.md` |
+>
+> > **2026-11-02 修复轮的状态**：D6 的适用条件已澄清 · **D7-a / D7-b / D8 已修** ·
+> > D2 (a) 已在**交付树**实施 · 新增 **D9** · 新增 **⚙️-A / ⚙️-B** 两条**环境缺口**
+> > （不是代码缺陷，但会让判据**不可执行**）。
 
 ---
 
@@ -96,6 +101,32 @@ ERROR ... IllegalStateException: Cannot load driver class: org.postgresql.Driver
 | `ext_base.yaml` | model-controller | ~~启动失败 `perms is null`~~ | ⚠️ **上一轮判断有误，见下方「实测更正」** |
 | `share_base.yaml` | model-controller | ~~没有数据源和 Kafka 配置~~ | ⚠️ **上一轮判断有误，见下方「实测更正」** |
 | `hisdataSend-ext.yaml` | hisDataSend | `Could not resolve placeholder 'hisDataSend.thread-pool-size'` | 🚫 **不补**（那个模块不做修改，预期起不来） |
+| **`kafkabus.yaml`** | **napstarweb（web-controller）** | **待查** —— 它也不在安装包导出包里 | 🟡 **本轮未处理**，见下方「同类缺口」 |
+
+### 🟡 同类缺口（2026-11-02 新发现）：`napstarweb` 也引用了一个安装包里没有的 dataId
+
+D2 (a) 在交付树里实施后（`modelserver/controller` 只留 `napstarmappingconfig.yaml`），
+本轮顺带核了**另外两个应用**的 `bootstrap.yml`：
+
+| 应用 | 引用的 dataId | 在安装包导出包里吗 |
+|---|---|---|
+| `modelserver/controller` | `share_base.yaml` / `ext_base.yaml` / `napstarmappingconfig.yaml` | ❌❌✅ → **已改成只留 `napstarmappingconfig.yaml`**（D2 (a)） |
+| `realserver/plugins/rtdata-consumer` | 三个**全是注释掉的** | ✅ 本来就不用 |
+| **`application/backend/napstarweb/web-controller`** | **`kafkabus.yaml`**（+ 注释掉的 `jk.yaml`） | ❌ **不在导出包里** |
+
+安装包的 Nacos 导出包 `DEFAULT_GROUP/` 只有
+`hisdataproducer-ext.yaml` / `jk.yaml` / `napstarmappingconfig.yaml`。
+
+⇒ **`napstarweb` 有一个和 D2 同性质、但本轮没处理的缺口。**
+
+🟡 **本轮为什么不处理**：
+① 导出包**可能不全**（导出的选择 ≠ 线上真实存在）—— 需要先确认真实 Nacos 里有没有 `kafkabus.yaml`；
+② 改它会动到 `napstarweb` 的配置加载链，而本轮的目标是**集群修复**，
+不该顺手改一个**没验证过后果**的配置项；
+③ 本轮实测 `web-controller` **启动正常、致命错误 0** ⇒ **当前不阻断启动**。
+
+⇒ **待交付方确认**：真实环境的 Nacos 里有没有 `kafkabus.yaml`？
+有 → 无事；没有 → 按 D2 (a) 同样的方式处理（去掉引用，或补进安装包的导出包）。
 
 > `hisdataSend-ext.yaml` 的键集细节（`hisDataSend.*` 与 `hisdataproducer.*` **不一样**，
 > `hisDataSend` 独有 `thread-pool-size`）记在 `NACOS-GAPS.md` 里，
@@ -906,6 +937,45 @@ real_graph:* key 数 = 0      ← 单机模式也没有
    —— 没有这两道门禁，「树里没打补丁」会**静默**再次发生
    （重新编译照做、部署照做，问题一点没变）。
 
+#### 🟡 D7-a 修完之后仍然残留的缺口：**`monitor` 的 6 处调用点在运行时没被覆盖**
+
+> 📌 **2026-11-02 集群测试轮（Task 7）实测后补记。**
+> D7-a 的补丁（`napstarweb/monitor` 的 4 个文件、6 处 `executePipelined`）
+> **本轮已经进 jar 并部署**（静态判据：jar 里含 `isCluster` 的 class 由 0 → 4），
+> **但这 6 处在本环境里没有任何动态判据能证它们在集群模式下真的对**。
+
+**为什么没有动态判据**：
+
+| 6 处调用点 | 所在模块 | 运行时能不能走到 | 原因 |
+|---|---|---|---|
+| `kafka/RTListener.java` | `monitor` | ❌ 走不到 | 它跟着 Kafka 的实时数据走，判据要造消息 + 让应用消费 |
+| `services/CalculateService.java`（2 处） | `monitor` | ❌ 走不到 | 图形解析路径，依赖模型元数据表 |
+| `services/SVGParseService.java`（2 处） | `monitor` | ❌ 走不到 | 同上 |
+| `services/impl/SVGCacheServiceImpl.java` | `monitor` | ❌ 走不到 | 同上 |
+
+- 模型元数据表 `info.model_objecttype` / `model_attribute` / `model_objectattribute`
+  在这个安装包里**都是 0 行** ⇒ 图形解析那条路**根本跑不到**
+  （对应应用层判据 A2 = **SKIP**「判据不可执行：模型元数据表是空的」）。
+- **「启动无 UOE」不能当判据** —— 这是**假绿**：
+  A3 / C3 查的是**应用日志**里有没有 `UnsupportedOperationException`，
+  而 SDR 的 `JedisClusterConnection.openPipeline()` 只在**代码真的走到那行**时才抛；
+  代码没走到 ⇒ 日志里当然没有异常 ⇒「0 个异常」是**必然**，不是**证明**
+  （上一轮存档 §7.1 / §7.3 记的就是这个坑）。
+
+**⇒ 本轮 `monitor` 的验收方式**：**静态判据（jar 里 `isCluster` 的 class 数 = 4）
++ 逐处源码审阅（6/6 处 `executePipelined` 都在 `if (redisClusterHelper.isCluster())` 的
+`else` 分支里）**，**没有**运行时证据。
+
+**⇒ 风险（下一轮要处理）**：如果这 6 处里有分支逻辑写错（比如集群分支读的是
+`getAllHashes` 而原意是 `getAllValues`），**静态判据和现有全部动态判据都发现不了**。
+要补上，需要至少一条**能真正走通图形解析路径**的数据（补 `info.model_objecttype` 等表），
+或者在有真实模型数据的环境上再跑一次集群模式。
+
+> 📌 对照：`rtdata-module` 那 1 处（D7-b 一起修的）**有**动态判据 ——
+> C2「发一条 INCDATA Kafka 消息 ⇒ 应用自己写的 `real_data:<otype>:<obid>`
+> 出现在集群里、且能读回载荷」**跑通了**（2026-11-02 实测 PASS）。
+> ⇒ **动态覆盖只有 `rtdata` 侧，`monitor` 侧没有。**
+
 ### D7-b — `batchWirtePip` 把 `CompletableFuture` 丢掉了（**交付树里依然存在**，重新编译也修不掉）
 
 #### 现象
@@ -1314,16 +1384,153 @@ matrix exit=0                                   ← 绿！真实的失败被丢�
 
 ---
 
+## ⚙️ 环境缺口（**不是代码缺陷**，但会让判据**不可执行** —— 2026-11-02 Task 7 实测踩到）
+
+> 📌 这两条**不属于 D1~D8 的任何一条**，但它们**会让应用层判据静默地不可执行**，
+> 而不可执行的判据长得跟「PASS」一模一样（假绿）。
+> ⇒ **每一轮跑应用层判据之前必须先确认这两条。**
+
+### ⚙️-A：容器被**非正常**停过之后，**Kafka broker 起不来**（node1 / node2 都中招）
+
+**现象**
+
+- `hd-entrypoint` 自己就打了一行 `Kafka : DOWN`；
+- 容器里 `9092` **没有**监听；
+- 应用日志刷 `Connection to node -1 (node1/172.22.0.2:9092) could not be established`；
+- 应用层判据 C2「发一条 INCDATA Kafka 消息逼应用写集群」**判据不可执行**
+  （`每秒从kafka接收的数量：0`，消息**根本没被消费**）。
+
+**根因**（`/opt/software/kafka_2.13-2.8.0/logs/server.log`）
+
+```
+[2026-11-02 09:38:14,882] ERROR Error while creating ephemeral at /brokers/ids/755,
+    node already exists and owner '72066024666431488' does not match current session '72057891715678208'
+[2026-11-02 09:38:14,918] ERROR [KafkaServer id=755] Fatal error during KafkaServer startup. Prepare to shutdown
+```
+
+容器被**非正常**停掉（本次是 **Docker Desktop 重启**）⇒ 旧 broker 的 ZK session
+没走正常的 ephemeral 清理 ⇒ ZK 快照里 `/brokers/ids/<brokerId>` 还挂着**旧 owner**
+⇒ 新 broker 用**自己的** session 建同名节点 ⇒ 撞车 ⇒ **启动即致命错误退出**。
+（`node2` 的 `756` 同理。）
+
+**恢复办法**（本轮实测有效）
+
+```bash
+# 1) 删掉陈旧的 broker 注册节点（只删 /brokers/ids/*，不碰别的业务 znode）
+/opt/software/apache-zookeeper-3.9.0-bin/bin/zkCli.sh -server node1:2181,node2:2181 \
+    delete /brokers/ids/<brokerId>
+# 2) 再起 broker
+cd /opt/software/kafka_2.13-2.8.0
+export KAFKA_HEAP_OPTS="-Xms128M -Xmx256M"; export LOG_DIR="$PWD/logs"
+JMX_PORT=9998 ./bin/kafka-server-start.sh -daemon config/server.properties        # node1，755
+JMX_PORT=9999 ./bin/kafka-server-start.sh -daemon config/server.properties.node2  # node2，756
+```
+
+**⇒ 建议交付方**：`hd-entrypoint.sh` 里在起 broker **之前**先清掉自己的
+`/brokers/ids/<brokerId>`，否则**每一次容器重启周期**都会复发。
+
+### ⚙️-B：`/tmp/hd-token.txt` 里的 JWT **会过期**，过期后 B2 判据**必然**失败
+
+**现象**：应用层判据 B2 触发 `POST /model/modelData/getEnumDictTypes` 返 **HTTP 500**，
+应用日志里是
+
+```
+org.apache.shiro.authz.UnauthorizedException: org.apache.shiro.authc.AuthenticationException:
+  Authentication failed for token submission [com.sac.platform.modelsever.authentication.jwt.JWTToken@...]
+```
+
+**根因**：token 的 `exp` 过了（实测 `exp=1793583211`，当时 `now=1793594841`，过期约 3.2 小时；
+token 文件 mtime 是前一天 09:33）。**Shiro 拒的是凭证，不是连接** ——
+所以这跟 Redis 集群、跟本轮改动**都无关**，但长得很像「应用写不进去」。
+
+**恢复办法**：跑应用层判据之前重新铸一个
+
+```bash
+bash /opt/hd/mint-hd-token.sh     # scripts/mint-hd-token.sh：用应用自己的 JWTUtil 铸
+```
+
+（铸完 `/tmp/hd-token.txt` 的 `exp = now + ~86400s`。）
+
+---
+
+## 🟡 D9（本轮新发现）树 A 的 platform 源码比基线旧 —— **切版本区间 / 发 1.0.15 会静默降级**
+
+> 这是本轮开工前重新核对依赖解析时查出来的，**上一轮没意识到**。
+
+### 现象
+
+树 A 的 `platform/backend` 版本是 **3.0.0**，但 `platform/backend/pom.xml:38` 写的是
+
+```xml
+<platform.version>[1.0.0,2.0.0)</platform.version>
+```
+
+⇒ **3.0.0 不在这个区间内** → Maven **不做 reactor 替换** → 交付物里的 platform
+**全部**取自共享 `mvnRepo` 的基线 `1.0.14`。
+
+**实测**（`mvn -o -llr dependency:list -DincludeGroupIds=com.sac.platform`）：
+`util` / `orm` / `springconfig` / `model-service` / `model-dao` / `model-entity` /
+`model-interface` / `realserver-service` / `realserver-entity` / `realserver-dao` /
+`realserver-oms` / `taskmanage` / `menuservice` … **全部 1.0.14**。
+
+### 好消息：基线 1.0.14 **是打过集群补丁的那份**
+
+全量扫描 `mvnRepo/com/sac/platform/*/1.0.14/*.jar`（按 class 字节里是否出现 `isCluster`）：
+
+| 1.0.14 jar | 含 `isCluster` 的 class | 内容 |
+|---|---|---|
+| `realserver-oms` | 14 | 集群工具箱（`RedisClusterHelper` / `RedisClusterHashPipeline` / `RedisScanUtils` / `RedisPipelineUtil`） |
+| `model-service` | 1（`impl/q.class` = ProGuard 混淆后的 `CacheServiceImpl`） | 5 个集群分支 |
+| `rtdata-module` | 4 | 集群写路径 + `writeWithRetry` + `.join()` |
+
+⇒ **交付物当前是有集群能力的**（实测 C2 / C3 PASS）。
+
+### 坏消息：这套能力**不是**树 A 源码提供的
+
+树 A 自己的 platform 源码里，这 4 个类**都是旧的**（本轮已对齐，见 D7-a / D7-b）。
+而 **3.0.0 的构件其实早就躺在 `mvnRepo` 里了**
+（`rtdata-module-3.0.0.jar` / `model-service-3.0.0.jar` / `model-controller-3.0.0.jar`，
+mtime 2026-11-01 00:15~00:17 —— 上一轮有人 install 过）。
+
+⇒ **触发降级的两条路**（都**不需要**覆盖 1.0.14）：
+
+| 触发方式 | 需要 `mvn install` 吗 | 后果 |
+|---|---|---|
+| 把版本区间切回 `[3.0.0,4.0.0)`（pom 里那几行**被注释掉的** `<version>${napstarserver.version}</version>` 就是这个开关） | **不需要**，`mvn package` 时 reactor 自动替换 | 无补丁的树 A 源码进包 → 集群能力**静默消失** |
+| 发布一个 `1.0.15`（同一版本线的补丁版） | 需要 | 区间 `[1.0.0,2.0.0)` **自动选中更高的 1.0.15** → 无补丁的树 A platform 顶掉 1.0.14 |
+
+⚠️ **注意**：上一轮说「`mvn install` 会覆盖基线」是**错的** ——
+3.0.0 与 1.0.14 存在**不同的目录**里，各存各的，互不覆盖。
+真正的机制是**区间挑版本**。
+
+### 本轮做了什么 / 还剩什么
+
+- ✅ **已做**：把影响集群能力的 **4 个类**与基线对齐
+  （`RedisRealDataServiceImpl` / `OmsWriteByKafkaServiceImpl` / 新增 `FailSetCounter` / `CacheServiceImpl`），
+  并补了 **12 条 Mockito 单测**（含**变异测试**证明它们真的锁得住写入路径与 `&` 拆分）。
+- 🟡 **仍需交付方确认**：交付流程是「先编 platform 再 `mvn install`」吗？
+  若是，**必须先完成树 A 与基线的整体对齐**（不止这 4 个类 ——
+  两棵树在**业务逻辑**上也有差异，本轮没对齐）。
+  ⇒ **在此之前，禁止对树 A 的 platform 执行 `mvn install`**，
+  也**不要**把版本区间切到 `[3.0.0,4.0.0)`。
+- 📌 另注：`mvnRepo` 里的 `1.0.14` 是 **2026-11-01 00:13–00:15 从基线树源码 install 的快照**，
+  **不是仓库里的正式发布产物** ⇒ 「1.0.14 带集群补丁」是**当前恰好成立**，**不是保证**。
+
+---
+
 ## 📋 汇总
 
 | # | 严重度 | 谁引入 | 状态 |
 |---|---|---|---|
 | D1 | 🔴 | **上一轮 PG 迁移** | **🚫 不修**（用户决定：`hisDataProducer` / `hisDataSend` 不做修改）→ 这两个应用在本环境预期起不来，属已知且已接受 |
-| D2 | 🟡 | 安装包 | ⚠️ **实测更正**：手写补齐的做法是错的（覆盖了真配置）。真缺口只是「dataId 名对不上」，不阻断启动。✅ **选项 (a) 已实施 —— 但做在了门户树里**（`bootstrap.yml` 的 `shared-configs: []`，mtime 2026-11-01 14:49:35），并从门户树重编了 jar ⇒ **副作用就是 D8**。**交付树里还没修**，且**不能直接沿用门户树编出来的 jar** |
+| D2 | 🟡 | 安装包 | ⚠️ **实测更正**：手写补齐的做法是错的（覆盖了真配置）。真缺口只是「dataId 名对不上」，不阻断启动。✅ **选项 (a) 已实施（2026-11-02，在交付树里）** —— `platform/backend/modelserver/controller/src/main/resources/bootstrap.yml` 改成 `shared-configs: []` + 只留 `napstarmappingconfig.yaml`（改后与基线树同名文件 **SHA256 全等**），并**从交付树重编了 `model-controller`** ⇒ **副作用 D8 一并解决**。🟡 **同类缺口未处理**：`napstarweb/web-controller` 的 `bootstrap.yml` 还引用着 `kafkabus.yaml`，它**也不在安装包导出包里**（导出包 `DEFAULT_GROUP/` 只有 `hisdataproducer-ext.yaml` / `jk.yaml` / `napstarmappingconfig.yaml`）⇒ 详见 D2 节末 |
 | D3 | 🟡 | 安装包 | 本轮部署时补（`pg_hba.conf` + reload） |
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
-| D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。生产要改成改 jar 的 `oms:` 块或走 `bootstrap.yml` override，**不进命令行**。📌 **实测优先级**（2026-11-01/02）：**命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId** ⇒ Nacos 里的 `oms:` **压不过 jar** → `docs/OPERATIONS.md` §4.5 那条「三个 dataId 各填一份」**在当前配置下不生效**，已修正 |
-| D7-a | 🔴 | **集群补丁只落在 platform 侧，application 侧的调用点从来没跟上**（树 A `D:\work\info\web\extendsystem\华盾-napstar2.0\code`）。**platform 依赖不带 `<version>` → 由 `platform.version [1.0.0,2.0.0)` 解析到基线树编的 `1.0.14`**（那份二进制**带**集群类 ✅）；**树 A 自己编的 `monitor-3.0.0.jar` / `rtdata-module-3.0.0.jar` 不带**（`isCluster` = 0，`executePipelined` = 4 ❌）⇒ **同一个 jar 里混 1.0.14 和 3.0.0 两版 platform**） | **待修**：把集群分支**移植进交付树 application 侧的 5 个调用点**（`napstarweb/monitor` ×4 + `rtdata-module` ×1；照树 B 的 `if (redisClusterHelper.isCluster()) {…} else {executePipelined(…)}` 写法；`RedisClusterHelper` / `RedisClusterHashPipeline` 从**现有**的 `realserver-oms` 依赖就能拿到 —— 那份二进制**本身已带集群分支**，**不需要新增模块**），**然后**重新编译并重新部署；并加 CI 门禁（查 jar + 查**限定范围后**的 5 个调用点）。📌 **修复点在 `monitor` 模块，不在 `web-controller`**（后者 9 个文件、零 Redis）。⚠️ **待交付方确认**：同一个 jar 里混两版 platform，是有意的吗？ |
-| D7-b | 🔴 | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | **待修**：把树 B 的 `.join()` + `writeWithRetry` + 去 `@Async` 移植进交付树；异常要显式记日志。**光重新编译修不掉**，且**必须跟 D7-a 一起修** |
-| D8 | 🟡 | **实施 D2 选项 (a) 时的副作用**（在**门户树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**门户树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与门户树产物**逐字节相同**） | **待修**：**从华盾交付树重编**并把 D2 (a) 的改动做在交付树里 —— 一次同时解决 D2 和 D8。**Task 6 实测：换回基线那份 jar + 4 个应用都在跑 → base 矩阵精确回到 47 PASS / 0 FAIL / 3 SKIP** ⇒ 矩阵本身没退化。⚠️ **jar 文件换回不等于运行中的 JVM 换回**（2026-11-02 实测：运行中的 JVM 启动于 03:34:36，磁盘上的文件在 03:36:09 被**原地覆盖**（同一 inode），**晚 93 秒** —— 所以 JVM 跑的还是**旧内容**，残留**仍潜伏**），下次重启会再变 |
+| D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。📌 **实测优先级**（2026-11-01/02）：**命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId** —— 但**只有当 jar 里有**活的** `oms:` 块时，jar 才压过 Nacos**。📌 **2026-11-02 复核更正**：**交付树**编出来的三个 jar 里 `oms:` 块是**注释着的**（`web-controller:108` / `modelserver/controller:92` / `rtdata-consumer:43`）⇒ **jar 不覆盖 Nacos ⇒ Nacos 的 `oms:` 生效** ⇒ 生产**不必**把密码放命令行（Nacos 里配就行）。上一轮那条「Nacos 压不过 jar」的证据取自**门户树**编的 jar（`c41735d8…`），**不是交付树的**。⇒ `docs/OPERATIONS.md` §4.5 已回改为「生效，但前提是 jar 里没有活的 `oms:` 块」 |
+| D7-a | 🔴 → 🟡 | **集群补丁只落在 platform 侧，application 侧的调用点从来没跟上**（树 A `D:\work\info\web\extendsystem\华盾-napstar2.0\code`）。**platform 依赖不带 `<version>` → 由 `platform.version [1.0.0,2.0.0)` 解析到基线树编的 `1.0.14`**（那份二进制**带**集群类 ✅）；**树 A 自己编的 `monitor-3.0.0.jar` / `rtdata-module-3.0.0.jar` 不带**（`isCluster` = 0，`executePipelined` = 4 ❌）⇒ **同一个 jar 里混 1.0.14 和 3.0.0 两版 platform**） | ✅ **已修（2026-11-02）**：`napstarweb/monitor` 的 **6 处**（不是 5 处 —— `SVGParseService` ×2 / `CalculateService` ×2 / `SVGCacheServiceImpl` / `RTListener`）全部加了 `if (redisClusterHelper.isCluster())` 分支：写路径用 `redisTemplate.execute(cb)`（非 pipeline，按槽路由，多 key 也安全），多 key 读用 `oms` 的 `RedisClusterHashPipeline.getAllHashes` / `getAllValues`（**返回顺序与入参一致**）。**不需要新增模块**（`realserver-oms` 那份二进制本身已带集群分支）。📌 **实测**：部署的 `monitor-3.0.0.jar` 里含 `isCluster` 的 class 由 **0 → 4**；6 处 `executePipelined` **全部**在 `else` 分支里。🟡 **残留缺口**：`monitor` 这 6 处在本环境**运行时未覆盖**（模型元数据表空 → 图形解析路径跑不到；「启动无 UOE」是假绿）⇒ 只做了静态核验 + 逐处审阅，详见 D7-a 节末。📌 **修复点在 `monitor` 模块，不在 `web-controller`**（后者 9 个文件、零 Redis） |
+| D7-b | 🔴 → ✅ | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | ✅ **已修（2026-11-02）**，两条路径都通了：<br>**① 二进制**：部署的 `rtdata-consumer-3.0.0.jar` 里装的是**基线 `rtdata-module-1.0.14.jar`**（那份带 `writeWithRetry` / `.join()` / `isCluster` / `RedisClusterHashPipeline`）—— **重编本身就把 D7-b 修好了**（旧 jar 里装的是树 A 自编的无补丁 `rtdata-module-3.0.0`）。⇒ **判据 C2（发一条 INCDATA Kafka 消息 ⇒ 应用自己写的 `real_data:<otype>:<obid>` 进集群且能读回载荷）本轮 PASS**、C3（无 UOE）PASS。<br>**② 源码**：树 A 的 `rtdata-module` 源码也已与基线对齐（`RedisRealDataServiceImpl` / `OmsWriteByKafkaServiceImpl` / 新增 `FailSetCounter`），并补了 **12 条 Mockito 单测**（含**变异测试**证明：删掉写入体 / 禁用 `&` 拆分 → 各有 1 条失败）⇒ **防止将来切版本区间或发 1.0.15 时回退**。⚠️ **不是**「重编修不掉」了 —— 上一轮那个判断是基于「树 A 的源码不进包」这个当时的事实，而**重编的产物内容取决于版本区间，不取决于源码新旧** |
+| D8 | 🟡 → ✅ | **实施 D2 选项 (a) 时的副作用**（在**门户树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**门户树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与门户树产物**逐字节相同**） | ✅ **已修（2026-11-02）**：**从交付树重编** `model-controller`，并把 **D2 (a) 的改动做在交付树里**（`bootstrap.yml`：`shared-configs: []` + 只留 `napstarmappingconfig.yaml`；改后与基线树同名文件 **SHA256 全等**）⇒ **一次同时解决 D2 和 D8**。📌 **实测**：新 jar md5 `0ce5a08a…`（旧的 `c41735d8…` 已备份到 `/opt/napstar_app/backup-20261102/`）；jar 里 `application.yml` 的 `oms:` 块**是注释着的** → **Nacos 赢** → 启动日志 `*** Using Redis Standalone at node1:6379`，致命错误 0。📌 **并且**：重编后 jar 里的 platform 集合**与门户 jar 一致**（都是 `model-service-1.0.14` / `realserver-oms-1.0.14`）⇒ **重编不降集群能力**。⚠️ 「jar 文件换回 ≠ 运行中的 JVM 换回」这条教训已落成**可追溯机制**：`start-hd-apps.sh` 现在启动前打印 jar 的 **路径 + md5 + mtime**，回归矩阵的 A0 段也打印同样三项 ⇒ 换过 jar 的回归**必须**重跑，数字可不可比一眼能看出来 |
+| D9 | 🟡 | **本轮新发现**（版本区间） | 树 A 的 platform 源码比基线旧；`platform.version=[1.0.0,2.0.0)` 使交付物取基线 `1.0.14`（**带**集群补丁 ✅）。⇒ **切回 `[3.0.0,4.0.0)` 或发 `1.0.15` 就会静默降级**（不需要覆盖 1.0.14，**是区间挑版本**）。✅ 本轮已把影响集群能力的 4 个类与基线对齐 + 12 条单测兜底。🟡 **待交付方确认**：「先编 platform 再 install」是不是交付流程 ⇒ 在此之前**禁止 install 树 A 的 platform**，详见正文 |
+| ⚙️-A | ⚙️ | **容器环境**（Docker Desktop 重启 → 容器非正常停 → ZK 里残留 ephemeral `/brokers/ids/<id>` → Kafka broker 启动即致命错误退出） | **待修（交付方）**：`hd-entrypoint.sh` 起 broker 前先清掉自己的 `/brokers/ids/<brokerId>`。🟡 **不是代码缺陷**，但会让应用层判据 C2 **静默不可执行**（长得跟 PASS 一模一样）。本轮已手工恢复（node1 755 / node2 756），详见正文 |
+| ⚙️-B | ⚙️ | **测试环境**（`/tmp/hd-token.txt` 里的 JWT 会过期） | **每次跑应用层判据前重新铸**：`bash /opt/hd/mint-hd-token.sh`。🟡 **不是代码缺陷**，但会让 B2 **必然**失败（HTTP 500 + Shiro 认证失败），**看起来像「应用写不进集群」**。本轮已重新铸（`exp = now + ~86400s`），详见正文 |

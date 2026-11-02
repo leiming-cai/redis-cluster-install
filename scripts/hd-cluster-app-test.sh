@@ -535,11 +535,15 @@ report_app_talked() {
 #            回调体一次都不执行（数据根本没发出去）。
 #      ② 日志里没有异常
 #         -> **不能**断言「被 @Async 吞了」—— 那只是**候选原因之一**。
-#            已验证的事实是「部署的 jar 里那条路径压根没有集群分支，
-#            所以它永远走不到能报错的分支」，异常则被
-#            「CompletableFuture 被丢弃（没人 join）」这一步吞掉，
-#            于是什么都留不下。其它可能（路径没被触发、数据本身不合法）
-#            也不能排除，所以这里只陈述已验证的部分 + 列出其它可能。
+#            📌 **2026-11-02 更新**：这个分支的文案之前写的是
+#            「部署的 jar 里那条路径压根没有集群分支」——
+#            **那个前提现在不成立了**（部署的 jar 里装的是基线
+#            `rtdata-module-1.0.14`，**带** isCluster / RedisClusterHashPipeline /
+#            writeWithRetry / join）。
+#            ⇒ 所以现在只剩**已验证**的那部分：异常若被「CompletableFuture 被丢弃
+#            （没人 join）」吞掉，日志里、stderr 里都没有痕迹 ⇒ 失败是完全静默的。
+#            其它可能（路径没被触发、数据本身不合法）也不能排除，
+#            所以这里只陈述已验证的部分 + 列出其它可能。
 assert_app_key_present() {
   local name="$1" key="$2" log="${3:-}"
   local p n found=0
@@ -568,12 +572,12 @@ assert_app_key_present() {
     else
       echo "        日志里**没有** UnsupportedOperationException —— 也就是说"
       echo "        「集群模式下 SDR pipeline 抛异常」这条路径**没有**被走到。"
-      echo "        已验证的事实："
-      echo "          · 部署的 jar 里这条写路径**没有集群分支**"
-      echo "            （RedisRealDataServiceImpl 里没有 isCluster / RedisClusterHashPipeline），"
-      echo "            所以它走不到「集群分支里按 slot 分组 pipeline」那条路；"
-      echo "          · 抛出的异常又被「CompletableFuture 被丢弃（没人 join）」吞掉，"
-      echo "            所以日志里、stderr 里都没有痕迹 —— 失败是完全静默的。"
+      echo "        已验证的事实（2026-11-02 更新）："
+      echo "          · 部署的 jar 里这条写路径**有**集群分支"
+      echo "            （基线 rtdata-module-1.0.14：isCluster / RedisClusterHashPipeline /"
+      echo "              writeWithRetry / join 都在）—— 所以「jar 里没补丁」不再是候选原因；"
+      echo "          · 若写路径真失败且异常被「CompletableFuture 被丢弃（没人 join）」吞掉，"
+      echo "            日志里、stderr 里都没有痕迹 —— 失败是完全静默的。"
       echo "        其它候选原因（**未**验证，不能当结论）："
       echo "          · 写路径压根没被触发（Kafka 消息没到 / 没被消费）；"
       echo "          · 数据本身不合法，被解析层跳过了。"

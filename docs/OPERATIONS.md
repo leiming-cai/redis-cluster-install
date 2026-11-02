@@ -1243,45 +1243,54 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 
 #### Redis 侧
 
-> ⛔ **实测更正（2026-11-02）：本表第 1/5/6 行的「填在 Nacos 里」在当前这套配置下不生效。**
+> ℹ️ **实测更正（2026-11-02 复核）：本表第 1/5/6 行的「填在 Nacos 里」**是生效的** ——
+> 但有一个前提，务必看懂，否则会按错的结论改配置。**
 >
 > **实测出来的优先级**（华盾 napstar2.0，2026-11-01/02 两轮实测）：
 >
 > | 优先级 | 来源 | 结果 |
 > |---|---|---|
 > | 1（最高） | **命令行 `--oms.*`** | ✅ **赢** |
-> | 2 | jar 内 `application.yml` | ✅ **赢过 Nacos** |
-> | 3（最低） | Nacos dataId 里的 `oms:` | ❌ **输** |
+> | 2 | jar 内 `application.yml` | ⚠️ **只在 jar 里有**活的** `oms:` 块**时才赢过 Nacos |
+> | 3（最低） | Nacos dataId 里的 `oms:` | ✅ **赢**（前提是 jar 里没有活的 `oms:` 块） |
 >
-> **证据**：给 Nacos 的 `icms-controller.yaml` 的 `oms:` 加 `redisMode: standalone`，
-> 启动日志**仍然是**
-> `*** Using Redis Cluster with nodes: 127.0.0.1:6379` ——
-> 那是 **jar 内 `application.yml` 的集群占位符**，压过了 Nacos。
-> 同一份 jar 改成命令行
-> `--oms.redisMode=standalone --oms.hostname=node1 --oms.port=6379 --oms.password=sac888`
-> 就变成 `*** Using Redis Standalone at node1:6379`，**立刻生效**。
+> **关键前提：jar 里的 `oms:` 块是「注释着」还是「活的」。**
 >
-> ⇒ **要真正切到集群，只有两条路**：
-> ① **命令行覆盖**（§4.4.5 的写法）—— 本项目验证配置生效的标准手法；
-> ② **改 jar 内的 `application.yml` 的 `oms:` 块**。
+> | jar 从哪棵树编的 | `application.yml` 里的 `oms:` | 谁赢 |
+> |---|---|---|
+> | **交付树** `华盾-napstar2.0` | **`# oms:`（注释着）** | ✅ **Nacos 赢** |
+> | **门户树** `cpscloud1.0` | `oms:`（活的，`redisMode: cluster` + `clusters:[127.0.0.1:6379]` + 空密码） | ❌ jar 赢，**压过 Nacos** |
+>
+> 📌 **上一轮（2026-11-02 早）那条「Nacos 赢不了 jar」的证据取自门户树编的 jar**
+> （就是 D8 里那份 `c41735d8…`），**不是交付树编的**。
+> 交付树编出来的三个 jar（`web-controller` / `model-controller` / `rtdata-consumer`）
+> 的 `application.yml` 里 `oms:` 块**都是注释着的**（实测 `web-controller:108` /
+> `modelserver/controller:92` / `rtdata-consumer:43`）
+> ⇒ **jar 不覆盖 Nacos ⇒ Nacos 的 `oms:` 生效** ⇒ 下表第 1/5/6 行**照填不误**。
+>
+> ⚠️ **但如果你用的是门户树编的 jar**（或任何 `oms:` 块没被注释的 jar），
+> 那 Nacos 的 `oms:` **会被压过去**，而且**没有任何报错** ——
+> 表现是「启动正常、第一次读写才炸」（§4.6 第一种下场）。
+> ⇒ **判断依据是「jar 从哪棵树编的」，不是「优先级表」。**
+>
+> ⇒ 切集群有两条路：
+> ① **改 Nacos**（推荐，交付树 jar 的默认路径）—— 三个 dataId 各填一份，见下表；
+> ② **命令行覆盖**（§4.4.5 的写法）—— 本项目验证配置生效的标准手法，也是**测试环境**
+>    切集群的手段（`HD_REDIS_CLUSTER=1`）。
 > （还有第三条：改 `bootstrap.yml` 的 override 开关让 Nacos 赢 ——
 > `spring.cloud.config.override-none: false` + `allow-override: true`。
 > **这一条需要单独验证，本手册不背书。**）
 >
-> ⇒ 下表第 1/5/6 行**照填不误**（它们是 Nacos 侧的**目标状态**，
-> 交付方在 `bootstrap.yml` 配好 override 之后就会生效），
-> 但**在 override 配好之前，填了也白填**。
->
 > 📌 **判据不变**：启动日志里那行
-> `*** Using Redis Cluster with nodes: <节点列表>` —— **逐字打印生效值**，
-> 行里的列表就是真正生效的节点。**改完配置 → 重启 → 看这行。**
+> `*** Using Redis Cluster with nodes: <节点列表>` / `*** Using Redis Standalone at <host>:<port>`
+> —— **逐字打印生效值**，行里的内容就是真正生效的。**改完配置 → 重启 → 看这行。**
 > （注意这行**没有**结尾的 `***`。）
 
 > ⚠️ **`oms:` 要在**三个地方**分别填**（因为三个应用从 Nacos 拉的东西不一样，见 §4.3）：
 
 | # | 位置 | 键 | 填什么 | 必改 |
 |---|---|---|---|---|
-| 1 | Nacos `DEFAULT_GROUP/ext_base.yaml` → **modelserver 用** | `oms.redisMode` | `cluster` | ✅ |
+| 1 | Nacos **`MODELSERVER_GROUP` / `icms-controller.yaml`** → **modelserver 用** | `oms.redisMode` | `cluster` | ✅ |
 | 2 | 同上 | `oms.clusters` | 集群节点列表，如 `- <A机IP>:6379` / `- <B机IP>:6382`（至少 1 个，建议给全 3 个 master） | ✅ |
 | 3 | 同上 | `oms.password` | `<集群密码>`（与 #7 一致） | ✅ |
 | 4 | 同上 | `oms.hostname` / `oms.port` | cluster 模式下**不读**，留着无害，可删 | 可选 |
@@ -1290,7 +1299,7 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 | 7 | 仓库 `cluster.conf` | `cluster_password` | `<集群密码>`（**必须与 #3/#5/#6 一致**） | ✅ |
 | 8 | 仓库 `cluster.conf` | `cluster_require_full_coverage` | `no`（两机部署必改，见 §2.5） | ✅ |
 | 9 | 仓库 `cluster.conf` | `redis_prefix` | 与节点上实际路径一致，否则 Redis 起不来 | ✅ |
-| 10 | 三个应用的 `application.yml` → `oms:` 块 | `clusters` / `password` | **⚠️ 这一层才是当前真正生效的那一层**（见上面的实测更正） | 切集群时 ✅ |
+| 10 | 三个应用的 `application.yml` → `oms:` 块 | `clusters` / `password` | **交付树编出来的 jar 里这一块是注释着的**（`# oms:`）→ **不覆盖 Nacos** → 填 Nacos 就生效。**门户树编的 jar 才是活的** → 那种 jar 会压过 Nacos | 交付树：不用改 |
 
 > **集群密码要同时出现在三处**，任一不一致 = 认证失败：
 >
@@ -1300,38 +1309,58 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 > | `/etc/redis/cluster/auth.conf` | **脚本自动下发** | 组网时 |
 > | Nacos 的 `oms.password`（**三个应用各一份**，见 #1/#5/#6） | 你（Nacos 控制台） | 程序连上前 |
 >
-> > **如果只改了 `ext_base.yaml`**，realserver 和 napstarweb **读不到** →
-> > 它们会用本地 `application.yml` 的占位符 `127.0.0.1:6379` + 空密码 →
-> > **启动正常、第一次读写才炸**（§4.6 第一种下场）。
+> ⚠️ **2026-11-02 起，modelserver 的 `oms:` 填在 `icms-controller.yaml`，不是 `ext_base.yaml`。**
+> 交付树的 `modelserver/controller/src/main/resources/bootstrap.yml` 已改成
+> `shared-configs: []` + 只留 `napstarmappingconfig.yaml`
+> （`share_base.yaml` / `ext_base.yaml` **在安装包的 Nacos 导出包里根本不存在**）。
+> ⇒ **本手册 §4.3 里所有「modelserver 从 `share_base.yaml` / `ext_base.yaml` 读」的描述已过时**，
+> 那两节保留是为了记录**当时是怎么判断的**，**不是当前的操作指引**。
+> ⚠️ **另一个同类缺口（本轮未处理）**：`napstarweb/web-controller` 的 `bootstrap.yml`
+> 引用了 `kafkabus.yaml`，而它**也不在安装包导出包里**（导出包 `DEFAULT_GROUP/` 只有
+> `hisdataproducer-ext.yaml` / `jk.yaml` / `napstarmappingconfig.yaml`）
+> → 记在 `docker/hd-napstar/DEFECTS.md` 的 D2 节末，**动手前先确认真实 Nacos 里有没有它**。
+>
+> > **如果只改了 `icms-controller.yaml`**，realserver 和 napstarweb **读不到** →
+> > 它们要用**自己 group 的 dataId**（`napstarweb-controller.yaml` / `icms-real-controller.yaml`）→
+> > 没填就回落默认值 → 连接失败或连错节点。
 > > 这是本手册里**最容易踩**的一个坑。
 >
 > > ⚠️ **本条与上面那条实测更正叠在一起**：
-> > 「只改了 `ext_base.yaml`」的后果，现在**多了一层** ——
-> > Nacos 的 `oms:` 就算**三个 dataId 都填对了**，只要 jar 里的 `oms:` 还在，
-> > **它照样赢**（实测）。
-> > 所以「三个 dataId 都填了」**不等于**「生效了」。
+> > 「三个 dataId 都填了」**不保证**「生效了」——
+> > **只要 jar 里的 `oms:` 块是活的，它就照样赢**（门户树编的 jar 就是这样，实测）。
+> > ⇒ **判断依据是「jar 从哪棵树编的」+ 启动日志那行生效值**，不是「填了几处」。
 
-> ⛔ **切集群前必读：napstarweb 的 `executePipelined` 集群分支**
+> ⚠️ **切集群前必读：`executePipelined` 的集群分支**
 >
 > SDR 2.7.18 在 Redis Cluster 模式下**不支持 pipeline** ——
 > `JedisClusterConnection.openPipeline()` 直接抛 `UnsupportedOperationException`，
 > **回调体一次都不会执行**（Redis 命令一条都没发出去）。
 >
-> napstarweb 树里原本有 **10 处** `redisTemplate.executePipelined(...)`，
-> 其中：
-> - **4 处写**（`SVGCacheServiceImpl` / `RTListener` / `SVGParseService` / `CanvasMonitorServiceImpl`）
->   → 已加集群分支，改用 `redisTemplate.execute(cb)`（非 pipeline，每条命令一次往返，按槽路由）
-> - **6 处读**（`CalculateService` / `CalculateForCanvasService` / `SVGParseService.batchGetSymbol` /
->   `CanvasMonitorServiceImpl.batchGetSymbol`）
->   → 已加集群分支，改用 `oms` 的 `RedisClusterHashPipeline.getAllHashes` / `getAllValues`
->   （按 slot 分组，每个 master 一条 pipeline，**返回顺序与入参一致**）
+> ⚠️ **注意：不只是 `executePipelined` 会炸** ——
+> `redisTemplate.execute(cb, true, true)` 同样会调 `openPipeline()` → 一样炸。
+> 扫「集群不安全点」时**两个都要扫**。
+>
+> **交付树（`华盾-napstar2.0`）的状态（2026-11-02 实测）**：
+>
+> | 交付物 | 裸 pipeline 点 | 状态 |
+> |---|---|---|
+> | `napstarweb` 的 `monitor` 模块 | **6 处**（`SVGCacheServiceImpl` / `RTListener` / `SVGParseService` ×2 / `CalculateService` ×2） | ✅ **已加集群分支**：写路径改用 `redisTemplate.execute(cb)`（非 pipeline，按槽路由），多 key 读改用 `oms` 的 `RedisClusterHashPipeline.getAllHashes` / `getAllValues`（按 slot 分组，**返回顺序与入参一致**） |
+> | `rtdata-module`（写路径） | — | ✅ **已解决**（交付物里解析到基线 `rtdata-module-1.0.14`，那份二进制**带** `writeWithRetry` / `.join()` / `isCluster`） |
+> | `model-service` 的 `CacheServiceImpl` | — | ✅ **已解决**（同上，基线那份带 5 个集群分支） |
+>
+> ⚠️ **但 `monitor` 那 6 处**在本环境里**运行时没被覆盖** ——
+> 模型元数据表（`info.model_objecttype` 等）是空的 → 图形解析路径跑不到 →
+> **「启动无 UOE」是假绿**。⇒ 只做了**静态核验**（jar 里含 `isCluster` 的 class 由 0 → 4）
+> + 逐处审阅。**要真跑通，需要补模型元数据表的数据。**
+> 详见 `docker/hd-napstar/DEFECTS.md` 的 D7-a 节末「🟡 修完之后仍然残留的缺口」。
 >
 > ⚠️ **不带上这份改造就切集群**，后果是：
 > ① `StartupRunner` 的初始化被中断 → **应用启动成功、功能却是残的**
 > ② `RTListener`（`COMMITDATAINCRE`）抛异常 → Spring Kafka 默认错误处理器
 >    **跳过并提交 offset** → **实时数据增量静默丢失**
 >
-> 改造细节见 `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md`。
+> 改造细节见 `docs/superpowers/specs/2026-10-30-napstarweb-cluster-branch-design.md`
+> 与 `docs/superpowers/specs/2026-11-02-hd-redis-cluster-fix-design.md`。
 > 另：`sche-viewer-server` 还有 **15 处**同样的裸调用 —— 它当前不参与构建且是
 > standalone，**暂时安全**，但**将来切集群前必须一并处理**。
 
@@ -1342,7 +1371,7 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 
 | # | 位置 | 键 | 填什么 | 必改 |
 |---|---|---|---|---|
-| 11 | Nacos `DEFAULT_GROUP/share_base.yaml` → **modelserver 用** | `spring.kafka.bootstrap-servers` | `<A机IP>:9092,<B机IP>:9092`（仍是单节点则保持 `node1:9092`） | 切集群时 ✅ |
+| 11 | Nacos **`MODELSERVER_GROUP` / `icms-controller.yaml`** → **modelserver 用** | `spring.kafka.bootstrap-servers` | `<A机IP>:9092,<B机IP>:9092`（仍是单节点则保持 `node1:9092`） | 切集群时 ✅ |
 | 12 | 同上 | `spring.kafka.consumer.bootstrap-servers` | 同上 | 切集群时 ✅ |
 | 13 | 同上 | `spring.kafka.consumer.group-id` | 保持 `sac`。**换组 = 重新消费全量** | 确认 |
 | 14 | 同上 | `spring.kafka.consumer.max-poll-records` | 确认是 `100000`（不是 Boot 默认 500） | 确认 |
