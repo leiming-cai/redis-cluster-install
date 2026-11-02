@@ -302,3 +302,1373 @@ index 660671f..2a7cca7 100644
  
      }
  
+diff --git a/platform/backend/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java b/platform/backend/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
+index 9d2390a..4ffee1e 100644
+--- a/platform/backend/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
++++ b/platform/backend/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
+@@ -11,6 +11,8 @@ import com.sac.platform.common.utils.redis.RedisConfig;
+ import com.sac.platform.modelserver.entity.*;
+ import com.sac.platform.modelserver.entity.model.*;
+ import com.sac.platform.modelserver.service.*;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
++import com.sac.platform.realserver.oms.utils.RedisScanUtils;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ import org.springframework.beans.factory.annotation.Autowired;
+@@ -43,38 +45,99 @@ public class CacheServiceImpl implements CacheService {
+     private ModelWiringPossibilityService wiringPossibilityService;
+     @Autowired
+     private ModelEnumDictService modelEnumDictService;
++    @Autowired
++    private RedisClusterHelper redisClusterHelper;
++
++    private boolean isCluster() {
++        return redisClusterHelper != null && redisClusterHelper.isCluster();
++    }
+ 
+     @Override
+     public void clearModelCache() {
+         // 清除缓存
++        // 集群模式不支持 KEYS 命令跨节点，需逐 key 删除；单机模式可一次性获取全部 key
++        if (isCluster()) {
++            clearModelCacheCluster();
++        } else {
++            clearModelCacheStandalone();
++        }
++    }
++
++    private void clearModelCacheStandalone() {
+         Set keys = redisTemplate.keys(redisConfig.getKeyPrefix() + "*");
+         redisTemplate.delete(keys);
+     }
+ 
++    /**
++     * 集群模式：按 master 节点流式 SCAN，逐 key 删除。
++     *
++     * 不用批量 delete 的真正理由有两条，都不是 CROSSSLOT：
++     * 1) KEYS 会在每个 master 上依次执行阻塞式全量扫描（O(N)），
++     *    并把整个集群的 keyspace 一次性拉进 JVM 堆内存
++     *    （Spring Data Redis 2.7 的 JedisClusterKeyCommands.keys 是
++     *      executeCommandOnAllNodes 之后取并集，返回的是整个集群的 keyspace，
++     *      不是只返回某一个节点的结果）；
++     * 2) 逐 key 删除可以在拿到 key 的同时立刻释放，不需要先把全集攒在内存里。
++     *
++     * 顺带说明：Spring Data Redis 2.7 的 JedisClusterKeyCommands.del 实际上会
++     * 判断 isSameSlotForAllKeys，跨槽时会按节点拆分执行，并不会抛 CROSSSLOT
++     * —— 旧注释这里说错了。
++     */
++    private void clearModelCacheCluster() {
++        String pattern = redisConfig.getKeyPrefix() + "*";
++        try {
++            RedisScanUtils.forEachKey(redisTemplate, pattern, 500, key -> redisTemplate.delete(key));
++        } catch (Exception e) {
++            logger.error("clearModelCache cluster error", e);
++        }
++    }
++
+     @Override
+     public void initAttributeType() {
++        @SuppressWarnings("rawtypes")
+         RedisSerializer valueSerializer = redisTemplate.getValueSerializer();
+         logger.info("值序列化器类型: " + valueSerializer.getClass().getName());
+         ModelAttribute modelAttributeParam = new ModelAttribute();
+         modelAttributeParam.setSourceCode(Constants.SOURCE_NAPSTAR);
+         List<ModelAttribute> modelAttributeList = modelAttributeService.findByParams(modelAttributeParam);
+-        redisTemplate.execute(redisConnection -> {
+-            try {
+-                for (ModelAttribute modelAttribute : modelAttributeList) {
++        if (isCluster()) {
++            // 集群模式：逐个 set（自动分片）
++            for (ModelAttribute modelAttribute : modelAttributeList) {
++                try {
+                     AttributeType attributeType = new AttributeType();
+                     BeanUtil.copy(modelAttribute, attributeType);
+-                    redisConnection
+-                            .set((redisConfig.getKeyPrefix() + "attributetypes:atypes:" + modelAttribute.getAttrType())
+-                                    .getBytes(), valueSerializer.serialize(attributeType));
+-                    redisConnection
+-                            .set((redisConfig.getKeyPrefix() + "attributetypes:names:" + modelAttribute.getAttrName())
+-                                    .getBytes(), valueSerializer.serialize(attributeType.getAttrType()));
++                    redisTemplate.opsForValue().set(
++                            redisConfig.getKeyPrefix() + "attributetypes:atypes:" + modelAttribute.getAttrType(),
++                            attributeType);
++                    redisTemplate.opsForValue().set(
++                            redisConfig.getKeyPrefix() + "attributetypes:names:" + modelAttribute.getAttrName(),
++                            attributeType.getAttrType());
++                } catch (Exception e) {
++                    logger.error("initAttributeType cluster error", e);
+                 }
+-            } catch (Exception e) {
+-                logger.error(e.getMessage(), e);
+             }
+-            return null;
+-        }, true, true);
++        } else {
++            // 单机模式：使用 pipeline
++            redisTemplate.execute(redisConnection -> {
++                try {
++                    for (ModelAttribute modelAttribute : modelAttributeList) {
++                        AttributeType attributeType = new AttributeType();
++                        BeanUtil.copy(modelAttribute, attributeType);
++                        redisConnection
++                                .set((redisConfig.getKeyPrefix() + "attributetypes:atypes:"
++                                        + modelAttribute.getAttrType())
++                                        .getBytes(), valueSerializer.serialize(attributeType));
++                        redisConnection
++                                .set((redisConfig.getKeyPrefix() + "attributetypes:names:"
++                                        + modelAttribute.getAttrName())
++                                        .getBytes(), valueSerializer.serialize(attributeType.getAttrType()));
++                    }
++                } catch (Exception e) {
++                    logger.error(e.getMessage(), e);
++                }
++                return null;
++            }, true, true);
++        }
+     }
+ 
+     @Override
+@@ -94,17 +157,31 @@ public class CacheServiceImpl implements CacheService {
+                 }).collect(Collectors.toList());
+         Map<String, List<WiringPossibility>> wiringPossibilityHashMap = wiringPossibilityALL.stream()
+                 .collect(Collectors.groupingBy(item -> item.getObjType() + ":" + item.getAttrType()));
+-        redisTemplate.execute(redisConnection -> {
+-            try {
+-                for (String key : wiringPossibilityHashMap.keySet()) {
+-                    redisConnection.set((Constants.keyPrefix + "permittedobject:" + key).getBytes(),
+-                            valueSerializer.serialize(wiringPossibilityHashMap.get(key)));
++        if (isCluster()) {
++            // 集群模式：逐 key set（自动分片路由）
++            for (Map.Entry<String, List<WiringPossibility>> entry : wiringPossibilityHashMap.entrySet()) {
++                try {
++                    redisTemplate.opsForValue().set(
++                            Constants.keyPrefix + "permittedobject:" + entry.getKey(),
++                            entry.getValue());
++                } catch (Exception e) {
++                    logger.error("initWiringPossibility cluster error, key=" + entry.getKey(), e);
+                 }
+-            } catch (Exception e) {
+-                logger.error(e.getMessage(), e);
+             }
+-            return null;
+-        }, true, true);
++        } else {
++            // 单机模式：使用 pipeline
++            redisTemplate.execute(redisConnection -> {
++                try {
++                    for (String key : wiringPossibilityHashMap.keySet()) {
++                        redisConnection.set((Constants.keyPrefix + "permittedobject:" + key).getBytes(),
++                                valueSerializer.serialize(wiringPossibilityHashMap.get(key)));
++                    }
++                } catch (Exception e) {
++                    logger.error(e.getMessage(), e);
++                }
++                return null;
++            }, true, true);
++        }
+     }
+ 
+     @Override
+@@ -114,37 +191,66 @@ public class CacheServiceImpl implements CacheService {
+         List<ModelObjectAttribute> objectAttributesALL = modelObjectAttributeService.findAll();
+         Map<Integer, List<ModelObjectAttribute>> objectAttributesHashMap = objectAttributesALL.stream()
+                 .collect(Collectors.groupingBy(item -> item.getObjType()));
+-        redisTemplate.execute(redisConnection -> {
+-            try {
+-                ModelObjectType modelObjectTypeParam = new ModelObjectType();
+-                modelObjectTypeParam.setSourceCode(Constants.SOURCE_NAPSTAR);
+-                List<ModelObjectType> modelObjectTypeList = modelObjectTypeService.findByParams(modelObjectTypeParam);
+-                for (ModelObjectType modelObjectType : modelObjectTypeList) {
++        ModelObjectType modelObjectTypeParam = new ModelObjectType();
++        modelObjectTypeParam.setSourceCode(Constants.SOURCE_NAPSTAR);
++        List<ModelObjectType> modelObjectTypeList = modelObjectTypeService.findByParams(modelObjectTypeParam);
++        if (isCluster()) {
++            // 集群模式：逐 key set（自动分片路由）
++            for (ModelObjectType modelObjectType : modelObjectTypeList) {
++                try {
+                     ObjectType objectType = new ObjectType();
+                     BeanUtil.copy(modelObjectType, objectType);
+-                    ModelObjectAttribute modelObjectAttributeParam = new ModelObjectAttribute();
+-                    modelObjectAttributeParam.setObjType(modelObjectType.getObjType());
+-                    // List<ModelObjectAttribute> modelObjectAttributeList =
+-                    // modelObjectAttributeService.findByParams(modelObjectAttributeParam);
+                     List<ModelObjectAttribute> modelObjectAttributeList = objectAttributesHashMap
+                             .get(modelObjectType.getObjType());
++                    if (modelObjectAttributeList == null) {
++                        continue;
++                    }
+                     for (ModelObjectAttribute modelObjectAttribute : modelObjectAttributeList) {
+                         ObjectAttribute objectAttribute = new ObjectAttribute();
+                         BeanUtil.copy(modelObjectAttribute, objectAttribute);
+                         objectType.addObjectAttribute(objectAttribute);
+                     }
+-                    redisConnection
+-                            .set((redisConfig.getKeyPrefix() + "objecttypes:names:" + modelObjectType.getObjName())
+-                                    .getBytes(), valueSerializer.serialize(objectType.getObjType()));
+-                    redisConnection
+-                            .set((redisConfig.getKeyPrefix() + "objecttypes:types:" + modelObjectType.getObjType())
+-                                    .getBytes(), valueSerializer.serialize(objectType));
++                    redisTemplate.opsForValue().set(
++                            redisConfig.getKeyPrefix() + "objecttypes:names:" + modelObjectType.getObjName(),
++                            objectType.getObjType());
++                    redisTemplate.opsForValue().set(
++                            redisConfig.getKeyPrefix() + "objecttypes:types:" + modelObjectType.getObjType(),
++                            objectType);
++                } catch (Exception e) {
++                    logger.error("initObjectAttribute cluster error, objType=" + modelObjectType.getObjType(), e);
+                 }
+-            } catch (Exception e) {
+-                logger.error(e.getMessage(), e);
+             }
+-            return null;
+-        }, true, true);
++        } else {
++            // 单机模式：使用 pipeline
++            redisTemplate.execute(redisConnection -> {
++                try {
++                    for (ModelObjectType modelObjectType : modelObjectTypeList) {
++                        ObjectType objectType = new ObjectType();
++                        BeanUtil.copy(modelObjectType, objectType);
++                        ModelObjectAttribute modelObjectAttributeParam = new ModelObjectAttribute();
++                        modelObjectAttributeParam.setObjType(modelObjectType.getObjType());
++                        // List<ModelObjectAttribute> modelObjectAttributeList =
++                        // modelObjectAttributeService.findByParams(modelObjectAttributeParam);
++                        List<ModelObjectAttribute> modelObjectAttributeList = objectAttributesHashMap
++                                .get(modelObjectType.getObjType());
++                        for (ModelObjectAttribute modelObjectAttribute : modelObjectAttributeList) {
++                            ObjectAttribute objectAttribute = new ObjectAttribute();
++                            BeanUtil.copy(modelObjectAttribute, objectAttribute);
++                            objectType.addObjectAttribute(objectAttribute);
++                        }
++                        redisConnection
++                                .set((redisConfig.getKeyPrefix() + "objecttypes:names:" + modelObjectType.getObjName())
++                                        .getBytes(), valueSerializer.serialize(objectType.getObjType()));
++                        redisConnection
++                                .set((redisConfig.getKeyPrefix() + "objecttypes:types:" + modelObjectType.getObjType())
++                                        .getBytes(), valueSerializer.serialize(objectType));
++                    }
++                } catch (Exception e) {
++                    logger.error(e.getMessage(), e);
++                }
++                return null;
++            }, true, true);
++        }
+     }
+ 
+     @Override
+@@ -167,28 +273,52 @@ public class CacheServiceImpl implements CacheService {
+         // .collect(Collectors.groupingBy(item ->
+         // item.getParentId().longValue()+"",Collectors.mapping(EnumDict::getEnumCode,
+         // Collectors.toList())));
+-        redisTemplate.execute(redisConnection -> {
+-            try {
+-                List<ModelEnumDict> parentDictList = modelEnumDictService.findEnumDictType();
+-                for (ModelEnumDict modelEnumDict : parentDictList) {
+-                    if (modelEnumDict.getParentId().longValue() == -1) {
+-                        redisConnection.set(
+-                                (redisConfig.getKeyPrefix() + "enumdicts:folder:" + modelEnumDict.getEnumCode())
+-                                        .getBytes(),
+-                                valueSerializer.serialize(enumDictHashMap.get(modelEnumDict.getId().longValue() + "")));
++        List<ModelEnumDict> parentDictList = modelEnumDictService.findEnumDictType();
++        if (isCluster()) {
++            // 集群模式：逐 key set（自动分片路由）
++            for (ModelEnumDict modelEnumDict : parentDictList) {
++                if (modelEnumDict.getParentId().longValue() == -1) {
++                    try {
++                        redisTemplate.opsForValue().set(
++                                redisConfig.getKeyPrefix() + "enumdicts:folder:" + modelEnumDict.getEnumCode(),
++                                enumDictHashMap.get(modelEnumDict.getId().longValue() + ""));
++                    } catch (Exception e) {
++                        logger.error("initEnumDict cluster error, enumCode=" + modelEnumDict.getEnumCode(), e);
+                     }
+                 }
+-                // for (ModelEnumDict modelEnumDict : modelEnumDictList) {
+-                // EnumDict enumDict = new EnumDict();
+-                // BeanUtil.copy(modelEnumDict, enumDict);
+-                // redisConnection.set((redisConfig.getKeyPrefix() + "enumdicts:dicts:" +
+-                // enumDict.getEnumCode()).getBytes(), valueSerializer.serialize(enumDict));
+-                // }
+-            } catch (Exception e) {
+-                logger.error(e.getMessage(), e);
+             }
+-            return null;
+-        }, true, true);
++            // for (ModelEnumDict modelEnumDict : modelEnumDictList) {
++            // EnumDict enumDict = new EnumDict();
++            // BeanUtil.copy(modelEnumDict, enumDict);
++            // redisTemplate.opsForValue().set((redisConfig.getKeyPrefix() +
++            // "enumdicts:dicts:" +
++            // enumDict.getEnumCode()), enumDict);
++            // }
++        } else {
++            // 单机模式：使用 pipeline
++            redisTemplate.execute(redisConnection -> {
++                try {
++                    for (ModelEnumDict modelEnumDict : parentDictList) {
++                        if (modelEnumDict.getParentId().longValue() == -1) {
++                            redisConnection.set(
++                                    (redisConfig.getKeyPrefix() + "enumdicts:folder:" + modelEnumDict.getEnumCode())
++                                            .getBytes(),
++                                    valueSerializer
++                                            .serialize(enumDictHashMap.get(modelEnumDict.getId().longValue() + "")));
++                        }
++                    }
++                    // for (ModelEnumDict modelEnumDict : modelEnumDictList) {
++                    // EnumDict enumDict = new EnumDict();
++                    // BeanUtil.copy(modelEnumDict, enumDict);
++                    // redisConnection.set((redisConfig.getKeyPrefix() + "enumdicts:dicts:" +
++                    // enumDict.getEnumCode()).getBytes(), valueSerializer.serialize(enumDict));
++                    // }
++                } catch (Exception e) {
++                    logger.error(e.getMessage(), e);
++                }
++                return null;
++            }, true, true);
++        }
+     }
+ 
+     @Override
+diff --git a/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/config/FailSetCounter.java b/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/config/FailSetCounter.java
+new file mode 100644
+index 0000000..5f3cd19
+--- /dev/null
++++ b/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/config/FailSetCounter.java
+@@ -0,0 +1,31 @@
++/**
++ * 实时数据写入失败计数器
++ *
++ * 记录重试耗尽后仍未写入的点数量，用于哨兵切换 / 网络故障期间的可观测性。
++ */
++package com.sac.platform.config;
++
++import java.util.concurrent.atomic.LongAdder;
++
++public class FailSetCounter {
++
++    private static final LongAdder COUNTER = new LongAdder();
++
++    /**
++     * 累加失败点数（线程安全）
++     */
++    public static void add(long value) {
++        COUNTER.add(value);
++    }
++
++    /**
++     * 获取当前累计值（线程安全）
++     */
++    public static long getCount() {
++        return COUNTER.sum();
++    }
++
++    public static void reset() {
++        COUNTER.reset();
++    }
++}
+diff --git a/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/RedisRealDataService.java b/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/RedisRealDataService.java
+index e4613cf..2a97166 100644
+--- a/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/RedisRealDataService.java
++++ b/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/RedisRealDataService.java
+@@ -2,7 +2,7 @@
+  * @Author: caileiming boboclmomi@163.com
+  * @Date: 2025-05-27 11:34:14
+  * @LastEditors: caileiming boboclmomi@163.com
+- * @LastEditTime: 2025-05-27 17:56:43
++ * @LastEditTime: 2026-02-06 09:35:34
+  * @FilePath: \backend\realserver\plugins\rtdata-module\src\main\java\com\sac\platform\realserver\service\RedisRealDataService.java
+  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+  */
+@@ -13,4 +13,8 @@ import java.util.concurrent.CompletableFuture;
+ 
+ public interface RedisRealDataService {
+     CompletableFuture<Boolean> wirteOmsPip(String prefix, List<String> pointData);
++
++    CompletableFuture<Boolean> wirteOmsPipByJedis(String prefix, List<String> pointData);
++
++    CompletableFuture<Boolean> batchWirteOmsByRedisCluster(String prefix, List<String> pointData);
+ }
+diff --git a/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImpl.java b/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImpl.java
+index 2bc4523..baf4f4e 100644
+--- a/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImpl.java
++++ b/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImpl.java
+@@ -1,219 +1,262 @@
+-/** 
+- * @Author: caileiming boboclmomi@163.com
+- * @Date: 2022-06-13 15:48:25
+- * @LastEditors: caileiming boboclmomi@163.com
+- * @LastEditTime: 2025-06-17 15:37:35
+- * @FilePath: \realserver\services\src\main\java\com\sac\platform\realserver\service\impl\OmsWriteByKafkaServiceImpl.java
+- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+- */
+-package com.sac.platform.realserver.service.impl;
+-
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.List;
+-import java.util.stream.Collectors;
+-
+-import org.apache.commons.lang3.StringUtils;
+-import org.apache.kafka.clients.consumer.ConsumerRecord;
+-import org.slf4j.Logger;
+-import org.slf4j.LoggerFactory;
+-import org.springframework.beans.factory.annotation.Autowired;
+-import org.springframework.data.redis.connection.RedisConnection;
+-import org.springframework.data.redis.connection.RedisConnectionFactory;
+-import org.springframework.data.redis.core.RedisTemplate;
+-import org.springframework.data.redis.serializer.RedisSerializer;
+-import org.springframework.scheduling.annotation.Async;
+-import org.springframework.stereotype.Service;
+-
+-import com.sac.platform.common.utils.SystemIDUtil;
+-import com.sac.platform.config.SecSetCounter;
+-import com.sac.platform.config.Test;
+-import com.sac.platform.config.TotalSetCounter;
+-// import com.sac.platform.realserver.oms.utils.JedisPoolUtils;
+-import com.sac.platform.realserver.service.BatchOmsWriteService;
+-import com.sac.platform.realserver.service.RedisRealDataService;
+-
+-// import redis.clients.jedis.Jedis;
+-// import redis.clients.jedis.Pipeline;
+-// import redis.clients.jedis.Response;
+-
+-@Service
+-public class OmsWriteByKafkaServiceImpl implements BatchOmsWriteService<String> {
+-
+-    /**
+-     * 日志记录
+-     */
+-    private static final Logger logger = LoggerFactory.getLogger(OmsWriteByKafkaServiceImpl.class);
+-
+-    private final RedisTemplate<String, Object> redisTemplate;
+-
+-    private final RedisRealDataService redisRealDataService;
+-
+-    private final RedisConnectionFactory redisConnectionFactory;
+-
+-    public OmsWriteByKafkaServiceImpl(RedisTemplate<String, Object> redisTemplate,
+-            RedisRealDataService redisRealDataService, RedisConnectionFactory redisConnectionFactory) {
+-        this.redisTemplate = redisTemplate;
+-        this.redisRealDataService = redisRealDataService;
+-        this.redisConnectionFactory = redisConnectionFactory;
+-        System.out.println("-------------------------------" + redisConnectionFactory.getClass().getName()
+-                + "-------------------------------");
+-
+-    }
+-
+-    @Async(value = "consumerRunExecutor")
+-    @Override
+-    public void batchWirte(List<String> data, String prefix) {
+-        if (data.isEmpty()) {
+-            return;
+-        }
+-        try {
+-
+-            redisTemplate.execute(redisConnection -> {
+-                String expString = "";
+-                // obid;atype,datatype,value,time
+-                for (String item : data) {
+-                    if (StringUtils.isBlank(item)) {
+-                        continue;
+-                    }
+-                    expString = item;
+-                    try {
+-                        // logger.info(item);
+-                        String[] dataRecord = item.split("&");
+-                        if (dataRecord.length > 0) {
+-                            List<String> dataList = Arrays.stream(dataRecord).collect(Collectors.toList());
+-                            dataList.stream().forEach(pointData -> {
+-                                batchWirteRedisTemplate(redisConnection, prefix, pointData);
+-                            });
+-                        } else {
+-                            batchWirteRedisTemplate(redisConnection, prefix, item);
+-                        }
+-
+-                    } catch (Exception e) {
+-                        e.printStackTrace();
+-                        logger.error(e.getMessage(), expString);
+-                        logger.error(e.getMessage(), e);
+-                        continue;
+-                    }
+-                }
+-
+-                return null;
+-            }, true, true);
+-            // Test.consumerDataCount += data.size();
+-        } catch (Exception e) {
+-            logger.error(e.getMessage(), e);
+-            logger.error(e.getMessage(), data);
+-            e.printStackTrace();
+-        }
+-    }
+-
+-    @Async(value = "consumerRunExecutor")
+-    @Override
+-    public void batchWirtePip(List<String> data, String prefix) {
+-        if (data.isEmpty()) {
+-            return;
+-        }
+-        try {
+-
+-            String expString = "";
+-            List<String> pointList = new ArrayList<>();
+-            for (String item : data) {
+-                if (StringUtils.isBlank(item)) {
+-                    continue;
+-                }
+-                expString = item;
+-                // logger.info(item);
+-                String[] dataRecord = item.split("&");
+-                if (dataRecord.length > 0) {
+-                    List<String> dataList = Arrays.stream(dataRecord).collect(Collectors.toList());
+-                    pointList.addAll(dataList);
+-                } else {
+-                    // batchWirteRedisTemplate(redisConnection, prefix, item);
+-                    pointList.add(item);
+-                }
+-            }
+-            if (!pointList.isEmpty()) {
+-                redisRealDataService.wirteOmsPip(prefix, pointList);
+-            } else {
+-                logger.warn("No valid data to write to Redis: {}", expString);
+-            }
+-        } catch (Exception e) {
+-            logger.error(e.getMessage(), e);
+-            logger.error(e.getMessage(), data);
+-            e.printStackTrace();
+-        }
+-    }
+-
+-    private void batchWirteRedisTemplate(RedisConnection redisConnection, String prefix, String pointData) {
+-        RedisSerializer keySerializer = redisTemplate.getKeySerializer();
+-        RedisSerializer hashValueSerializer = redisTemplate.getHashValueSerializer();
+-        RedisSerializer hashKeySerializer = redisTemplate.getHashKeySerializer();
+-        if (StringUtils.isNotBlank(pointData)) {
+-            String[] dataItem = pointData.split(";");
+-            if (dataItem.length == 0) {
+-                return;
+-            }
+-            Long obid = Long.parseLong(dataItem[0]);
+-            int otype = SystemIDUtil.extractOType(obid);
+-            String key = prefix + ":" + otype + ":" + obid;
+-            // String key = otype + ":" + obid;
+-            for (int num = 1; num < dataItem.length; num++) {
+-                String[] contents = dataItem[num].split(",");
+-                String atype = contents[0];
+-                String value = contents[2] + "," + contents[3] + "," + contents[1];
+-                // byte[] recordByte = redisConnection.hGet(keySerializer.serialize(
+-                // key),
+-                // hashKeySerializer.serialize(atype));
+-                // if (null != recordByte && recordByte.length > 0) {
+-                // String recordValue = (String) hashValueSerializer.deserialize(recordByte);
+-                // String[] recordContents = recordValue.split(",");
+-                // if (Long.valueOf(recordContents[1]) < Long.valueOf(contents[3])) {
+-                // redisConnection.hSet(keySerializer.serialize(key),
+-                // hashKeySerializer.serialize(atype),
+-                // hashValueSerializer.serialize(value));
+-                // Test.persecondCount++;
+-                // }
+-                // } else {
+-                redisConnection.hSet(keySerializer.serialize(key),
+-                        hashKeySerializer.serialize(atype),
+-                        hashValueSerializer.serialize(value));
+-                TotalSetCounter.increment();
+-                SecSetCounter.increment();
+-                // }
+-            }
+-        }
+-    }
+-
+-    public static void main(String[] args) {
+-        String item = "142748996738;179,4,18.636384,1736827870704&142589563929;179,4,70.958989,1736827870704&142665065816;179,4,18.094397,1736827870704&142736361971;179,4,60.746156,1736827870704&142736361968;179,4,8.374675,1736827870704&142748996729;179,4,99.010553,1736827870704&142736361964;179,4,5.873304,1736827870704&142748996725;179,4,18.596042,1736827870704&142665065805;179,4,92.474272,1736827870704&142736361961;179,4,43.583806,1736827870704&142665065802;179,4,56.225082,1736827870704&142665065801;179,4,96.773044,1736827870704&142665065799;179,4,20.905990,1736827870704&";
+-        // String[] dataItem = item.split(";");
+-        // Long obid = Long.parseLong(dataItem[0]);
+-        // int otype = SystemIDUtil.extractOType(obid);
+-        // String key = "real_data" + ":" + otype + ":" + obid;
+-        // // String[] atypeRecord = item.value().split(";");
+-        // for (int num = 1; num < dataItem.length; num++) {
+-        // String[] contents = dataItem[num].split(",");
+-        // String atype = contents[0];
+-        // String value = contents[2] + "," + contents[3] + "," + contents[1];
+-
+-        // System.out.println(atype + ":" + value);
+-        // }
+-        String[] dataRecord = item.split("&");
+-        if (dataRecord.length > 0) {
+-            List<String> dataList = Arrays.stream(dataRecord).collect(Collectors.toList());
+-            dataList.stream().forEach(pointData -> {
+-                String[] dataItem = pointData.split(";");
+-                if (dataItem.length > 0) {
+-                    for (int num = 1; num < dataItem.length; num++) {
+-                        String[] contents = dataItem[num].split(",");
+-                        String atype = contents[0];
+-                        String value = contents[2] + "," + contents[3] + "," + contents[1];
+-                        System.out.println(atype + ":" + value);
+-                    }
+-                }
+-            });
+-
+-        }
+-    }
+-
+-}
++/**
++ * Kafka 实时数据写入服务（集群/单机/哨兵自适应）
++ * @Author: caileiming boboclmomi@163.com
++ * @Date: 2022-06-13 15:48:25
++ * @LastEditors: caileiming boboclmomi@163.com
++ * @LastEditTime: 2026-10-28 10:00:00
++ * @Description: Kafka 数据写入 Redis，集群/单机/哨兵模式自适应。
++ *               写入失败做有限重试并记录失败点数，避免哨兵切换期间静默丢数据。
++ */
++package com.sac.platform.realserver.service.impl;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import org.apache.commons.lang3.StringUtils;
++import org.apache.kafka.clients.consumer.ConsumerRecord;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.data.redis.core.RedisCallback;
++import org.springframework.data.redis.core.RedisTemplate;
++import org.springframework.data.redis.serializer.RedisSerializer;
++import org.springframework.scheduling.annotation.Async;
++import org.springframework.stereotype.Service;
++
++import com.sac.platform.common.utils.SystemIDUtil;
++import com.sac.platform.config.FailSetCounter;
++import com.sac.platform.config.SecSetCounter;
++import com.sac.platform.config.TotalSetCounter;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
++import com.sac.platform.realserver.service.BatchOmsWriteService;
++import com.sac.platform.realserver.service.RedisRealDataService;
++
++@Service
++public class OmsWriteByKafkaServiceImpl implements BatchOmsWriteService<String> {
++
++    private static final Logger logger = LoggerFactory.getLogger(OmsWriteByKafkaServiceImpl.class);
++
++    /** 失败重试的退避时间（毫秒），长度 + 1 即总尝试次数 */
++    private static final long[] RETRY_DELAYS_MS = { 200L, 500L };
++    private static final int MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
++
++    /** 日志中单条数据最大展示长度 */
++    private static final int LOG_PREVIEW_LENGTH = 120;
++
++    private final RedisTemplate<String, Object> redisTemplate;
++    private final RedisRealDataService redisRealDataService;
++    private final boolean isCluster;
++
++    public OmsWriteByKafkaServiceImpl(RedisTemplate<String, Object> redisTemplate,
++            RedisRealDataService redisRealDataService,
++            RedisClusterHelper redisClusterHelper) {
++        this.redisTemplate = redisTemplate;
++        this.redisRealDataService = redisRealDataService;
++        // 通过统一的 RedisClusterHelper 判断集群模式（哨兵按单机处理）
++        this.isCluster = redisClusterHelper.isCluster();
++    }
++
++    /**
++     * 批量写入入口
++     * 集群模式：拆分数据后委托给 redisRealDataService（自动分片）
++     * 单机/哨兵模式：使用 pipeline（高性能）
++     */
++    @Async(value = "consumerRunExecutor")
++    @Override
++    public void batchWirte(List<String> data, String prefix) {
++        if (data == null || data.isEmpty()) {
++            return;
++        }
++        try {
++            if (isCluster) {
++                // 集群：转换数据格式后委托给 RedisRealDataService
++                List<String> pointList = parseToPointList(data);
++                if (!pointList.isEmpty()) {
++                    writeWithRetry("batchWirte", prefix, pointList,
++                            () -> redisRealDataService.wirteOmsPip(prefix, pointList).join());
++                }
++            } else {
++                writeWithRetry("batchWirte", prefix, data,
++                        () -> batchWirteStandalone(data, prefix));
++            }
++        } catch (Exception e) {
++            logger.error("batchWirte unexpected error, prefix={}, size={}", prefix, data.size(), e);
++        }
++    }
++
++    /**
++     * 单机/哨兵模式：使用 pipeline
++     * obid;atype,datatype,value,time
++     * 计数在整批写入成功后累加，失败重试不会重复计数。
++     */
++    private void batchWirteStandalone(List<String> data, String prefix) {
++        @SuppressWarnings("rawtypes")
++        RedisSerializer keySerializer = redisTemplate.getKeySerializer();
++        @SuppressWarnings("rawtypes")
++        RedisSerializer hashValueSerializer = redisTemplate.getHashValueSerializer();
++        @SuppressWarnings("rawtypes")
++        RedisSerializer hashKeySerializer = redisTemplate.getHashKeySerializer();
++
++        final int[] fieldCount = { 0 };
++        redisTemplate.executePipelined((RedisCallback<Object>) redisConnection -> {
++            for (String item : data) {
++                if (StringUtils.isBlank(item)) {
++                    continue;
++                }
++                fieldCount[0] += processItem(item, prefix, keySerializer, hashKeySerializer, hashValueSerializer,
++                        redisConnection);
++            }
++            return null;
++        });
++
++        TotalSetCounter.add(fieldCount[0]);
++        SecSetCounter.add(fieldCount[0]);
++    }
++
++    /**
++     * 处理单条数据：拆分 & 分组后调用 hSet，返回成功写入的 field 数。
++     * 单条解析失败只跳过该条，不影响整批。
++     * 注意：单机/哨兵 pipeline 中如果存在不同 key，集群下会跨 slot 报错
++     */
++    private int processItem(String item, String prefix,
++            @SuppressWarnings("rawtypes") RedisSerializer keySerializer,
++            @SuppressWarnings("rawtypes") RedisSerializer hashKeySerializer,
++            @SuppressWarnings("rawtypes") RedisSerializer hashValueSerializer,
++            org.springframework.data.redis.connection.RedisConnection redisConnection) {
++        int fieldCount = 0;
++        try {
++            String[] dataRecord = item.split("&");
++            for (String pointData : dataRecord) {
++                if (StringUtils.isBlank(pointData)) {
++                    continue;
++                }
++                String[] dataItem = pointData.split(";");
++                if (dataItem.length == 0) {
++                    continue;
++                }
++                Long obid = Long.parseLong(dataItem[0].trim());
++                int otype = SystemIDUtil.extractOType(obid);
++                String key = prefix + ":" + otype + ":" + obid;
++                for (int num = 1; num < dataItem.length; num++) {
++                    String[] contents = dataItem[num].split(",");
++                    if (contents.length < 4) {
++                        logger.warn("Skip malformed field: point={}", preview(item));
++                        continue;
++                    }
++                    String atype = contents[0];
++                    String value = contents[2] + "," + contents[3] + "," + contents[1];
++                    redisConnection.hSet(keySerializer.serialize(key),
++                            hashKeySerializer.serialize(atype),
++                            hashValueSerializer.serialize(value));
++                    fieldCount++;
++                }
++            }
++        } catch (Exception e) {
++            logger.warn("Skip invalid point data: {}, reason: {}", preview(item), e.getMessage());
++            return 0;
++        }
++        return fieldCount;
++    }
++
++    /**
++     * 解析 & 分割格式：obid;atype,datatype,value,time&obid;...
++     * 返回扁平化的 pointData 列表（每条: obid;atype,...）
++     */
++    private List<String> parseToPointList(List<String> data) {
++        List<String> pointList = new ArrayList<>();
++        for (String item : data) {
++            if (StringUtils.isBlank(item)) {
++                continue;
++            }
++            String[] dataRecord = item.split("&");
++            for (String record : dataRecord) {
++                if (StringUtils.isNotBlank(record)) {
++                    pointList.add(record);
++                }
++            }
++        }
++        return pointList;
++    }
++
++    /**
++     * pipeline 写入入口（单机/哨兵与集群统一走 redisRealDataService）。
++     */
++    @Async(value = "consumerRunExecutor")
++    @Override
++    public void batchWirtePip(List<String> data, String prefix) {
++        if (data == null || data.isEmpty()) {
++            return;
++        }
++        try {
++            List<String> pointList = parseToPointList(data);
++            if (pointList.isEmpty()) {
++                return;
++            }
++            writeWithRetry("batchWirtePip", prefix, pointList,
++                    () -> redisRealDataService.wirteOmsPip(prefix, pointList).join());
++        } catch (Exception e) {
++            logger.error("batchWirtePip unexpected error, prefix={}, size={}", prefix, data.size(), e);
++        }
++    }
++
++    /**
++     * 有限重试：失败后按 200ms、500ms 退避重试，最多尝试 MAX_ATTEMPTS 次。
++     * 全部失败时记录 ERROR 并累加失败点数（failover 期间丢弃当前批次，后续批次自然补上）。
++     */
++    private void writeWithRetry(String scene, String prefix, List<String> data, Runnable action) {
++        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
++            try {
++                action.run();
++                return;
++            } catch (Exception e) {
++                if (attempt == MAX_ATTEMPTS) {
++                    FailSetCounter.add(data.size());
++                    logger.error("{} write failed after {} attempts, prefix={}, points={}, firstPoint={}",
++                            scene, attempt, prefix, data.size(), preview(data.get(0)), e);
++                    return;
++                }
++                long delay = RETRY_DELAYS_MS[attempt - 1];
++                logger.warn("{} write failed (attempt {}/{}), prefix={}, points={}, retry in {}ms: {}",
++                        scene, attempt, MAX_ATTEMPTS, prefix, data.size(), delay, e.getMessage());
++                try {
++                    Thread.sleep(delay);
++                } catch (InterruptedException ie) {
++                    Thread.currentThread().interrupt();
++                    FailSetCounter.add(data.size());
++                    logger.error("{} write interrupted, prefix={}, points={}", scene, prefix, data.size(), ie);
++                    return;
++                }
++            }
++        }
++    }
++
++    private static String preview(String data) {
++        if (data == null) {
++            return "null";
++        }
++        return data.length() <= LOG_PREVIEW_LENGTH ? data : data.substring(0, LOG_PREVIEW_LENGTH) + "...";
++    }
++
++    /**
++     * 批量写入。
++     *
++     * 集群与单机统一走 redisRealDataService：它在集群模式下按 slot 分组 pipeline，
++     * 在单机模式下用 executePipelined。
++     *
++     * 原先这里还有一条「单机用裸 Jedis pipeline」的分支（batchWirteJedisStandalone），
++     * 已删除——它依赖 jedis.properties 构造单节点 JedisPool，而该文件在生产环境并不存在
++     * （静态初始化直接 NPE）；且集群下单节点 Jedis 根本无法跨节点 pipeline。
++     */
++    public void batchWirteJedis(List<ConsumerRecord<String, String>> data, String prefix) {
++        if (data == null || data.isEmpty()) {
++            return;
++        }
++        List<String> pointList = new ArrayList<>();
++        for (ConsumerRecord<String, String> record : data) {
++            if (record.key() != null && record.value() != null) {
++                pointList.add(record.key() + ";" + record.value());
++            }
++        }
++        redisRealDataService.wirteOmsPip(prefix, pointList);
++    }
++
++}
+diff --git a/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImpl.java b/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImpl.java
+index f1b50f7..700bf32 100644
+--- a/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImpl.java
++++ b/platform/backend/realserver/plugins/rtdata-module/src/main/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImpl.java
+@@ -1,99 +1,189 @@
+-/** 
+- * @Author: caileiming boboclmomi@163.com
+- * @Date: 2025-05-27 11:37:36
+- * @LastEditors: caileiming boboclmomi@163.com
+- * @LastEditTime: 2025-06-17 17:06:21
+- * @FilePath: \backend\realserver\plugins\rtdata-module\src\main\java\com\sac\platform\realserver\service\impl\RedisRealDataServiceImpl.java
+- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+- */
+-package com.sac.platform.realserver.service.impl;
+-
+-import java.util.List;
+-import java.util.concurrent.CompletableFuture;
+-import org.apache.commons.lang3.StringUtils;
+-import org.springframework.data.redis.core.RedisCallback;
+-import org.springframework.data.redis.core.RedisTemplate;
+-import org.springframework.data.redis.serializer.RedisSerializer;
+-import org.springframework.scheduling.annotation.Async;
+-import org.springframework.stereotype.Service;
+-
+-import com.sac.platform.common.utils.SystemIDUtil;
+-import com.sac.platform.config.SecSetCounter;
+-import com.sac.platform.config.TotalSetCounter;
+-import com.sac.platform.realserver.service.RedisRealDataService;
+-
+-@Service
+-public class RedisRealDataServiceImpl implements RedisRealDataService {
+-
+-    private final RedisTemplate<String, Object> redisTemplate;
+-
+-    public RedisRealDataServiceImpl(RedisTemplate<String, Object> redisTemplate) {
+-        this.redisTemplate = redisTemplate;
+-    }
+-
+-    @Async(value = "consumerRunExecutor")
+-    @Override
+-    public CompletableFuture<Boolean> wirteOmsPip(String prefix, List<String> pointData) {
+-        RedisSerializer keySerializer = redisTemplate.getKeySerializer();
+-        RedisSerializer hashValueSerializer = redisTemplate.getHashValueSerializer();
+-        RedisSerializer hashKeySerializer = redisTemplate.getHashKeySerializer();
+-        // List<Map<String, Map<byte[], byte[]>>> processedData =
+-        // pointData.stream().filter(data -> {
+-        // return StringUtils.isNotBlank(data) && data.contains(";");
+-        // }).map(data -> {
+-        // String[] dataItem = data.split(";");
+-        // long obid = Long.parseLong(dataItem[0]);
+-        // int otype = SystemIDUtil.extractOType(obid);
+-        // String key = prefix + ":" + otype + ":" + obid;
+-        // Map<String, Map<byte[], byte[]>> resultMap = new HashMap<>();
+-        // Map<byte[], byte[]> innerMap = new HashMap<>();
+-        // for (int num = 1; num < dataItem.length; num++) {
+-        // String[] contents = dataItem[num].split(",");
+-        // String atype = contents[0];
+-        // String value = contents[2] + "," + contents[3] + "," + contents[1];
+-        // innerMap.put(hashKeySerializer.serialize(atype),
+-        // hashValueSerializer.serialize(value));
+-
+-        // }
+-        // resultMap.put(key, innerMap);
+-        // return resultMap;
+-        // }).collect(Collectors.toList());
+-        // Map<String, Map<byte[], byte[]>> finalData = new HashMap<>();
+-        // processedData.forEach(map -> map.forEach((key, value) -> finalData.merge(key,
+-        // value, (oldVal, newVal) -> {
+-        // oldVal.putAll(newVal);
+-        // return oldVal;
+-        // })));
+-
+-        redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+-
+-            pointData.stream().filter(data -> {
+-                return StringUtils.isNotBlank(data) && data.contains(";");
+-            }).forEach(data -> {
+-
+-                String[] dataItem = data.split(";");
+-                long obid = Long.parseLong(dataItem[0]);
+-                int otype = SystemIDUtil.extractOType(obid);
+-                String key = prefix + ":" + otype + ":" + obid;
+-                for (int num = 1; num < dataItem.length; num++) {
+-                    String[] contents = dataItem[num].split(",");
+-                    String atype = contents[0];
+-                    String value = contents[2] + "," + contents[3] + "," + contents[1];
+-                    connection.hSet(keySerializer.serialize(key),
+-                            hashKeySerializer.serialize(atype),
+-                            hashValueSerializer.serialize(value));
+-                    TotalSetCounter.increment();
+-                    SecSetCounter.increment();
+-                }
+-            });
+-            // if (totalItemCount > 0) {
+-            // TotalSetCounter.add(totalItemCount);
+-            // SecSetCounter.add(totalItemCount);
+-            // }
+-            return null;
+-        });
+-        return CompletableFuture.completedFuture(true);
+-
+-    }
+-
+-}
++/**
++ * Redis 实时数据写入服务（集群/单机/哨兵自适应）
++ * @Author: caileiming boboclmomi@163.com
++ * @Date: 2025-05-27 11:37:36
++ * @LastEditors: caileiming boboclmomi@163.com
++ * @LastEditTime: 2026-10-22 10:00:00
++ * @Description: Redis 实时数据写入。单机/哨兵使用 pipeline；集群交给 RedisClusterHashPipeline
++ *               按 slot 属主归并为「每主节点一条 pipeline」。本类不再标注 @Async，
++ *               异步只保留在 Kafka 写入入口，便于统一重试与异常观测。
++ */
++package com.sac.platform.realserver.service.impl;
++
++import java.util.HashMap;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CompletableFuture;
++
++import org.apache.commons.lang3.StringUtils;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.data.redis.core.RedisCallback;
++import org.springframework.data.redis.core.RedisTemplate;
++import org.springframework.data.redis.serializer.RedisSerializer;
++import org.springframework.stereotype.Service;
++
++import com.sac.platform.common.utils.SystemIDUtil;
++import com.sac.platform.config.SecSetCounter;
++import com.sac.platform.config.TotalSetCounter;
++import com.sac.platform.realserver.oms.utils.RedisClusterHashPipeline;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
++import com.sac.platform.realserver.service.RedisRealDataService;
++
++@Service
++public class RedisRealDataServiceImpl implements RedisRealDataService {
++
++    private static final Logger logger = LoggerFactory.getLogger(RedisRealDataServiceImpl.class);
++
++    /** 日志中单条点数据最大展示长度，避免大 batch 打出海量内容 */
++    private static final int LOG_PREVIEW_LENGTH = 120;
++
++    private final RedisTemplate<String, Object> redisTemplate;
++    private final boolean isCluster;
++    private final RedisClusterHashPipeline clusterPipeline;
++
++    public RedisRealDataServiceImpl(RedisTemplate<String, Object> redisTemplate,
++            RedisClusterHelper redisClusterHelper,
++            RedisClusterHashPipeline clusterPipeline) {
++        this.redisTemplate = redisTemplate;
++        // 通过统一的 RedisClusterHelper 判断集群模式（哨兵同样走单机 pipeline）
++        this.isCluster = redisClusterHelper.isCluster();
++        this.clusterPipeline = clusterPipeline;
++    }
++
++    /**
++     * 实时数据写入入口
++     * 单机/哨兵：使用 pipeline（按 key 分组 hMSet，RTT 最小）
++     * 集群：交给 RedisClusterHashPipeline，按 slot 属主归并为每主节点一条 pipeline
++     *
++     * 注意：本方法为同步执行，异常直接抛给调用方（Kafka 写入入口负责重试与记录）。
++     */
++    @Override
++    public CompletableFuture<Boolean> wirteOmsPip(String prefix, List<String> pointData) {
++        if (pointData == null || pointData.isEmpty()) {
++            return CompletableFuture.completedFuture(true);
++        }
++        if (isCluster) {
++            return batchWirteOmsByRedisCluster(prefix, pointData);
++        }
++        return wirteOmsPipStandalone(prefix, pointData);
++    }
++
++    /**
++     * 单机/哨兵模式：按 key 分组后使用 pipeline 批量 hMSet。
++     * 计数在整批写入成功后一次性累加，失败重试不会重复计数。
++     */
++    private CompletableFuture<Boolean> wirteOmsPipStandalone(String prefix, List<String> pointData) {
++        final Map<String, Map<String, String>> grouped = groupByKey(prefix, pointData);
++        if (grouped.isEmpty()) {
++            return CompletableFuture.completedFuture(true);
++        }
++
++        @SuppressWarnings("rawtypes")
++        RedisSerializer keySerializer = redisTemplate.getKeySerializer();
++        @SuppressWarnings("rawtypes")
++        RedisSerializer hashValueSerializer = redisTemplate.getHashValueSerializer();
++        @SuppressWarnings("rawtypes")
++        RedisSerializer hashKeySerializer = redisTemplate.getHashKeySerializer();
++
++        int fieldCount = 0;
++        for (Map<String, String> hash : grouped.values()) {
++            fieldCount += hash.size();
++        }
++
++        redisTemplate.executePipelined((RedisCallback<Object>) redisConnection -> {
++            for (Map.Entry<String, Map<String, String>> entry : grouped.entrySet()) {
++                Map<byte[], byte[]> hash = new HashMap<>(entry.getValue().size());
++                for (Map.Entry<String, String> field : entry.getValue().entrySet()) {
++                    hash.put(hashKeySerializer.serialize(field.getKey()),
++                            hashValueSerializer.serialize(field.getValue()));
++                }
++                redisConnection.hMSet(keySerializer.serialize(entry.getKey()), hash);
++            }
++            return null;
++        });
++
++        TotalSetCounter.add(fieldCount);
++        SecSetCounter.add(fieldCount);
++        return CompletableFuture.completedFuture(true);
++    }
++
++    @Override
++    public CompletableFuture<Boolean> wirteOmsPipByJedis(String prefix, List<String> pointData) {
++        // 当前实现已统一到 wirteOmsPip 中
++        return wirteOmsPip(prefix, pointData);
++    }
++
++    /**
++     * 集群模式：整批交给 RedisClusterHashPipeline，按 slot 属主归并为「每主节点一条 pipeline」。
++     * 计数在整批（所有节点）都成功之后一次性累加；任何失败都直接抛出，
++     * 由调用方整批重试（HSET 幂等），重试不会重复计数。
++     */
++    @Override
++    public CompletableFuture<Boolean> batchWirteOmsByRedisCluster(String prefix, List<String> pointData) {
++        Map<String, Map<String, String>> grouped = groupByKey(prefix, pointData);
++        if (grouped.isEmpty()) {
++            return CompletableFuture.completedFuture(true);
++        }
++        int fieldCount = 0;
++        for (Map<String, String> hash : grouped.values()) {
++            fieldCount += hash.size();
++        }
++        clusterPipeline.putAllHashes(grouped);
++        TotalSetCounter.add(fieldCount);
++        SecSetCounter.add(fieldCount);
++        return CompletableFuture.completedFuture(true);
++    }
++
++    /**
++     * 解析并分组：obid;atype,datatype,value,time&obid;...
++     * 每个点独立容错，坏点只跳过该点，不影响整批。
++     */
++    private Map<String, Map<String, String>> groupByKey(String prefix, List<String> pointData) {
++        Map<String, Map<String, String>> grouped = new LinkedHashMap<>();
++        for (String data : pointData) {
++            if (StringUtils.isBlank(data) || !data.contains(";")) {
++                continue;
++            }
++            try {
++                String[] dataItem = data.split(";");
++                long obid = Long.parseLong(dataItem[0].trim());
++                int otype = SystemIDUtil.extractOType(obid);
++                String key = prefix + ":" + otype + ":" + obid;
++
++                Map<String, String> hash = new HashMap<>();
++                for (int num = 1; num < dataItem.length; num++) {
++                    String[] contents = dataItem[num].split(",");
++                    if (contents.length < 4) {
++                        logger.warn("Skip malformed field: point={}", preview(data));
++                        continue;
++                    }
++                    String atype = contents[0];
++                    String value = contents[2] + "," + contents[3] + "," + contents[1];
++                    hash.put(atype, value);
++                }
++
++                if (hash.isEmpty()) {
++                    continue;
++                }
++                Map<String, String> existing = grouped.get(key);
++                if (existing == null) {
++                    grouped.put(key, hash);
++                } else {
++                    existing.putAll(hash);
++                }
++            } catch (Exception e) {
++                logger.warn("Skip invalid point data: {}, reason: {}", preview(data), e.getMessage());
++            }
++        }
++        return grouped;
++    }
++
++    private static String preview(String data) {
++        if (data == null) {
++            return "null";
++        }
++        return data.length() <= LOG_PREVIEW_LENGTH ? data : data.substring(0, LOG_PREVIEW_LENGTH) + "...";
++    }
++}
+diff --git a/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImplTest.java b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImplTest.java
+new file mode 100644
+index 0000000..4796ee3
+--- /dev/null
++++ b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImplTest.java
+@@ -0,0 +1,88 @@
++package com.sac.platform.realserver.service.impl;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.mockito.ArgumentMatchers.anyList;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.times;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoInteractions;
++import static org.mockito.Mockito.when;
++
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.concurrent.CompletableFuture;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.Mock;
++import org.mockito.junit.jupiter.MockitoExtension;
++import org.springframework.data.redis.core.RedisTemplate;
++
++import com.sac.platform.config.FailSetCounter;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
++import com.sac.platform.realserver.service.RedisRealDataService;
++
++/**
++ * 写入重试与失败计数测试。
++ * 单测中没有 Spring 代理，@Async 不生效，方法同步执行。
++ */
++@ExtendWith(MockitoExtension.class)
++class OmsWriteByKafkaServiceImplTest {
++
++    @Mock
++    private RedisTemplate<String, Object> redisTemplate;
++
++    @Mock
++    private RedisRealDataService redisRealDataService;
++
++    @Mock
++    private RedisClusterHelper redisClusterHelper;
++
++    private OmsWriteByKafkaServiceImpl service;
++
++    @BeforeEach
++    void setUp() {
++        when(redisClusterHelper.isCluster()).thenReturn(false);
++        service = new OmsWriteByKafkaServiceImpl(redisTemplate, redisRealDataService, redisClusterHelper);
++        FailSetCounter.reset();
++    }
++
++    @Test
++    void batchWirtePipSucceedsOnThirdAttempt() {
++        when(redisRealDataService.wirteOmsPip(eq("real_data"), anyList()))
++                .thenThrow(new RuntimeException("first failure"))
++                .thenThrow(new RuntimeException("second failure"))
++                .thenReturn(CompletableFuture.completedFuture(true));
++
++        service.batchWirtePip(Arrays.asList("1;2,3,4,5"), "real_data");
++
++        verify(redisRealDataService, times(3)).wirteOmsPip(eq("real_data"), anyList());
++        assertEquals(0L, FailSetCounter.getCount());
++    }
++
++    @Test
++    void batchWirtePipCountsAllPointsAfterRetriesExhausted() {
++        when(redisRealDataService.wirteOmsPip(eq("real_data"), anyList()))
++                .thenThrow(new RuntimeException("always failing"));
++
++        service.batchWirtePip(Arrays.asList("1;2,3,4,5", "2;2,3,4,5"), "real_data");
++
++        verify(redisRealDataService, times(3)).wirteOmsPip(eq("real_data"), anyList());
++        assertEquals(2L, FailSetCounter.getCount());
++    }
++
++    @Test
++    void batchWirtePipIgnoresEmptyInput() {
++        service.batchWirtePip(Collections.<String>emptyList(), "real_data");
++
++        verifyNoInteractions(redisRealDataService);
++    }
++
++    @Test
++    void batchWirtePipIgnoresBlankRecords() {
++        service.batchWirtePip(Arrays.asList("", "   "), "real_data");
++
++        verifyNoInteractions(redisRealDataService);
++    }
++}
+diff --git a/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImplTest.java b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImplTest.java
+new file mode 100644
+index 0000000..64f6120
+--- /dev/null
++++ b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImplTest.java
+@@ -0,0 +1,106 @@
++package com.sac.platform.realserver.service.impl;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyMap;
++import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.times;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.Map;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.mockito.ArgumentCaptor;
++import org.springframework.data.redis.core.RedisCallback;
++import org.springframework.data.redis.core.RedisTemplate;
++
++import com.sac.platform.config.SecSetCounter;
++import com.sac.platform.config.TotalSetCounter;
++import com.sac.platform.realserver.oms.utils.RedisClusterHashPipeline;
++import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
++
++class RedisRealDataServiceImplTest {
++
++    private RedisTemplate<String, Object> template;
++    private RedisClusterHelper clusterHelper;
++    private RedisClusterHashPipeline clusterPipeline;
++
++    @BeforeEach
++    @SuppressWarnings("unchecked")
++    void setUp() {
++        template = mock(RedisTemplate.class);
++        clusterHelper = mock(RedisClusterHelper.class);
++        clusterPipeline = mock(RedisClusterHashPipeline.class);
++        TotalSetCounter.reset();
++        SecSetCounter.reset();
++    }
++
++    @Test
++    void clusterPathDelegatesTheWholeBatchToThePipelineOnce() {
++        when(clusterHelper.isCluster()).thenReturn(true);
++        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
++
++        service.wirteOmsPip("real_data", Arrays.asList(
++                "47245270977;1,1,123.45,1712345678000",
++                "47245270977;2,1,9.9,1712345678001",
++                "47245270978;1,1,1.1,1712345678002")).join();
++
++        ArgumentCaptor<Map> captor = ArgumentCaptor.forClass(Map.class);
++        verify(clusterPipeline, times(1)).putAllHashes(captor.capture());
++        Map<String, Map<String, String>> grouped = captor.getValue();
++
++        assertEquals(2, grouped.size());
++        assertEquals("123.45,1712345678000,1", grouped.get("real_data:11:47245270977").get("1"));
++        assertEquals("9.9,1712345678001,1", grouped.get("real_data:11:47245270977").get("2"));
++        assertEquals("1.1,1712345678002,1", grouped.get("real_data:11:47245270978").get("1"));
++        assertEquals(3L, TotalSetCounter.getCount());
++        assertEquals(3L, SecSetCounter.getCount());
++    }
++
++    @Test
++    void clusterPathSkipsEmptyInput() {
++        when(clusterHelper.isCluster()).thenReturn(true);
++        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
++
++        service.wirteOmsPip("real_data", Collections.<String>emptyList()).join();
++
++        verify(clusterPipeline, never()).putAllHashes(anyMap());
++        assertEquals(0L, TotalSetCounter.getCount());
++    }
++
++    @Test
++    void pipelineFailurePropagatesAndIsNotCounted() {
++        when(clusterHelper.isCluster()).thenReturn(true);
++        doThrow(new RuntimeException("cluster write boom")).when(clusterPipeline).putAllHashes(anyMap());
++        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
++
++        assertThrows(RuntimeException.class, () -> service.wirteOmsPip("real_data",
++                Arrays.asList("47245270977;1,1,123.45,1712345678000")));
++
++        assertEquals(0L, TotalSetCounter.getCount());
++        assertEquals(0L, SecSetCounter.getCount());
++    }
++
++    @Test
++    @SuppressWarnings("unchecked")
++    void standalonePathUsesPipelinedWritesAndNeverTheClusterHelper() {
++        when(clusterHelper.isCluster()).thenReturn(false);
++        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
++        doReturn(Collections.emptyList()).when(template).executePipelined(any(RedisCallback.class));
++
++        service.wirteOmsPip("real_data",
++                Arrays.asList("47245270977;1,1,123.45,1712345678000")).join();
++
++        verify(template).executePipelined(any(RedisCallback.class));
++        verify(clusterPipeline, never()).putAllHashes(anyMap());
++        assertEquals(1L, TotalSetCounter.getCount());
++    }
++}
