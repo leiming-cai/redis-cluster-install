@@ -302,6 +302,43 @@ index 660671f..2a7cca7 100644
  
      }
  
+diff --git a/platform/backend/modelserver/controller/src/main/resources/bootstrap.yml b/platform/backend/modelserver/controller/src/main/resources/bootstrap.yml
+index 75874a7..9a183fb 100644
+--- a/platform/backend/modelserver/controller/src/main/resources/bootstrap.yml
++++ b/platform/backend/modelserver/controller/src/main/resources/bootstrap.yml
+@@ -21,14 +21,25 @@ spring:
+         # password: Sac@8888
+         file-extension: yaml
+         group: MODELSERVER_GROUP
+-        shared-configs:
+-          - dataId: share_base.yaml
+-            group: DEFAULT_GROUP
+-            refresh: true
++        # ⚠️ 不再引用 share_base.yaml / ext_base.yaml
++        #
++        # 这两个 dataId 在**安装包的 Nacos 导出包里不存在**
++        # （nacos_config_export_postgresql-napstar2.0/DEFAULT_GROUP/ 只有
++        #   hisdataproducer-ext.yaml / jk.yaml / napstarmappingconfig.yaml；
++        #  DM 那份导出包也一样 —— 不是导出遗漏，是安装包本身没有）。
++        #
++        # 而本应用真正需要的键**全都在它自己的 dataId 里**
++        # （MODELSERVER_GROUP / icms-controller.yaml）：
++        #   import.commit.filepath / .templatepath   -> Configuration.java
++        #   dashboard.nacos                          -> BaseDataVersionController.java
++        #   shiroconfig.perms                        -> ShiroConfig
++        #   spring.datasource.{info,cmt,sac} / spring.redis / oms.* / orm.* / task.*
++        # 实测（2026-11-01）：把这两个 dataId 从 Nacos 删掉后，
++        #   model-controller 仍然启动正常、致命错误 0、/model/login HTTP 200。
++        #
++        # 保留 napstarmappingconfig.yaml —— 它在安装包里确实有。
++        shared-configs: []
+         extension-configs:
+-          - data-id: ext_base.yaml
+-            group: DEFAULT_GROUP
+-            refresh: true
+           - data-id: napstarmappingconfig.yaml
+             group: DEFAULT_GROUP
+             refresh: true
 diff --git a/platform/backend/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java b/platform/backend/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
 index 9d2390a..4ffee1e 100644
 --- a/platform/backend/modelserver/services/src/main/java/com/sac/platform/modelserver/service/impl/CacheServiceImpl.java
