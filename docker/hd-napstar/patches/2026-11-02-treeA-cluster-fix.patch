@@ -1,5 +1,5 @@
 diff --git a/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java b/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java
-index 8cf98d8..54649ad 100644
+index 8cf98d8..2ba75c4 100644
 --- a/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java
 +++ b/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java
 @@ -20,6 +20,7 @@ import com.sac.application.napstarweb.monitor.services.SVGInitSupervisor;
@@ -29,7 +29,7 @@ index 8cf98d8..54649ad 100644
              @Override
              public Object doInRedis(RedisConnection redisConnection) throws DataAccessException {
                  SVGInitSupervisor svgInitSupervisor = new SVGInitSupervisor();
-@@ -134,6 +138,17 @@ public class RTListener {
+@@ -134,6 +138,18 @@ public class RTListener {
                  }
                  return null;
              }
@@ -39,6 +39,7 @@ index 8cf98d8..54649ad 100644
 +            // 集群模式下 SDR 的 pipeline 不可用（JedisClusterConnection.openPipeline 抛
 +            // UnsupportedOperationException，回调体一次都不会执行）。
 +            // 改用非 pipeline 的 execute：每条命令一次往返，但 JedisCluster 会按 slot 路由。
++            // 往返变多是可接受的：每条记录都夹着一次 DB 查询，Redis 不是瓶颈。
 +            // ⚠️ 集群分支下 hSet/hDel 立即生效 → 同一批次后续迭代能读到前面刚写的值
 +            //    （单机 pipeline 下命令攒到批次结束才落库，读不到）。
 +            //    这是两种模式本来就有的差异，见设计文档风险 R2，本轮不修。
@@ -49,7 +50,7 @@ index 8cf98d8..54649ad 100644
      }
  }
 diff --git a/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateService.java b/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateService.java
-index a1528e5..72add7f 100644
+index a1528e5..ba60ab2 100644
 --- a/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateService.java
 +++ b/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/CalculateService.java
 @@ -45,6 +45,8 @@ import com.sac.platform.common.enumdict.DataTypeCode;
@@ -111,7 +112,7 @@ index a1528e5..72add7f 100644
  		if (svgIdList == null || results == null) {
  			return;
  		}
-@@ -715,16 +736,29 @@ private WiringService parentWiringService;
+@@ -715,16 +736,31 @@ private WiringService parentWiringService;
  	public Map batchGetParam(String keyPrefix, List<String> paramList, Boolean useParallel) throws Exception {
  		RedisSerializer keySerializer = redisTemplate.getKeySerializer();
  		RedisSerializer valueSerializer = redisTemplate.getValueSerializer();
@@ -128,6 +129,8 @@ index a1528e5..72add7f 100644
 +			keys.add(keyPrefix + param + ":RT");
 +		}
 +
++		// raw：保持文件既有风格。集群分支返回与 keys 等长同序的列表，
++		// 调用方按下标对齐（results.get(paramList.indexOf(t))）→ 顺序是承重的契约。
 +		List results;
 +		if (redisClusterHelper.isCluster()) {
 +			// hash 读：集群下 SDR 的 pipeline 不可用，改走 oms 的按 slot 分组读（每个 master 一条 pipeline）
@@ -151,7 +154,7 @@ index a1528e5..72add7f 100644
  			return null;
  		}
 diff --git a/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/SVGParseService.java b/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/SVGParseService.java
-index b0a8381..1dbd5ef 100644
+index b0a8381..f60479c 100644
 --- a/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/SVGParseService.java
 +++ b/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/SVGParseService.java
 @@ -19,6 +19,8 @@ import com.sac.platform.modelserver.service.BaseEntityDataService;
@@ -183,7 +186,7 @@ index b0a8381..1dbd5ef 100644
              @Override
              public Object doInRedis(RedisConnection redisConnection) throws DataAccessException {
                  long currenttime = System.currentTimeMillis();
-@@ -1752,7 +1758,20 @@ public class SVGParseService {
+@@ -1752,7 +1758,21 @@ public class SVGParseService {
                  // SVGSupervisor.getInstance().getRtobidMap().get(graphId));
                  return null;
              }
@@ -193,7 +196,8 @@ index b0a8381..1dbd5ef 100644
 +            // 集群模式下 SDR 的 pipeline 不可用（JedisClusterConnection.openPipeline 抛
 +            // UnsupportedOperationException，回调体一次都不会执行）。
 +            // 改用非 pipeline 的 execute：每条命令一次往返，但 JedisCluster 会按 slot 路由。
-+            // ⚠️ 本方法写 4 个 key（BASE_SVG_SYMBOL+symbolId 每个 symbol 一个 key），
++            // 往返变多是可接受的：每条记录都夹着一次 DB 查询，Redis 不是瓶颈。
++            // ⚠️ 本方法写 4 类 key（BASE_SVG_SYMBOL+symbolId 每个 symbol 一个 key），
 +            //    非 pipeline 模式按 key 路由 → 多 key 也不会跨槽报错。
 +            // ⚠️ 集群分支下 set/hSet 立即生效 → 同一批次后续迭代能读到前面刚写的值
 +            //    （单机 pipeline 下命令攒到批次结束才落库，读不到）。
@@ -205,7 +209,7 @@ index b0a8381..1dbd5ef 100644
          return useDefinitionMap;
      }
  
-@@ -2024,16 +2043,31 @@ public class SVGParseService {
+@@ -2024,16 +2044,31 @@ public class SVGParseService {
       */
      public Map batchGetSymbol(List<String> symbolIdList, Boolean useParallel)
              throws Exception {
@@ -247,7 +251,7 @@ index b0a8381..1dbd5ef 100644
              return null;
          }
 diff --git a/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.java b/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.java
-index 660671f..aac761b 100644
+index 660671f..2a7cca7 100644
 --- a/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.java
 +++ b/application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/services/impl/SVGCacheServiceImpl.java
 @@ -15,6 +15,7 @@ import com.sac.platform.common.constant.Constants;
@@ -277,7 +281,7 @@ index 660671f..aac761b 100644
              @Override
              public Object doInRedis(RedisConnection redisConnection) throws DataAccessException {
                  for (KafkaBusConfiguration.KafkaBusConfig kafkaBusConfig : kafkaBusConfiguration.getConfig()) {
-@@ -77,7 +81,18 @@ public class SVGCacheServiceImpl implements SVGCacheService {
+@@ -77,7 +81,19 @@ public class SVGCacheServiceImpl implements SVGCacheService {
                  }
                  return null;
              }
@@ -287,8 +291,9 @@ index 660671f..aac761b 100644
 +            // 集群模式下 SDR 的 pipeline 不可用（JedisClusterConnection.openPipeline 抛
 +            // UnsupportedOperationException，回调体一次都不会执行）。
 +            // 改用非 pipeline 的 execute：每条命令一次往返，但 JedisCluster 会按 slot 路由。
++            // 往返变多是可接受的：每条记录都夹着一次 DB 查询，Redis 不是瓶颈。
 +            // ⚠️ 集群分支下 hSet 立即生效 → 同一批次后续迭代能读到前面刚写的值
-+            //    （单机 pipeline 下命令攒到批次结束才落库，读不到）。
++            //    （单机 pipeline 下 hSet 攒到批次结束才落库，读不到）。
 +            //    这是两种模式本来就有的差异，见设计文档风险 R2，本轮不修。
 +            redisTemplate.execute(callback);
 +        } else {
