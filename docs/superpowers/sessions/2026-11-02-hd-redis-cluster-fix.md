@@ -173,6 +173,19 @@ portal napstar info 表数 **30** → **30** · image id **同** · databases �
 
 ⇒ **门户现在比旧快照更健康**（Nacos 起来了），不是退化。
 
+### 3.5 脚本自测（**回归防线**，本轮改了 `start-hd-apps.sh` / `verify-hd-napstar.sh` → 必须重跑）
+
+| 测试 | 结果 | 测什么 |
+|---|---|---|
+| `scripts/test-hd-cluster-summary.sh` | **`PASS=19 FAIL=0`** | 计数合并逻辑本身的边界 |
+| `scripts/test-hd-cluster-merge-wiring.sh` | **`PASS=8 FAIL=0`** | **防假绿门禁**：helper 缺失/空/语法错/没有那个函数时，矩阵**必须非 0 退出**且**不打印 `FAIL=0` 的 SUMMARY** |
+| `scripts/test-hd-portal-baseline.sh` | **`PASS=40 FAIL=0`** | 门户比对脚本的边界（含「噪声里的数不许被当真值」） |
+| 树 A `rtdata-module` 单测 | **`Tests run: 12, Failures: 0`** | 见 §2.3 |
+
+⚠️ **`test-hd-cluster-merge-wiring.sh` 第一次跑是 SKIP** —— 集群没在跑 ⇒ C 段整段跳过 ⇒
+**测不到「合并」这一步**（退出码 0，但 `PASS=0`）。
+⇒ **起集群重跑才是有效的**（`PASS=8`）。**「退出码 0」不等于「测到了」。**
+
 ---
 
 ## 四、发现的缺陷 / 缺口
