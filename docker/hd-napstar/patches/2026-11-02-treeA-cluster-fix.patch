@@ -1468,20 +1468,25 @@ index f1b50f7..700bf32 100644
 +}
 diff --git a/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImplTest.java b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImplTest.java
 new file mode 100644
-index 0000000..4796ee3
+index 0000000..f76d970
 --- /dev/null
 +++ b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImplTest.java
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,151 @@
 +package com.sac.platform.realserver.service.impl;
 +
 +import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.mockito.ArgumentMatchers.any;
 +import static org.mockito.ArgumentMatchers.anyList;
 +import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.mock;
 +import static org.mockito.Mockito.times;
 +import static org.mockito.Mockito.verify;
 +import static org.mockito.Mockito.verifyNoInteractions;
 +import static org.mockito.Mockito.when;
 +
++import java.nio.charset.StandardCharsets;
 +import java.util.Arrays;
 +import java.util.Collections;
 +import java.util.concurrent.CompletableFuture;
@@ -1489,11 +1494,18 @@ index 0000000..4796ee3
 +import org.junit.jupiter.api.BeforeEach;
 +import org.junit.jupiter.api.Test;
 +import org.junit.jupiter.api.extension.ExtendWith;
++import org.mockito.ArgumentCaptor;
 +import org.mockito.Mock;
 +import org.mockito.junit.jupiter.MockitoExtension;
++import org.springframework.data.redis.connection.RedisConnection;
++import org.springframework.data.redis.core.RedisCallback;
 +import org.springframework.data.redis.core.RedisTemplate;
++import org.springframework.data.redis.serializer.RedisSerializer;
++import org.springframework.data.redis.serializer.StringRedisSerializer;
 +
 +import com.sac.platform.config.FailSetCounter;
++import com.sac.platform.config.SecSetCounter;
++import com.sac.platform.config.TotalSetCounter;
 +import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
 +import com.sac.platform.realserver.service.RedisRealDataService;
 +
@@ -1520,6 +1532,10 @@ index 0000000..4796ee3
 +        when(redisClusterHelper.isCluster()).thenReturn(false);
 +        service = new OmsWriteByKafkaServiceImpl(redisTemplate, redisRealDataService, redisClusterHelper);
 +        FailSetCounter.reset();
++        // 计数是静态的，surefire 默认一个 JVM 跑完所有测试类，
++        // 不重置的话，类之间的执行顺序会决定断言结果。
++        TotalSetCounter.reset();
++        SecSetCounter.reset();
 +    }
 +
 +    @Test
@@ -1559,19 +1575,68 @@ index 0000000..4796ee3
 +
 +        verifyNoInteractions(redisRealDataService);
 +    }
++
++    /**
++     * 单机/哨兵分支自己写 Redis（processItem），不经过 redisRealDataService。
++     * key / field / value 的拼法与坏点容错都靠这一条守住：
++     * 解析失败的点整条丢弃，成功的点逐 field 写 hSet 并计数。
++     */
++    @Test
++    @SuppressWarnings("unchecked")
++    void batchWirteStandaloneSkipsMalformedPointsAndCountsOnlyGoodOnes() {
++        RedisSerializer<String> serializer = new StringRedisSerializer();
++        doReturn(serializer).when(redisTemplate).getKeySerializer();
++        doReturn(serializer).when(redisTemplate).getHashKeySerializer();
++        doReturn(serializer).when(redisTemplate).getHashValueSerializer();
++
++        RedisConnection connection = mock(RedisConnection.class);
++        doAnswer(invocation -> {
++            RedisCallback<Object> callback = invocation.getArgument(0);
++            callback.doInRedis(connection);
++            return Collections.emptyList();
++        }).when(redisTemplate).executePipelined(any(RedisCallback.class));
++
++        service.batchWirte(Arrays.asList(
++                "47245270977;1,1,123.45,1712345678000", // 好点
++                "notanumber;1,1,2,3", // 坏点：obid 不是数字，整条丢弃
++                "47245270979;2,3,4,5"), "real_data"); // 好点
++
++        ArgumentCaptor<byte[]> key = ArgumentCaptor.forClass(byte[].class);
++        ArgumentCaptor<byte[]> field = ArgumentCaptor.forClass(byte[].class);
++        ArgumentCaptor<byte[]> value = ArgumentCaptor.forClass(byte[].class);
++        verify(connection, times(2)).hSet(key.capture(), field.capture(), value.capture());
++
++        assertEquals("real_data:11:47245270977", new String(key.getAllValues().get(0), StandardCharsets.UTF_8));
++        assertEquals("1", new String(field.getAllValues().get(0), StandardCharsets.UTF_8));
++        assertEquals("123.45,1712345678000,1", new String(value.getAllValues().get(0), StandardCharsets.UTF_8));
++
++        assertEquals("real_data:11:47245270979", new String(key.getAllValues().get(1), StandardCharsets.UTF_8));
++        assertEquals("2", new String(field.getAllValues().get(1), StandardCharsets.UTF_8));
++        assertEquals("4,5,3", new String(value.getAllValues().get(1), StandardCharsets.UTF_8));
++
++        // 只算成功写入的 field
++        assertEquals(2L, TotalSetCounter.getCount());
++        assertEquals(2L, SecSetCounter.getCount());
++        // 没有重试过，也就没有失败计数
++        assertEquals(0L, FailSetCounter.getCount());
++        // 单机分支自己写，不委托给 redisRealDataService
++        verifyNoInteractions(redisRealDataService);
++    }
 +}
 diff --git a/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImplTest.java b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImplTest.java
 new file mode 100644
-index 0000000..64f6120
+index 0000000..d5b1907
 --- /dev/null
 +++ b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/RedisRealDataServiceImplTest.java
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,195 @@
 +package com.sac.platform.realserver.service.impl;
 +
 +import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNull;
 +import static org.junit.jupiter.api.Assertions.assertThrows;
 +import static org.mockito.ArgumentMatchers.any;
 +import static org.mockito.ArgumentMatchers.anyMap;
++import static org.mockito.Mockito.doAnswer;
 +import static org.mockito.Mockito.doReturn;
 +import static org.mockito.Mockito.doThrow;
 +import static org.mockito.Mockito.mock;
@@ -1580,15 +1645,20 @@ index 0000000..64f6120
 +import static org.mockito.Mockito.verify;
 +import static org.mockito.Mockito.when;
 +
++import java.nio.charset.StandardCharsets;
 +import java.util.Arrays;
 +import java.util.Collections;
++import java.util.LinkedHashMap;
 +import java.util.Map;
 +
 +import org.junit.jupiter.api.BeforeEach;
 +import org.junit.jupiter.api.Test;
 +import org.mockito.ArgumentCaptor;
++import org.springframework.data.redis.connection.RedisConnection;
 +import org.springframework.data.redis.core.RedisCallback;
 +import org.springframework.data.redis.core.RedisTemplate;
++import org.springframework.data.redis.serializer.RedisSerializer;
++import org.springframework.data.redis.serializer.StringRedisSerializer;
 +
 +import com.sac.platform.config.SecSetCounter;
 +import com.sac.platform.config.TotalSetCounter;
@@ -1657,18 +1727,100 @@ index 0000000..64f6120
 +        assertEquals(0L, SecSetCounter.getCount());
 +    }
 +
++    /**
++     * 单机/哨兵分支必须真的把数据写出去。
++     * 这里的 mock 会执行回调体，否则 hMSet 一次都不会被调用，用例就成了空测试：
++     * 把 wirteOmsPipStandalone 里整个写入循环删掉，这一条用例照样会红。
++     */
 +    @Test
 +    @SuppressWarnings("unchecked")
-+    void standalonePathUsesPipelinedWritesAndNeverTheClusterHelper() {
++    void standalonePathWritesGroupedHashesThroughThePipeline() {
 +        when(clusterHelper.isCluster()).thenReturn(false);
 +        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
-+        doReturn(Collections.emptyList()).when(template).executePipelined(any(RedisCallback.class));
 +
-+        service.wirteOmsPip("real_data",
-+                Arrays.asList("47245270977;1,1,123.45,1712345678000")).join();
++        RedisSerializer<String> serializer = new StringRedisSerializer();
++        doReturn(serializer).when(template).getKeySerializer();
++        doReturn(serializer).when(template).getHashKeySerializer();
++        doReturn(serializer).when(template).getHashValueSerializer();
 +
-+        verify(template).executePipelined(any(RedisCallback.class));
++        RedisConnection connection = mock(RedisConnection.class);
++        doAnswer(invocation -> {
++            RedisCallback<Object> callback = invocation.getArgument(0);
++            callback.doInRedis(connection);
++            return Collections.emptyList();
++        }).when(template).executePipelined(any(RedisCallback.class));
++
++        service.wirteOmsPip("real_data", Arrays.asList(
++                "47245270977;1,1,123.45,1712345678000",
++                "47245270977;2,1,9.9,1712345678001",
++                "47245270978;1,1,1.1,1712345678002")).join();
++
++        ArgumentCaptor<byte[]> keyCaptor = ArgumentCaptor.forClass(byte[].class);
++        ArgumentCaptor<Map> hashCaptor = ArgumentCaptor.forClass(Map.class);
++        verify(connection, times(2)).hMSet(keyCaptor.capture(), hashCaptor.capture());
++
++        // groupByKey 用 LinkedHashMap，key 按写入顺序出现
++        assertEquals("real_data:11:47245270977",
++                new String(keyCaptor.getAllValues().get(0), StandardCharsets.UTF_8));
++        assertEquals("real_data:11:47245270978",
++                new String(keyCaptor.getAllValues().get(1), StandardCharsets.UTF_8));
++
++        // 同一 key 的两个点被合并进一次 hMSet
++        Map<String, String> first = decodeHash(hashCaptor.getAllValues().get(0));
++        assertEquals(2, first.size());
++        assertEquals("123.45,1712345678000,1", first.get("1"));
++        assertEquals("9.9,1712345678001,1", first.get("2"));
++
++        Map<String, String> second = decodeHash(hashCaptor.getAllValues().get(1));
++        assertEquals(1, second.size());
++        assertEquals("1.1,1712345678002,1", second.get("1"));
++
++        assertEquals(3L, TotalSetCounter.getCount());
++        assertEquals(3L, SecSetCounter.getCount());
 +        verify(clusterPipeline, never()).putAllHashes(anyMap());
-+        assertEquals(1L, TotalSetCounter.getCount());
++    }
++
++    /**
++     * 类注释承诺「每个点独立容错，坏点只跳过该点，不影响整批」：
++     * 无分号的串、obid 不是数字、field 段不足 4 段，三种坏点都不能牵连好点。
++     */
++    @Test
++    void malformedPointsAreSkippedWithoutDraggingTheGoodOneDown() {
++        when(clusterHelper.isCluster()).thenReturn(true);
++        RedisRealDataServiceImpl service = new RedisRealDataServiceImpl(template, clusterHelper, clusterPipeline);
++
++        service.wirteOmsPip("real_data", Arrays.asList(
++                "47245270977;1,1,123.45,1712345678000", // 好点
++                "no-semicolon-here", // 坏点：没有 ';'
++                "notanumber;1,1,2,3", // 坏点：obid 不是数字
++                "47245270978;1,1", // 坏点：field 段不足 4 段
++                "47245270979;1,1,2,3")).join(); // 好点，另一个 key
++
++        ArgumentCaptor<Map> captor = ArgumentCaptor.forClass(Map.class);
++        verify(clusterPipeline, times(1)).putAllHashes(captor.capture());
++        Map<String, Map<String, String>> grouped = captor.getValue();
++
++        // 两个好点各一个 key；三种坏点都不产生 key
++        assertEquals(2, grouped.size());
++        assertNull(grouped.get("real_data:11:47245270978"));
++        assertEquals("123.45,1712345678000,1", grouped.get("real_data:11:47245270977").get("1"));
++        assertEquals("2,3,1", grouped.get("real_data:11:47245270979").get("1"));
++
++        // 只算好点的 field 数
++        assertEquals(2L, TotalSetCounter.getCount());
++        assertEquals(2L, SecSetCounter.getCount());
++    }
++
++    /**
++     * hMSet 的 field/value 是字节数组，byte[] 没有按内容的 equals，
++     * 不能直接 hash.get("1".getBytes())，只能逐项解码。
++     */
++    private static Map<String, String> decodeHash(Map<?, ?> raw) {
++        Map<String, String> decoded = new LinkedHashMap<>();
++        for (Map.Entry<?, ?> entry : raw.entrySet()) {
++            decoded.put(new String((byte[]) entry.getKey(), StandardCharsets.UTF_8),
++                    new String((byte[]) entry.getValue(), StandardCharsets.UTF_8));
++        }
++        return decoded;
 +    }
 +}
