@@ -1,7 +1,8 @@
 # 会话存档（2026-11-02）：华盾 napstar2.0 —— 交付树集群修复
 
 > **这份文件是给「下一个会话」看的。**
-> 打开它 == 拿到本会话的**全部产出**：环境、结论、实测证据、留痕、以及**上一轮存档被推翻的 7 处结论**。
+> 打开它 == 拿到本会话的**全部产出**：环境、结论、实测证据、留痕、以及**上一轮存档被推翻的 7 处结论**
+> （下表是影响面最大的 5 处，**完整清单见上一轮存档 §十**）。
 >
 > - 上一份存档：`docs/superpowers/sessions/2026-11-02-hd-redis-cluster-test.md`（**它的第十节是本轮的复核更正**）
 > - 本轮设计：`docs/superpowers/specs/2026-11-02-hd-redis-cluster-fix-design.md`
@@ -15,7 +16,9 @@
 **上一轮实测出的两个真缺陷（D7-a / D7-b）和一个交付包事故（D8）本轮全部修掉了**，
 实测数字：**集群层 `PASS=34 FAIL=0`**（上一轮 2 FAIL）、**回归矩阵 `PASS=47 FAIL=0 SKIP=4`**（与基线逐条一致）。
 
-**但开工前重新核对依赖解析时，推翻了上一轮存档里的 7 处结论** —— 其中 3 处直接改变了工作范围，
+**但开工前重新核对依赖解析时，推翻了上一轮存档里的 7 处结论**
+（下表是影响面最大的 5 处，**完整清单见上一轮存档 §十**）——
+其中 3 处直接改变了工作范围，
 1 处推翻了一个「结论对、推理错」的机制说明。
 
 | # | 上一轮的说法 | 本轮的实测 |
@@ -138,6 +141,19 @@ SUMMARY: PASS=47 FAIL=0 SKIP=4        （与上一轮基线逐条一致）
 ⇒ **D8 未复发**。
 **`mvnRepo` 全量扫描：2026-11-02 12:00 之后被修改的文件数 = 0** ⇒ 本轮**绝不 install** 守住了。
 
+> 📌 **扫的是哪一个 `mvnRepo`？（下一轮别扫错地方得出假绿）**
+>
+> 本机有**两个** Maven 仓库，**两个都扫了，结果都是 0 改动**：
+>
+> | 仓库（绝对路径） | 是什么 | `com\sac\platform` 下的模块数 | 有 `rtdata-module` 吗 |
+> |---|---|---|---|
+> | `%USERPROFILE%\.m2\repository`<br>（本机：`C:\Users\蔡雷鸣\.m2\repository`） | Maven **默认**的本地仓库 | **6** 个<br>（`actuator` / `menuservice` / `model-service` / `realserver-oms` / `systemconfig-service` / `userservice`） | ❌ **没有** |
+> | **`D:\java\apache-maven\mvnRepo`** | `settings.xml` 里配的**真正共享库**（本轮离线编译用的就是它） | **57** 个模块目录（其中 **40** 个带 `1.0.14` 的 jar） | ✅ **有**（`1.0.14` + `3.0.0` 都在） |
+>
+> ⚠️ **只扫 `%USERPROFILE%\.m2\repository` 会得出假绿** ——
+> 那里面**根本没有 `rtdata-module`**，`mvn install` 也不会碰到它。
+> **本轮的「0 改动」结论建立在两个仓库都扫过的基础上。**
+
 ### 3.4 门户未受影响 —— **6 处差异，全部同源**
 
 ⚠️ **本轮开工时 Docker Desktop 被重启过** → 门户容器跟着重启了
@@ -241,30 +257,40 @@ portal napstar info 表数 **30** → **30** · image id **同** · databases �
 ### 6.1 提交列表（本轮）
 
 ```
+bc9cc24 docs(hd): record the cluster fix session and correct the precedence conclusion
 c544f0b fix(hd): make the jar each app was started from visible
 2739e9b fix(hd): drop the two Nacos dataIds that the install package does not ship
 6ff7c0c test(hd): cover the ampersand split in the standalone write path
 ed7b06f test(hd): give the delivery tree's platform sources real coverage
 0af6982 fix(hd): align the delivery tree's platform sources with the baseline
-794d97a fix(hd): align the cluster branch comments with the baseline tree
-e39e3da fix(hd): add the cluster branch to the delivery tree's monitor call sites
 530b606 docs(hd): add -llr to the offline maven commands and fix the branch counter
+794d97a fix(hd): add the cluster branch to the delivery tree's monitor call sites
+e39e3da fix(hd): add the cluster branch to the delivery tree's monitor call sites
+c1626db docs(hd): add the implementation plan for the delivery tree cluster fix
 5ef91b5 docs(hd): correct the call site classification in the spec
 cd1371a docs(hd): confirm the design and the D2 scope
 8bca98e docs(hd): correct the D2 rationale -- version ranges pick, installs do not overwrite
 9db2e4a docs(hd): design the delivery-tree cluster fix after re-checking dependency resolution
-c1626db docs(hd): add the implementation plan for the delivery tree cluster fix
 ```
 
+> 📌 **`794d97a` 与 `e39e3da` 的标题逐字相同** —— 这是 `git log` 的原样
+> （`794d97a` 是 `e39e3da` 的**后续提交**：只补了三处写路径的注释，
+> commit body 里写的是「Comments only, no logic changes」，
+> 提交时**沿用了同一个标题**）。
+> ⇒ 本列表的标题一律**照抄 `git log`**，不做「按内容改写」。
+
 （本轮起点：`54346d4` docs(hd): correct the D8 timeline and record how the platform jars are resolved）
+（本存档自身的提交：`bc9cc24`）
 
 ### 6.2 树 A 的完整 diff（归档）
 
 `docker/hd-napstar/patches/2026-11-02-treeA-cluster-fix.patch` —— **95847 字节 / 12 个文件**。
 相对路径、无 BOM、`git apply --check -p1` 通过、apply 后 12/12 与树 A 现文件 SHA256 全等。
 
-⚠️ **应用前要设 `core.autocrlf=false`** —— 树 A 的 11 个原始文件是**混合行尾**（6 CRLF + 5 LF，
-逐文件内部一致）。`autocrlf=true` 的环境会把 5 个 LF 文件翻成 CRLF（内容语义相同，字节不同）。
+⚠️ **应用前要设 `core.autocrlf=false`** —— 树 A 的这 **12 个**文件是**混合行尾**
+（**7 CRLF + 5 LF**；其中 **9 个**是树 A 原有文件、**3 个**是本轮新增，
+逐文件内部一致）。`autocrlf=true` 的环境会把 5 个 LF 文件翻成 CRLF
+（内容语义相同，字节不同）。
 
 ### 6.3 脚本清单（本轮改动的）
 
@@ -298,8 +324,18 @@ c1626db docs(hd): add the implementation plan for the delivery tree cluster fix
 | **7** | **`application/backend-gd/` 是同一批代码的副本目录** | 🟡 | 不参与发版，但留着不改以后会再咬人 |
 | **8** | **基线的几个次要设计问题** | 🟢 | `FailSetCounter` 只写不读（没接出口）· `add(data.size())` 的单位在集群/单机两条路上不一致（点数 vs 记录数）· `wirteOmsPip` 去 `@Async` 后写操作占用 `consumerRunExecutor`（core=16 + CallerRunsPolicy → Redis 故障时可能反压到 Kafka 消费线程）· `processItem` 异常时 `return 0` 会丢掉该 item 已累计的 fieldCount · `CacheServiceImpl` 单机分支的 try/catch 粒度比集群分支粗。**这些都是基线设计，本轮「与基线对齐」时没改** |
 | **9** | **平台基线树的其它业务逻辑差异** | 🟡 | 树 A 的 platform 源码与基线 1.0.14 在**业务逻辑**上也有差异（本轮只对齐了影响集群能力的 4 个类）⇒ 见 D9 |
+| **10** | **`sac` / `cmt` / `hds` 的建表 DDL** | 🔴 | **上一轮遗留，本轮未处理**。挡住 `transformNapstarModel`。平台上 `SystemTable.sql` 是 **MySQL 方言**（不是 PG 方言）→ 要转换 |
 
 > **🚫 明确不做**：`hisDataProducer` / `hisDataSend` 的 PG 驱动缺失（D1，用户已决定不修改这两个模块）。
+
+> 📌 **第 6 / 7 / 8 条不在缺陷清单里** ——
+> `docker/hd-napstar/DEFECTS.md` 的汇总表**没有对应的行**
+> ⇒ **这三条是本轮新记的**（记在本存档里），不要在缺陷清单里找不到就以为它们不存在。
+>
+> 📌 **D6 = 已接受**（密码走命令行，与仓库现有惯例一致），
+> **生产解法待定**。⚠️ 但补一条本轮复核后的结论：**交付树**编出来的 jar 里
+> `oms:` 块是**注释着的** ⇒ **Nacos 赢** ⇒ **生产上不必把密码放命令行**，
+> 在 Nacos 里配好三个 dataId 即可（详见 `docker/hd-napstar/DEFECTS.md` 的 D6 节）。
 
 ---
 

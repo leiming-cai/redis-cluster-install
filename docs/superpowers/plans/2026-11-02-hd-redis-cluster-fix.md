@@ -99,7 +99,7 @@
 ## Task 0: 前置 —— 起 Docker、快照树 A 原始文件、记录基线 md5
 
 **Files:**
-- Create: `.hd-work/treeA-baseline/`（10 个文件的原始副本）
+- Create: `.hd-work/treeA-baseline/`（**9 个文件**的原始副本；另 3 个是新增文件，无原件可快照）
 - Create: `.hd-work/mvnrepo-baseline.md5`（`mvnRepo` 里关键 jar 的 md5）
 
 - [ ] **Step 1: 确认 Docker 在跑**
@@ -112,7 +112,7 @@ Expected: 能连上 Docker Desktop，列出 `hd-node1`。
 **若报 `failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`** →
 先启动 Docker Desktop，等到 `docker ps` 能用，**再往下走**。
 
-- [ ] **Step 2: 快照树 A 的 10 个待改文件**
+- [ ] **Step 2: 快照树 A 的 9 个待改文件**（`FailSetCounter.java` 等 3 个是新增文件，无原件可快照）
 
 ```powershell
 $code = "D:\work\info\web\extendsystem\华盾-napstar2.0\code"

@@ -92,7 +92,7 @@ ERROR ... IllegalStateException: Cannot load driver class: org.postgresql.Driver
 
 ---
 
-## 🟡 D2（安装包缺口）Nacos 导出包少了 3 个 dataId
+## 🟡 → ✅ D2（安装包缺口，**2026-11-02 已在交付树实施**）Nacos 导出包少了 3 个 dataId
 
 详见 [`NACOS-GAPS.md`](NACOS-GAPS.md)。
 
@@ -235,11 +235,16 @@ jmxUrl: {}          ← 来自 icms-controller.yaml 的 dashboard.jmx
 > `application.yml` —— 而那个文件里的 `oms:` 是**集群占位符**，不是华盾的部署配置。
 > 改配置要改**真正被部署的那棵树**（华盾交付树），否则编出来的东西带着别处的配置。
 >
-> 📌 **现状**：D2 本身（dataId 名对不上）**已经被 (a) 解决了**（在门户树里）。
+> 📌 **现状（2026-11-02 更新）**：D2 本身（dataId 名对不上）**已经被 (a) 解决了**（在门户树里）。
 > 但那份 jar **没有留在交付树** —— 交付树的 `bootstrap.yml` 仍然是引用那两个
 > 不存在的 dataId 的状态。
-> ⇒ **D2 在华盾交付树里还没修**（选项 (a) 要在交付树上重做一遍），
->    **但绝不能直接拿门户树编出来的 jar 去部署**（那就是 D8 的成因）。
+> ⇒ **D2 已于 2026-11-02 在交付树实施**
+> （`bootstrap.yml` 改成 `shared-configs: []` + 只留 `napstarmappingconfig.yaml`，
+> 改后与基线树同名文件 **SHA256 全等**）+ **从交付树重编了 `model-controller`**
+> （md5 `0ce5a08a…`）⇒ **D8 一并解决**。
+> ⇒ ⚠️ **历史上曾写过「D2 在华盾交付树里还没修」**
+> —— **那半句已过时**（见汇总表 D2 行）；但**「绝不能直接拿门户树编出来的 jar 去部署」
+> 仍然成立**（门户树那份 jar 带着门户树的 `application.yml`，那就是 D8 的成因）。
 
 ---
 
@@ -322,7 +327,7 @@ entrypoint 的提交记录。`node2` 必须指向 hd-node2 容器的**真实 IP*
 
 ---
 
-## 🟡 D6（运维可接受，但生产要改）Redis 密码出现在 JVM 命令行上
+## 🟡 D6（**已接受**：密码走命令行；**生产走 Nacos**，不必上命令行）Redis 密码出现在 JVM 命令行上
 
 > **本轮不阻塞。** 记录下来是因为 Task 7 要在这里写文档，
 > 而且生产环境的最终答案跟这里不一样。
@@ -344,10 +349,19 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 | 优先级 | 来源 | 结果 |
 |---|---|---|
 | 1（最高） | **命令行 `--oms.*`** | ✅ **赢** |
-| 2 | jar 内 `application.yml` | ✅ **赢过 Nacos** |
-| 3（最低） | Nacos dataId 里的 `oms:` | ❌ **输** |
+| 2 | jar 内 `application.yml` | ✅ **赢过 Nacos** —— **只在 jar 里有**活的** `oms:` 块**时才成立** |
+| 3（最低） | Nacos dataId 里的 `oms:` | ❌ **输**（同上前提：jar 里有活的 `oms:` 块） |
+
+⚠️ **第 2 位的成立条件是「jar 里有活的 `oms:` 块」。**
+**交付树**编出来的三个 jar（`web-controller` / `model-controller` / `rtdata-consumer`）里
+`oms:` 块是**注释着的**（实测 `web-controller:108` / `modelserver/controller:92` /
+`rtdata-consumer:43`）⇒ **jar 不覆盖 Nacos ⇒ Nacos 的 `oms:` 赢**。
 
 **证据**（2026-11-01/02 实测）：
+
+> ⚠️ **这组证据取自门户树编的 jar（`c41735d8…`），不是交付树编的。**
+> 门户树那份的 `application.yml` 里 `oms:` 是**活的**（`redisMode: cluster` +
+> `clusters: [127.0.0.1:6379]` + 空密码），所以 jar 才压过 Nacos。
 
 - 给 Nacos 的 `icms-controller.yaml` 的 `oms:` 加 `redisMode: standalone`，
   启动日志**仍然是**
@@ -357,14 +371,21 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
   `--oms.redisMode=standalone --oms.hostname=node1 --oms.port=6379 --oms.password=sac888`
   就变成 `*** Using Redis Standalone at node1:6379`，**立刻生效**。
 
-⇒ **jar 里的 `oms:` 压不过 Nacos 这句话是错的** ——
-是 **Nacos 压不过 jar**。所以 Nacos 里改 `oms:` **没有用**，
-只能走命令行 —— 见 `scripts/start-hd-apps.sh` 的 `HD_REDIS_CLUSTER=1` 开关。
+⇒ **「jar 里的 `oms:` 压不过 Nacos 这句话是错的」** ——
+在**门户树**那种 jar 上，是 **Nacos 压不过 jar**；所以在**那份 jar** 上
+Nacos 里改 `oms:` **没有用**，只能走命令行 ——
+见 `scripts/start-hd-apps.sh` 的 `HD_REDIS_CLUSTER=1` 开关。
+⇒ **但交付树编的 jar 不是那样**（`oms:` 注释着）→ **Nacos 侧改 `oms:` 是有效的**。
 
 > 📌 **连带影响**：`docs/OPERATIONS.md` §4.5 原本要求
 > 「`oms:` 要在**三个** Nacos dataId 各填一份」——
-> **在当前这套配置下那条指引不生效**（jar 的 `oms:` 赢）。
-> 已于 2026-11-02 修正 §4.5，并补上实测优先级表。
+> **在门户树那种 jar 下那条指引不生效**（jar 的 `oms:` 赢）。
+> **2026-11-02 复核后已回改 §4.5**，改成
+> 「**生效，但前提是 jar 里没有活的 `oms:` 块**」，并补上实测优先级表。
+>
+> 📌 **本轮（2026-11-02 交付树实测）**：部署的三个 jar 都是**交付树**编的
+> ⇒ `oms:` 注释着 ⇒ **Nacos 赢** ⇒ 实测启动日志是
+> `*** Using Redis Standalone at node1:6379`（不是 Cluster）。
 
 ### 本轮接受的理由
 
@@ -372,9 +393,20 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 `scripts/import-hd-nacos-configs.sh` 里），`docs/OPERATIONS.md` §4.4.5
 也正是记录这种命令行传参形式 —— 跟现有惯例一致。
 
-### 生产的真正解法（**本轮不做**）
+> 📌 **本轮接受的状态不变**（测试环境用命令行传密码）。
+> 但**生产不必上命令行**：交付树编的 jar 里 `oms:` 块是**注释着的**
+> ⇒ **Nacos 的 `oms:` 生效** ⇒ 生产上**在 Nacos 里配好**三个 dataId 即可。
+> （命令行那条路是**测试环境**切集群的手段 ——
+> 见 `scripts/start-hd-apps.sh` 的 `HD_REDIS_CLUSTER=1`。）
 
-不是靠命令行参数，而是改 jar 里的 `oms:` 块本身：
+### 生产的真正解法（**已明确**：走 Nacos，不必上命令行）
+
+**交付树**编出来的 jar 里 `oms:` 块是**注释着的** ⇒ **Nacos 的 `oms:` 生效**
+⇒ 生产上**在 Nacos 里配好**三个 dataId（`icms-controller.yaml` /
+`icms-real-controller.yaml` / `napstarweb-controller.yaml`）就行，
+**不必**把密码放命令行。
+
+只有当部署的是**门户树**那种 jar（`oms:` 是活的）时，才需要二选一：
 
 1. 改 `application.yml` 里的 `oms.clusters` / `oms.password`，或
 2. 走 `bootstrap.yml` 的 override 开关，把敏感值从 Nacos 侧注入，**不进命令行**。
@@ -384,8 +416,11 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 
 ---
 
-## 🔴 D7（集群模式接入实测）集群补丁只落在 platform 侧 —— 集群模式下功能静默失效
+## 🔴 → ✅ D7（集群模式接入实测，**两条都已修**）集群补丁只落在 platform 侧 —— 集群模式下功能静默失效
 
+> ✅ **2026-11-02：D7-a 与 D7-b 都已修**（详见汇总表 D7-a / D7-b 行）。
+> 下面正文记录的是**修之前**的状态与推理过程。
+>
 > **2026-11-01 实测**（`scripts/hd-cluster-app-test.sh`，三个应用各一条判据）。
 > 本条记录两个**互相独立**的缺陷：
 > **D7-a** 是 application 侧的调用点根本没有集群分支，
@@ -420,8 +455,11 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 > 所以本文里凡是提到「交付树」「portal/SVN 树」，都指上表这两棵，
 > 不再用含糊的「源码树」。
 
-### D7-a — 集群补丁只落在 platform 侧，application 侧的调用点从来没跟上
+### D7-a — 集群补丁只落在 platform 侧，application 侧的调用点从来没跟上（**已修**，详见汇总表）
 
+> ✅ **2026-11-02 已修**（monitor **4 个文件 6 处** + 平台侧 4 个类与基线对齐）。
+> 下面正文记录的是**修之前**的状态与推理过程。
+>
 > 📌 **标题在 2026-11-02 改过。**
 > 原来叫「集群补丁从未进入 napstar2.0 交付树」——
 > **不够准确**：它让人以为「把补丁搬进交付树」就完事了。
@@ -691,7 +729,7 @@ strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的�
 
 ##### 交付树的写路径文件逐个核对
 
-| 文件（**树 A** = 交付树） | `isCluster` | `@Async` | `.join()` | `writeWithRetry` |
+| 文件（**树 A** = 交付树）· **改前实测（2026-11-02 之前）** | `isCluster` | `@Async` | `.join()` | `writeWithRetry` |
 |---|---|---|---|---|
 | `napstarweb/monitor/.../services/impl/SVGCacheServiceImpl.java` | **0** | 0 | 0 | 0 |
 | `napstarweb/monitor/.../kafka/RTListener.java` | **0** | 0 | 0 | 0 |
@@ -699,6 +737,11 @@ strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的�
 | `napstarweb/monitor/.../services/CalculateService.java` | **0** | 0 | 0 | 0 |
 | `realserver/plugins/rtdata-module/.../RedisRealDataServiceImpl.java` | **0** | **1** | **0** | **0** |
 | `realserver/plugins/rtdata-module/.../OmsWriteByKafkaServiceImpl.java` | **0** | 2 | **0** | **0** |
+
+> 📌 **上表是「改前」的实测**（2026-11-02 之前），**留档用**。
+> **改后**：`monitor` 的 **4 个文件 6 处**都加了集群分支，
+> 平台侧（`rtdata-module` / `model-service`）的 4 个类已与基线 `1.0.14` 对齐
+> ⇒ **详见汇总表 D7-a / D7-b 行**。
 
 对照**树 B**（同样的文件路径）：
 
@@ -775,7 +818,16 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 （`scripts/hd-cluster-app-test.sh` 的 A2 判据已经按这个事实改成
 「元数据表是空就**跳过**并说明原因」，不再报 FAIL。）
 
-#### 修法
+#### 修法（**2026-11-02 已实施**）
+
+> ✅ **本轮已实施**：**monitor 4 个文件 6 处**（`SVGCacheServiceImpl` /
+> `RTListener` / `SVGParseService` ×2 / `CalculateService` ×2）
+> + 平台侧 4 个类与基线 `1.0.14` 对齐。
+> ⇒ **本小节下面说的「5 个文件」是**改前**的快照，不是现在的状态**；
+> 现在的状态见汇总表 D7-a / D7-b 行。
+> （⚠️ 另外：改前的「**6 处**」与「**5 个文件**」不矛盾 ——
+> 6 处分布在 monitor 的 **4 个文件**里，合计 5 个文件是**加上**
+> 平台侧 `rtdata-module` 的那 **1 个**文件。）
 
 ⚠️ **单纯「重新编译并重新部署」解决不了这个问题** ——
 树 A 重新编译产出的 jar 与现在部署的**字节相同**（md5 `340d66a5…`）。
@@ -799,7 +851,7 @@ real_graph:* key 数 = 0      ← 单机模式也没有
    而那份二进制**本身就是带集群分支的**（见上面「共享模块那份二进制」的实测）。
 
    要改的调用点（**这 5 个文件**就是集群模式下发版的那两个模块里
-   所有用 `executePipelined` 的地方）：
+   所有用 `executePipelined` 的地方 —— **这是「改前」的清单**）：
 
    ```
    application/backend/napstarweb/monitor/src/main/java/com/sac/application/napstarweb/monitor/kafka/RTListener.java
@@ -931,8 +983,10 @@ real_graph:* key 数 = 0      ← 单机模式也没有
        | xargs grep -L 'isCluster'      # 这些文件就是漏网的
      ```
 
-     实测（树 A，限定后）：**5 个文件**，**5 个都缺** `isCluster` ——
+     实测（树 A，限定后，**改前**）：**5 个文件**，**5 个都缺** `isCluster` ——
      正好是上面列的那 5 个。这是一个**第一天就报 5 条、修完就归零**的门禁。
+     （✅ **改后实测**：部署的 `monitor-3.0.0.jar` 里含 `isCluster` 的 class
+     由 **0 → 4**，6 处 `executePipelined` **全部**在 `else` 分支里。）
 
    —— 没有这两道门禁，「树里没打补丁」会**静默**再次发生
    （重新编译照做、部署照做，问题一点没变）。
@@ -976,13 +1030,17 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 > 出现在集群里、且能读回载荷」**跑通了**（2026-11-02 实测 PASS）。
 > ⇒ **动态覆盖只有 `rtdata` 侧，`monitor` 侧没有。**
 
-### D7-b — `batchWirtePip` 把 `CompletableFuture` 丢掉了（**交付树里依然存在**，重新编译也修不掉）
+### D7-b — `batchWirtePip` 把 `CompletableFuture` 丢掉了（**已修**，详见汇总表）
+
+> 📌 **本节正文记录的是「修之前」的状态**（当时部署的 jar 的字节码）。
+> **2026-11-02 已修**（源码对齐 + 二进制换基线）——
+> 修法与现状见下面的「修法」一节与汇总表 D7-b 行。
 
 #### 现象
 
 `rtdata-consumer` 在集群模式下写 Redis 失败，**日志里一个异常都没有**。
 
-#### 根因
+#### 根因（修前）
 
 部署产物里 `OmsWriteByKafkaServiceImpl.batchWirtePip` 的字节码：
 
@@ -997,6 +1055,11 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 既不进日志，也不进 stderr。
 
 ⚠️ **`@Async` 的位置 —— 交付树（树 A）和 portal/SVN 树（树 B）不一样**：
+
+> 📌 **下面这一段是「改前」的实测**，对象是**改前**部署的
+> `rtdata-module-3.0.0.jar`（= 树 A **改前**编译的产物）。
+> **树 A 的源码已于 2026-11-02 与基线 `1.0.14` 对齐**
+> ⇒ **改后的状态见下面那张表的「改后」列。**
 
 `javap -v` 显示，**部署产物** `rtdata-module-3.0.0.jar`（= 树 A 编译的）里
 带 `@Async` 的方法是：
@@ -1013,19 +1076,19 @@ OmsWriteByKafkaServiceImpl.batchWirtePip      -> @Async("consumerRunExecutor")
 
 **两棵树的对照**（这是本条的关键 —— 别拿树 B 去推断交付树的行为）：
 
-| | **树 A（交付树）** | **树 B（portal/SVN 树）** |
-|---|---|---|
-| `RedisRealDataServiceImpl.wirteOmsPip` | **仍带 `@Async`** | 不带 `@Async`（类的 javadoc 明写「本类不再标注 @Async」，方法注释写「本方法为同步执行，异常直接抛给调用方」） |
-| `OmsWriteByKafkaServiceImpl.batchWirte` / `batchWirtePip` | **仍带 `@Async`**（2 处） | 同样带 `@Async(value = "consumerRunExecutor")` |
-| 谁 `join()` | **没有人**（`.join()` = 0） | `writeWithRetry(...)` 里 `.join()`（2 处，`writeWithRetry` 4 处） |
-| `isCluster` | **0** | 6 |
+| | **树 A（交付树）· 改前** | **树 A（交付树）· 改后（2026-11-02）** | **树 B（portal/SVN 树）** |
+|---|---|---|---|
+| `RedisRealDataServiceImpl.wirteOmsPip` | **仍带 `@Async`** | **不带 `@Async`**（与基线 `1.0.14` 逐字节相同；javadoc 明写「不再标注 `@Async`」） | 不带 `@Async`（类的 javadoc 明写「本类不再标注 @Async」，方法注释写「本方法为同步执行，异常直接抛给调用方」） |
+| `OmsWriteByKafkaServiceImpl.batchWirte` / `batchWirtePip` | **仍带 `@Async`**（2 处） | 仍带 `@Async(value = "consumerRunExecutor")`（2 处，**与基线一致**） | 同样带 `@Async(value = "consumerRunExecutor")` |
+| 谁 `join()` | **没有人**（`.join()` = 0） | **`writeWithRetry(...)` 里 `.join()`**（与基线一致） | `writeWithRetry(...)` 里 `.join()`（2 处，`writeWithRetry` 4 处） |
+| `isCluster` | **0** | **有**（`redisClusterHelper.isCluster()` 集群分支，与基线一致） | 6 |
 
-> 📌 **也就是说：D7-b 是交付树（树 A）里的一个活的缺陷**，
+> 📌 **也就是说：D7-b 曾经是交付树（树 A）里的一个活的缺陷**，
 > **不是**「树 B 已经修好了、只是 jar 没重建」：
-> > - 交付树里 `wirteOmsPip` **还挂着 `@Async`**，
+> > - 改前，交付树里 `wirteOmsPip` **还挂着 `@Async`**，
 > >   `OmsWriteByKafkaServiceImpl` **还是没有 `.join()`**。
 > >
-> > ⇒ **从交付树重新编译，这个静默失败照样存在** ——
+> > ⇒ **只从交付树重新编译，这个静默失败照样存在** ——
 > >   D7-a 修完（集群分支移植进来）之后，
 > >   `executePipelined` 在集群模式下**会**开始抛
 > >   `UnsupportedOperationException`，而**这个异常仍然会被静默吞掉**。
@@ -1034,6 +1097,13 @@ OmsWriteByKafkaServiceImpl.batchWirtePip      -> @Async("consumerRunExecutor")
 >
 > 修 D7-b 时要**一并把树 B 的 `.join()` + `writeWithRetry` 那套移植过来**
 > （或等价的写法），**不能只修树 B**。
+>
+> ✅ **2026-11-02 本轮已实施**：树 A 的 `rtdata-module` 源码与基线 `1.0.14`
+> **对齐**（`writeWithRetry` + `.join()` + 去 `@Async`）+ **12 条 Mockito 单测**
+> （含**变异测试**证明：删掉写入体 / 禁用 `&` 拆分 → 各有 1 条失败）；
+> **交付物里装的就是基线 `rtdata-module-1.0.14`**
+> （实测 jar 里 `BOOT-INF/lib/rtdata-module-1.0.14.jar`）
+> ⇒ **判据 C2 / C3 本轮 PASS**（详见汇总表 D7-b 行）。
 
 同一次测量（部署产物 `rtdata-module-3.0.0.jar`，= 树 A 的产物）：
 
@@ -1054,7 +1124,7 @@ OmsWriteByKafkaServiceImpl : A=0  B=0  C=0   Async=1  consumerRunExecutor=1  Com
 D7-b 让这个失效**连日志都不留**。只修 D7-a 不修 D7-b，
 现场会从「静默丢数据」变成「静默丢数据（异常被吞，但异常换了一个）」。
 
-#### 修法
+#### 修法（**2026-11-02 已实施**）
 
 跟树 B 的 `OmsWriteByKafkaServiceImpl.writeWithRetry` 的思路一致，
 **但要移植进交付树（树 A）**：
@@ -1068,10 +1138,10 @@ D7-b 让这个失效**连日志都不留**。只修 D7-a 不修 D7-b，
    或者调用方改成同步调用并 `join()`。
 
 > 📌 **树 B 已经做到了**（`writeWithRetry(...)` + `.join()`，
-> 见上面那张对照表），但**树 A（交付树）还没有**，
+> 见上面那张对照表），改前**树 A（交付树）还没有**，
 > 而**部署的 jar 正是树 A 编译的**。
 > 所以：
-> - **光重新编译没用** —— 树 A 现在编译出来的 jar 与部署的那个字节相同；
+> - **光重新编译没用** —— 改前树 A 编译出来的 jar 与部署的那个字节相同；
 >   必须把树 B 的 `.join()` / `writeWithRetry` / 去 `@Async` **移植进树 A**。
 > - 移植之后，rtdata-consumer 的集群模式写失败会从「静默」变成**看得见的报错**，
 >   这才是 D7-b 想要的终态；
@@ -1086,9 +1156,12 @@ D7-b 让这个失效**连日志都不留**。只修 D7-a 不修 D7-b，
 
 ---
 
-## 🟡 D8（交付包差异）`model-controller` 的 jar 被换成过一份 —— 换回来之后它**在 standalone 模式下起不来**
+## 🟡 → ✅ D8（交付包差异，**已修**）`model-controller` 的 jar 被换成过一份 —— 换回来之后它**在 standalone 模式下起不来**
 
 > **发现于 Task 6（回归验证轮）。**
+> ✅ **本轮已修（2026-11-02）** —— 从**交付树**重编了 `model-controller`
+> （md5 `0ce5a08a…`，`oms:` 注释着 ⇒ Nacos 赢）⇒ **重新起得来**。
+> 详见汇总表 D8 行；下面正文记录的是**修之前**的状态与机制。
 > 这条**不是**本轮集群工作引入的，也不是 D7 的一部分 ——
 > 它解释的是「为什么回归矩阵的 A 段现在跑不出基线的 `PASS=47 FAIL=0`」。
 > **不修它，回归矩阵就有 2 条恒定 FAIL（`A2 model-controller` / `A2b model-controller`）**，
@@ -1233,7 +1306,7 @@ awk '/^oms:/{f=1} f&&/^[a-zA-Z]/&&!/^oms:/{exit} f' mcyml/BOOT-INF/classes/appli
   要么②跑矩阵时用 `HD_REDIS_CLUSTER=1` 起 `model-controller`
   并**相应改掉 A2/A2b 的判据**（它们现在写死了「必须是 STANDALONE」）。
 
-### 修法（**本轮不做**，Task 7 决定）
+### 修法（**2026-11-02 已实施**）
 
 1. **正解**：**从华盾交付树重新编译** `model-controller`（那份树的 `application.yml`
    里 `oms:` 是注释掉的、`password: sac888`），并把 D2 选项 (a) 的改动
@@ -1242,6 +1315,7 @@ awk '/^oms:/{f=1} f&&/^[a-zA-Z]/&&!/^oms:/{exit} f' mcyml/BOOT-INF/classes/appli
    ⇒ **一次改动同时解决 D2（在交付树里没修）和 D8（jar 带着别处的配置）。**
    ⇒ 编之前**先核对** `target/classes/application.yml` 里的 `oms:` 块跟
    交付树源文件一致 —— 这是「jar 里的配置跟树对得上」的最小检查。
+   ✅ **本轮已实施**（新 jar md5 `0ce5a08a…`，`oms:` 注释着 ⇒ Nacos 赢）。
 2. **临时绕过**：跑回归前把 `/opt/hd/jar-backup-d2/model-controller-3.0.0.jar` 拷回去
    （**注意：这会让 `model-controller` 用旧二进制**，D7 说的「集群补丁没进交付树」依然成立）。
 3. **改判据**：让 A2/A2b 接受「STANDALONE 或 CLUSTER」——
@@ -1250,6 +1324,13 @@ awk '/^oms:/{f=1} f&&/^[a-zA-Z]/&&!/^oms:/{exit} f' mcyml/BOOT-INF/classes/appli
 
 ### ⚠️ 一个**必须记住**的操作残留
 
+> ⚠️ **本节记录的是 `c41735d8…` 那份 jar（门户树编的）的残留；
+> 本轮已换成交付树编的 `0ce5a08a…`**
+> （`oms:` 注释着 → Nacos 赢）⇒ **重新起得来，残留已消除**。
+> 旧的仍备份在 `/opt/napstar_app/backup-20261102/`。
+> ⇒ 下面这段的机制（**jar 文件换回 ≠ 运行中的 JVM 换回**）**依然要记住**，
+> 但它描述的**具体那份 jar 已经不是当前部署的那一份了**。
+
 把 jar 文件换回去**不等于**把已经跑起来的 JVM 换回去 ——
 JVM 启动时就把 jar 里的 class 读进内存了，之后改磁盘上的 jar
 对**已在运行的进程**没有任何影响。
@@ -1257,12 +1338,15 @@ JVM 启动时就把 jar 里的 class 读进内存了，之后改磁盘上的 jar
 ⇒ Task 6 做对照实验时：`model-controller` 那个进程**仍然是**用
 `064ba5fa` 那份起的（它的日志里还是 `Using Redis Standalone at node1:6379`），
 即使 jar 文件已经换回 `c41735d8`。
-⇒ **下次重启 `model-controller` 时，它会重新读当前那份 `c41735d8` 的 jar，
-就会又变成「起不来」。** 这不是回归，是 D8 本身。
-⇒ **在 D8 修掉之前，任何一轮回归都必须显式确认 model-controller 是怎么起来的**
+⇒ **当时**（磁盘上是 `c41735d8` 那份时）**下次重启 `model-controller`**，
+它会重新读那份 jar，**就会又变成「起不来」**。这不是回归，是 D8 本身。
+⇒ **现在**：磁盘上已经是交付树编的 `0ce5a08a…` ⇒ **重启后起得来**（实测
+`*** Using Redis Standalone at node1:6379`，致命错误 0）。
+⇒ **但机制本身仍然成立** —— **在 D8 修掉之前，任何一轮回归都必须显式确认
+model-controller 是怎么起来的**
 （用哪份 jar、有没有 `HD_REDIS_CLUSTER=1`），否则 A 段的数字不可比。
 
-#### 📌 2026-11-02 复核：残留**仍然是潜伏的**（跟上面那段一致）
+#### 📌 2026-11-02 复核：残留**当时**仍然是潜伏的（**历史记录**；该残留对象已不存在）
 
 > ⚠️ **先说清楚**：这个复核**推翻了**一版更激进的说法。
 > 那一版写的是「残留已经变成活的」「下次重启会再起不来 —— 这不是假设，是可复现的」。
@@ -1293,13 +1377,20 @@ JVM 启动时就把 jar 里的 class 读进内存了，之后改磁盘上的 jar
 - 覆盖发生在 **03:36:09**，比 JVM 启动（03:34:36）**晚 93 秒** ——
   **JVM 起来时读到的还是旧内容**，之后文件被原地覆盖（同一 inode）它也不受影响。
 
-⇒ **结论（「下次重启会失败」）仍然成立** —— 磁盘上的确是 `c41735d8`。
+⇒ **结论（「下次重启会失败」）在当时成立** —— 那时磁盘上的确是 `c41735d8`。
 ⇒ **但残留仍然是潜伏的**，跟上文那段说的一致。
 ⇒ ⚠️ **这一版的错误是「假红」的镜像**（见会话存档 §7.2：
 「假绿比假红更危险」的另一面）——
   声称「已经可复现」会让读者以为**现在**就该看到 NOAUTH，
   而实际上**现在跑得好好的**。
   **「结论对、推理错」比「结论错」更难发现** —— 所以它必须逐条拿证据核。
+
+> 📌 **本节是 2026-11-02 03:36 那份磁盘状态的历史记录。**
+> **那一轮的结论（磁盘上是 `c41735d8` ⇒ 重启会起不来）已经因为
+> 本轮换成交付树编的 `0ce5a08a…` 而不再成立** ——
+> 现在重启**起得来**（`oms:` 注释着 ⇒ Nacos 赢 ⇒
+> `*** Using Redis Standalone at node1:6379`，致命错误 0）。
+> 留这段是为了保住「**jar 文件换回 ≠ 运行中的 JVM 换回**」这条机制。
 
 ⇒ **每一轮回归的记录里都要写清 model-controller 是怎么起来的**
 （用哪份 jar、有没有 `HD_REDIS_CLUSTER=1`），否则 A 段的数字不可比。
@@ -1527,10 +1618,11 @@ mtime 2026-11-01 00:15~00:17 —— 上一轮有人 install 过）。
 | D3 | 🟡 | 安装包 | 本轮部署时补（`pg_hba.conf` + reload） |
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
-| D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。📌 **实测优先级**（2026-11-01/02）：**命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId** —— 但**只有当 jar 里有**活的** `oms:` 块时，jar 才压过 Nacos**。📌 **2026-11-02 复核更正**：**交付树**编出来的三个 jar 里 `oms:` 块是**注释着的**（`web-controller:108` / `modelserver/controller:92` / `rtdata-consumer:43`）⇒ **jar 不覆盖 Nacos ⇒ Nacos 的 `oms:` 生效** ⇒ 生产**不必**把密码放命令行（Nacos 里配就行）。上一轮那条「Nacos 压不过 jar」的证据取自**门户树**编的 jar（`c41735d8…`），**不是交付树的**。⇒ `docs/OPERATIONS.md` §4.5 已回改为「生效，但前提是 jar 里没有活的 `oms:` 块」 |
+| D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。📌 **实测优先级**（2026-11-01/02）：**命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId** —— 但**只有当 jar 里有**活的** `oms:` 块时，jar 才压过 Nacos**。📌 **2026-11-02 复核更正**：**交付树**编出来的三个 jar 里 `oms:` 块是**注释着的**（`web-controller:108` / `modelserver/controller:92` / `rtdata-consumer:43`）⇒ **jar 不覆盖 Nacos ⇒ Nacos 的 `oms:` 生效** ⇒ 生产**不必**把密码放命令行（Nacos 里配就行）。上一轮那条「Nacos 压不过 jar」的证据取自**门户树**编的 jar（`c41735d8…`），**不是交付树的**。⇒ `docs/OPERATIONS.md` §4.5 已**在 2026-11-02 复核后**回改为「生效，但前提是 jar 里没有活的 `oms:` 块」 |
 | D7-a | 🔴 → 🟡 | **集群补丁只落在 platform 侧，application 侧的调用点从来没跟上**（树 A `D:\work\info\web\extendsystem\华盾-napstar2.0\code`）。**platform 依赖不带 `<version>` → 由 `platform.version [1.0.0,2.0.0)` 解析到基线树编的 `1.0.14`**（那份二进制**带**集群类 ✅）；**树 A 自己编的 `monitor-3.0.0.jar` / `rtdata-module-3.0.0.jar` 不带**（`isCluster` = 0，`executePipelined` = 4 ❌）⇒ **同一个 jar 里混 1.0.14 和 3.0.0 两版 platform**） | ✅ **已修（2026-11-02）**：`napstarweb/monitor` 的 **6 处**（不是 5 处 —— `SVGParseService` ×2 / `CalculateService` ×2 / `SVGCacheServiceImpl` / `RTListener`）全部加了 `if (redisClusterHelper.isCluster())` 分支：写路径用 `redisTemplate.execute(cb)`（非 pipeline，按槽路由，多 key 也安全），多 key 读用 `oms` 的 `RedisClusterHashPipeline.getAllHashes` / `getAllValues`（**返回顺序与入参一致**）。**不需要新增模块**（`realserver-oms` 那份二进制本身已带集群分支）。📌 **实测**：部署的 `monitor-3.0.0.jar` 里含 `isCluster` 的 class 由 **0 → 4**；6 处 `executePipelined` **全部**在 `else` 分支里。🟡 **残留缺口**：`monitor` 这 6 处在本环境**运行时未覆盖**（模型元数据表空 → 图形解析路径跑不到；「启动无 UOE」是假绿）⇒ 只做了静态核验 + 逐处审阅，详见 D7-a 节末。📌 **修复点在 `monitor` 模块，不在 `web-controller`**（后者 9 个文件、零 Redis） |
 | D7-b | 🔴 → ✅ | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | ✅ **已修（2026-11-02）**，两条路径都通了：<br>**① 二进制**：部署的 `rtdata-consumer-3.0.0.jar` 里装的是**基线 `rtdata-module-1.0.14.jar`**（那份带 `writeWithRetry` / `.join()` / `isCluster` / `RedisClusterHashPipeline`）—— **重编本身就把 D7-b 修好了**（旧 jar 里装的是树 A 自编的无补丁 `rtdata-module-3.0.0`）。⇒ **判据 C2（发一条 INCDATA Kafka 消息 ⇒ 应用自己写的 `real_data:<otype>:<obid>` 进集群且能读回载荷）本轮 PASS**、C3（无 UOE）PASS。<br>**② 源码**：树 A 的 `rtdata-module` 源码也已与基线对齐（`RedisRealDataServiceImpl` / `OmsWriteByKafkaServiceImpl` / 新增 `FailSetCounter`），并补了 **12 条 Mockito 单测**（含**变异测试**证明：删掉写入体 / 禁用 `&` 拆分 → 各有 1 条失败）⇒ **防止将来切版本区间或发 1.0.15 时回退**。⚠️ **不是**「重编修不掉」了 —— 上一轮那个判断是基于「树 A 的源码不进包」这个当时的事实，而**重编的产物内容取决于版本区间，不取决于源码新旧** |
 | D8 | 🟡 → ✅ | **实施 D2 选项 (a) 时的副作用**（在**门户树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**门户树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与门户树产物**逐字节相同**） | ✅ **已修（2026-11-02）**：**从交付树重编** `model-controller`，并把 **D2 (a) 的改动做在交付树里**（`bootstrap.yml`：`shared-configs: []` + 只留 `napstarmappingconfig.yaml`；改后与基线树同名文件 **SHA256 全等**）⇒ **一次同时解决 D2 和 D8**。📌 **实测**：新 jar md5 `0ce5a08a…`（旧的 `c41735d8…` 已备份到 `/opt/napstar_app/backup-20261102/`）；jar 里 `application.yml` 的 `oms:` 块**是注释着的** → **Nacos 赢** → 启动日志 `*** Using Redis Standalone at node1:6379`，致命错误 0。📌 **并且**：重编后 jar 里的 platform 集合**与门户 jar 一致**（都是 `model-service-1.0.14` / `realserver-oms-1.0.14`）⇒ **重编不降集群能力**。⚠️ 「jar 文件换回 ≠ 运行中的 JVM 换回」这条教训已落成**可追溯机制**：`start-hd-apps.sh` 现在启动前打印 jar 的 **路径 + md5 + mtime**，回归矩阵的 A0 段也打印同样三项 ⇒ 换过 jar 的回归**必须**重跑，数字可不可比一眼能看出来 |
 | D9 | 🟡 | **本轮新发现**（版本区间） | 树 A 的 platform 源码比基线旧；`platform.version=[1.0.0,2.0.0)` 使交付物取基线 `1.0.14`（**带**集群补丁 ✅）。⇒ **切回 `[3.0.0,4.0.0)` 或发 `1.0.15` 就会静默降级**（不需要覆盖 1.0.14，**是区间挑版本**）。✅ 本轮已把影响集群能力的 4 个类与基线对齐 + 12 条单测兜底。🟡 **待交付方确认**：「先编 platform 再 install」是不是交付流程 ⇒ 在此之前**禁止 install 树 A 的 platform**，详见正文 |
+| D10 | 🔴 | 安装包 | **`sac` / `cmt` / `hds` 的建表 DDL 缺失** → 挡住 `transformNapstarModel`。平台上 `SystemTable.sql` 是 **MySQL 方言**（不是 PG 方言）→ 要转换。**上一轮遗留，本轮未处理** |
 | ⚙️-A | ⚙️ | **容器环境**（Docker Desktop 重启 → 容器非正常停 → ZK 里残留 ephemeral `/brokers/ids/<id>` → Kafka broker 启动即致命错误退出） | **待修（交付方）**：`hd-entrypoint.sh` 起 broker 前先清掉自己的 `/brokers/ids/<brokerId>`。🟡 **不是代码缺陷**，但会让应用层判据 C2 **静默不可执行**（长得跟 PASS 一模一样）。本轮已手工恢复（node1 755 / node2 756），详见正文 |
 | ⚙️-B | ⚙️ | **测试环境**（`/tmp/hd-token.txt` 里的 JWT 会过期） | **每次跑应用层判据前重新铸**：`bash /opt/hd/mint-hd-token.sh`。🟡 **不是代码缺陷**，但会让 B2 **必然**失败（HTTP 500 + Shiro 认证失败），**看起来像「应用写不进集群」**。本轮已重新铸（`exp = now + ~86400s`），详见正文 |

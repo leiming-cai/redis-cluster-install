@@ -885,13 +885,25 @@ oms:
 
 ### 4.3 Nacos：真值在哪
 
+> 🔴 **本节的优先级结论已被 §4.5「实测更正（2026-11-02 复核）」取代。**
+>
+> **现在的结论**：Nacos 的 `oms:` **赢** —— 前提是 **jar 里没有**活的** `oms:` 块
+> （**交付树**编出来的三个 jar 就是这样：块是注释着的）。
+> 只有**门户树**编的 jar 才带着活的 `oms:` 块，那种 jar 才压过 Nacos。
+>
+> ⇒ 本节下面第 3 点、以及末尾那张优先级表，都是**旧结论，仅留档**，**不要照着操作**。
+> **操作指引看 §4.5。**
+
 > ⚠️ **先读这一段再动手。** 三个应用**从 Nacos 拉的东西不一样** ——
 > 「把 `oms:` 统一放 `ext_base.yaml`」**只对 modelserver 成立**，
 > 另两个应用会**读不到**，直接落到本地 `application.yml` 的占位符上。
 >
 > 🔴 **但 2026-11-02 实测之后，这整段对 `oms:` 来说已经作废了** ——
-> `ext_base.yaml` **在安装包里不存在**，而且 Nacos 的 `oms:` **对三个应用一律不生效**
-> （jar 内的 `application.yml` 赢）。**下面那条 ⛔ 实测更正才是现在该读的。**
+> `ext_base.yaml` **在安装包里不存在**。
+> （**旧结论，已被 §4.5 取代**：曾写「Nacos 的 `oms:` **对三个应用一律不生效**
+> （jar 内的 `application.yml` 赢）」—— 那只对**门户树**编的 jar 成立；
+> **交付树**编的 jar 里 `oms:` 是注释着的 ⇒ **Nacos 赢**。）
+> **现在的操作指引看 §4.5。**
 
 各应用的 `bootstrap.yml` 决定了它读哪些 dataId：
 
@@ -919,12 +931,15 @@ Nacos 地址都是 `node1:18848`。
 >    （`shared-configs: []`，只留 `napstarmappingconfig.yaml` —— 那份**确实存在**）。
 >    ⇒ **`ext_base.yaml` / `share_base.yaml` 现在都不需要。**
 > 3. **而且就算它们存在、也被引用了，Nacos 的 `oms:` 也赢不了 jar**
->    —— 优先级是 **命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId**
->    （**实测**，见 §4.5 的「实测更正」）。
->    ⇒ **对这三个应用，Nacos 侧的 `oms:` 一律不生效。**
+>    —— **（旧结论，已被 §4.5 取代）**
+>    优先级是 **命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId**，
+>    **但第 2 位只有在 jar 里有**活的** `oms:` 块时才成立**；
+>    **交付树**编的三个 jar 里那一块是**注释着的** ⇒
+>    **Nacos 的 `oms:` 赢**（**实测**，见 §4.5 的「实测更正」）。
 >
 > ⇒ 所以 **`oms:` 的放置位置由 §4.5 的优先级表决定，不由本节决定**：
-> **要么走命令行覆盖（§4.4.5），要么改 jar 内的 `application.yml`。**
+> **改 Nacos（交付树 jar 的默认路径 —— §4.5 的表第 1/5/6 行），
+> 或走命令行覆盖（§4.4.5）。**
 > 本节剩下的内容只对 **Kafka** 侧还有参考价值（`share_base.yaml` 那部分
 > 同样受 D2 (a) 影响 —— 但 Kafka 的键**没有**「jar 赢过 Nacos」这个问题，
 > 所以那部分仍然成立）。
@@ -942,8 +957,13 @@ Nacos 地址都是 `node1:18848`。
 > 如果只改了 `ext_base.yaml`，这两个应用会静默地用**本地 `application.yml` 里的
 > 占位符** `127.0.0.1:6379` + 空密码 → 启动看着正常，**第一次读写才炸**（§4.6）。
 
-> ⚠️ **这一条现在多了一层**（见上面第 3 点）：不只是「另两个应用读不到」，
-> 是**三个应用都读不到生效** —— Nacos 的 `oms:` 一律输给 jar 里的那份。
+> ⚠️ **这一条现在多了一层**（见上面第 3 点）：旧结论写的是
+> 「不只是『另两个应用读不到』，是**三个应用都读不到生效** ——
+> Nacos 的 `oms:` 一律输给 jar 里的那份」
+> —— **该结论已被 §4.5 取代**（交付树 jar 里 `oms:` 注释着 ⇒ **Nacos 赢**；
+> 只有门户树编的 jar 才会压过 Nacos）。
+> ⇒ 仍然成立的那部分：**三个应用的 `oms:` 都要在 Nacos 里各填一份**
+> （§4.5 的表第 1/5/6 行）—— **漏填任何一个，那个应用就回落默认值**。
 
 **Kafka 的真值**在 `DEFAULT_GROUP/share_base.yaml`：
 
@@ -1000,21 +1020,27 @@ spring:
 > 而且 D2 走 (a) 之后 `bootstrap.yml` 也不再引用它们
 > → **「两边是一致的，那两个是确定的」这句话作废。**
 
-> ✅ **实测更正（2026-11-02）：Nacos 与 jar 内 `application.yml` 的优先级已经测出来了。**
+> ⚠️ **旧结论留档（2026-11-02 早上那次实测；已被 §4.5「实测更正（2026-11-02 复核）」取代）**
+> —— 下面这张表**只对「jar 里有**活的** `oms:` 块」的那种 jar 成立**。
 >
 > | 优先级 | 来源 | 结果 |
 > |---|---|---|
 > | 1（最高） | **命令行 `--oms.*`** | ✅ **赢** |
-> | 2 | jar 内 `application.yml` | ✅ **赢过 Nacos** |
-> | 3（最低） | Nacos dataId 里的 `oms:` | ❌ **输** |
+> | 2 | jar 内 `application.yml` | ✅ **赢过 Nacos**（**仅当 jar 里有活的 `oms:` 块**） |
+> | 3（最低） | Nacos dataId 里的 `oms:` | ❌ **输**（同上前提） |
 >
-> 详见 §4.5 的「实测更正」一节。
+> **这组实测取自**门户树编的 jar（`c41735d8…`，`oms:` 是活的集群占位符）——
+> **不是交付树编的**。交付树编的三个 jar 里 `oms:` 块是**注释着的**
+> ⇒ **Nacos 赢**。
+> ⇒ **现在的优先级表与判据见 §4.5**，**不要照着本表操作**。
 >
 > > ⚠️ **原来的那句「这个优先级组合本轮没有实测过」已经作废。**
 > > `share_base.yaml` 里的 `spring.cloud.config.override-none: true`
 > > **并没有**让 Nacos 赢过 jar 里的 `application.yml` ——
-> > 实测是 **jar 赢**（Nacos 的 `oms:` 被压掉了）。
-> > 要让 Nacos 赢，得改 `bootstrap.yml` 的 override 开关
+> > 在**那种 jar**（`oms:` 是活的）上实测是 **jar 赢**（Nacos 的 `oms:` 被压掉了）；
+> > 在**交付树**编的 jar 上则是 **Nacos 赢**（`oms:` 注释着）。
+> > 要强行让 Nacos 赢（无论 jar 里有没有活的 `oms:` 块），
+> > 得改 `bootstrap.yml` 的 override 开关
 > > （`override-none: false` + `allow-override: true`），
 > > **这一条需要单独验证，本手册不背书。**
 >
@@ -1294,7 +1320,7 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 | 2 | 同上 | `oms.clusters` | 集群节点列表，如 `- <A机IP>:6379` / `- <B机IP>:6382`（至少 1 个，建议给全 3 个 master） | ✅ |
 | 3 | 同上 | `oms.password` | `<集群密码>`（与 #7 一致） | ✅ |
 | 4 | 同上 | `oms.hostname` / `oms.port` | cluster 模式下**不读**，留着无害，可删 | 可选 |
-| 5 | Nacos **realserver 自己 group** 的 `icms-real-controller.yaml` | `oms.redisMode` / `oms.clusters` / `oms.password` | 同 #1–#3 的值 | ✅ |
+| 5 | Nacos **realserver 自己那份 dataId** `icms-real-controller.yaml`（group `MODELSERVER_GROUP`） | `oms.redisMode` / `oms.clusters` / `oms.password` | 同 #1–#3 的值 | ✅ |
 | 6 | Nacos **napstarweb 自己 group** 的 `napstarweb-controller.yaml` | 同上 | 同 #1–#3 的值 | ✅ |
 | 7 | 仓库 `cluster.conf` | `cluster_password` | `<集群密码>`（**必须与 #3/#5/#6 一致**） | ✅ |
 | 8 | 仓库 `cluster.conf` | `cluster_require_full_coverage` | `no`（两机部署必改，见 §2.5） | ✅ |
@@ -1314,14 +1340,18 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 > `shared-configs: []` + 只留 `napstarmappingconfig.yaml`
 > （`share_base.yaml` / `ext_base.yaml` **在安装包的 Nacos 导出包里根本不存在**）。
 > ⇒ **本手册 §4.3 里所有「modelserver 从 `share_base.yaml` / `ext_base.yaml` 读」的描述已过时**，
-> 那两节保留是为了记录**当时是怎么判断的**，**不是当前的操作指引**。
+> 那几段（§4.3 的 `bootstrap.yml` 引用表 + Kafka 真值段）保留是为了记录
+> **当时是怎么判断的**，**不是当前的操作指引**。
+> ⚠️ **§4.3 的优先级结论同样已被 §4.5 取代** ——
+> 现在的结论是「**Nacos 的 `oms:` 赢**，前提是 jar 里没有活的 `oms:` 块」。
 > ⚠️ **另一个同类缺口（本轮未处理）**：`napstarweb/web-controller` 的 `bootstrap.yml`
 > 引用了 `kafkabus.yaml`，而它**也不在安装包导出包里**（导出包 `DEFAULT_GROUP/` 只有
 > `hisdataproducer-ext.yaml` / `jk.yaml` / `napstarmappingconfig.yaml`）
 > → 记在 `docker/hd-napstar/DEFECTS.md` 的 D2 节末，**动手前先确认真实 Nacos 里有没有它**。
 >
 > > **如果只改了 `icms-controller.yaml`**，realserver 和 napstarweb **读不到** →
-> > 它们要用**自己 group 的 dataId**（`napstarweb-controller.yaml` / `icms-real-controller.yaml`）→
+> > 它们要用**自己那份 dataId**（`napstarweb-controller.yaml`（group `NAPSTARWEB_GROUP`）
+> > / `icms-real-controller.yaml`（group `MODELSERVER_GROUP`））→
 > > 没填就回落默认值 → 连接失败或连错节点。
 > > 这是本手册里**最容易踩**的一个坑。
 >
@@ -1413,7 +1443,7 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 |---|---|---|
 | `oms.clusters` 指向**不可达地址** | 应用**能起来**，但第一次读写**挂住**（像死了一样） | **`redis-cli` / Jedis 没有内置的连接超时** → 连不上就一直等 |
 | 集群**部分节点 down** | 应用**能起来**，第一次读写才失败 | 连接工厂是懒连接的；启动时只装配不连 |
-| Nacos 的 `oms:` 是 standalone，jar 的 `oms:` 是**集群占位符** | 启动报 `oms.hostname and oms.port must be configured when oms.redisMode=standalone` | **jar 的 `oms:` 赢过 Nacos**（§4.5 的实测更正）→ 实际生效的是 jar 的**集群占位符**（`clusters: [127.0.0.1:6379]`），而 Nacos 那个 standalone 的 `hostname`/`port` **被压掉了** → **两种模式都没配全**：cluster 要 `clusters`，standalone 要 `hostname` + `port` |
+| Nacos 的 `oms:` 是 standalone，jar 的 `oms:` 是**集群占位符**（**前提：jar 里有**活的** `oms:` 块**） | 启动报 `oms.hostname and oms.port must be configured when oms.redisMode=standalone` | **jar 的 `oms:` 赢过 Nacos**（§4.5 的实测更正）→ 实际生效的是 jar 的**集群占位符**（`clusters: [127.0.0.1:6379]`），而 Nacos 那个 standalone 的 `hostname`/`port` **被压掉了** → **两种模式都没配全**：cluster 要 `clusters`，standalone 要 `hostname` + `port` |
 
 > ⚠️ **第一种最隐蔽** —— 它不会报错，只会「卡住」。
 > 所以**每个探针都要套 `timeout`**（`redis-cli` 没有内置超时，
@@ -1424,6 +1454,11 @@ RF=2 的 `INCDATA` 有 2 个分区（Leader 分别在两个 broker 上），
 > 看到这条报错，要想到「jar 里的 `oms:` 压过了 Nacos」，
 > 而不是「Nacos 里少填了 `hostname` / `port`」。
 > 判据还是那行日志：**`*** Using Redis Cluster with nodes: <列表>`**。
+>
+> ⚠️ **但第三种的前提是「jar 里有**活的** `oms:` 块」** ——
+> **交付树**编出来的 jar 里那块是**注释着的** ⇒ **交付树的 jar 不会出这种错**。
+> ⇒ **出这种错 = 你部署的是门户树那种 jar**（或任何 `oms:` 没被注释的 jar），
+> 解法见 §4.5（换 jar / 改 jar 里的 `oms:` / 开 override 开关）。
 
 ---
 
