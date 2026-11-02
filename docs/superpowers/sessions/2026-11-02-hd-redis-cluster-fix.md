@@ -395,3 +395,102 @@ cd1371a docs(hd): confirm the design and the D2 scope
 *本会话基于 2026-11-02 的实测（依赖树、jar 字节扫描、`javap` 反编译、变异测试、文件行号核对）。
 所有"通过"都有原始输出支撑。*
 *上一份存档：`docs/superpowers/sessions/2026-11-02-hd-redis-cluster-test.md`（第十节是本轮的复核更正）。*
+
+---
+
+## 八、2026-11-02 追加轮：环境体检 + **树名更正**
+
+> 本节是**第三轮**（前两轮 = 集群测试轮 + 交付树集群修复轮）。
+> 做的是：① 开工前环境体检（确认判据可执行） ② **发现并更正一个横跨全部文档的树名错误**。
+
+### 8.1 环境体检：判据全部可执行，数字与上一轮**逐条一致**
+
+| 判据 | 本轮实测 | 上一轮 | 一致 |
+|---|---|---|---|
+| 应用层集群测试 | `PASS=34 FAIL=0 SKIP=1` | 同 | ✅ |
+| 底层集群验证 `hd-cluster-verify.sh` | `PASS=39 FAIL=0` | 同 | ✅ |
+| base 回归矩阵 | `PASS=47 FAIL=0 SKIP=4` | 同 | ✅ |
+| `test-hd-cluster-summary.sh` | `PASS=19 FAIL=0` | 同 | ✅ |
+| `test-hd-cluster-merge-wiring.sh` | `PASS=8 FAIL=0` | 同 | ✅（**这次集群在跑**，测到了「合并」这一步） |
+| `test-hd-portal-baseline.sh` | `PASS=40 FAIL=0` | 同 | ✅ |
+
+- base 矩阵与上一轮基线**逐条 diff**：只有 4 处计时/计数抖动（启动秒数 ×4、PG 连接数 4→5、SQL execute 条数 1→7），
+  **判据本身零差异**。
+- **⚙️-A（Kafka broker 起不来）未复发**：`/brokers/ids` = `[755, 756]`，两个 broker 都活着。
+- **⚙️-B（token 过期）未复发**：`exp=1793681279`，`now=1793605295` → **剩余 75984 秒**。
+  （但按 §七 #5 的规矩，下一轮开工仍应重铸。）
+- **归档 patch 仍然可用**：`git apply --check -p1` **rc=0**；apply 后 **12/12 与树 A 现文件 SHA256 全等**。
+- **mvnRepo 零改动**：两个仓库（`%USERPROFILE%\.m2\repository` 与 `D:\java\apache-maven\mvnRepo`）
+  12:00 之后被修改的文件数 **均为 0**。
+- **门户未受影响**：新快照 vs 上一轮快照 **只差 uptime 一行**。
+
+### 8.2 🔴 **发现一个横跨全部文档的树名错误**（已修）
+
+用户给出三棵树的权威对照后发现：
+
+> **文档里叫「门户树 / portal/SVN 树」的那棵树（`D:\javawork\1.2\cpscloud1.0\code`）
+> 其实是「基线」。**
+> 真正的门户树是 `D:\work\info\web\extendsystem\集控-IV区门户\code` ——
+> **此前从未被检查过。**
+
+**逐字节证据**：
+
+| 证据 | 结果 |
+|---|---|
+| 旧 `model-controller-3.0.0.jar`（`c41735d8…`，D8 的元凶） | **md5 完全等于基线树**的 `platform/backend/modelserver/controller/target/model-controller-1.0.14.jar` |
+| 那份 jar 内嵌的 `application.yml`（`541faf69…`） | **md5 完全等于基线树**同名文件 |
+| `oms:` 块「生效 + 集群占位符」的树 | **只有基线**（门户树和华盾树的 `oms:` 都是**注释着**） |
+| ⇒ **D8 的成因归属** | 从「门户树」更正为「**基线树**」（结论不变，归属变了） |
+
+**门户树（集控-IV区门户）的实测能力**：
+
+| 项 | 值 |
+|---|---|
+| 自有版本 / `platform.version` | `2.0.2` / **`2.0.0`（定点，不是区间）** |
+| 集群标记 | `isCluster` / `RedisClusterHelper` / `RedisClusterHashPipeline` / `writeWithRetry` **全 0** |
+| `realserver/common/oms` 模块 | **没有**（`rtdata-module` 也没有） |
+| 版本控制 | `application\.git` + 3 个 worktree |
+| 独有模块 | `platform/backend/portal`、`processsinfomodel`、`application/backend/{3dmanager,smartoptsys}` |
+
+⇒ **D9 的机制（版本区间挑版本）对门户线不成立** —— 门户用定点 `2.0.0`。
+⇒ **门户线要切集群的话，得从基线把整套补丁搬过去**（跟华盾当时一样）。
+
+### 8.3 D10 的缺口被量化（结论不变，边界更清楚）
+
+| 需求 | 源 | 方言 | 状态 |
+|---|---|---|---|
+| `info` 30 表 | `/pkg/database/postgresql_install/sqls/info/InitTable/*.sql` | PG | ✅ 已装 |
+| `sac` | 平台包 `mysql_install/SystemTable.sql`（15 表，`engine=innodb`×15 / `smallint(5)`×14）—— `AttributeTypes`/`ObjectTypes`/`Choice`/`Wiring` **正好对得上** mapper 里的 `sac.attributetypes`/`sac.objecttypes`/`sac.choice`/`sac.wiring` | MySQL | ❌ **要转方言** |
+| `cmt`（`commitlist`） | **安装包里没有建表脚本** | — | ❌ **源都要另找** |
+| `hds`（`h_daymvpointstat_` 等，mapper 引用上百次） | **安装包里没有建表脚本**（`CreatehistoryTable.sql` 只建 `H_AlarmEvents`/`H_DataEdits`/`H_TempId`/`H_TimeStamp`） | — | ❌ **源都要另找** |
+
+### 8.4 顺带发现（**门户线自己的问题，与华盾无关**）
+
+门户的 `3dmanager` flyway 迁移是 **MySQL 方言**
+（`AUTO_INCREMENT`×4 / `COMMENT`×44 / `TINYINT|DATETIME`×10 / `ON UPDATE CURRENT_TIMESTAMP`×2），
+而门户库 `cpspg` 是 **PostgreSQL** ⇒ **那些迁移脚本在门户自己的库上跑不起来**。
+
+### 8.5 本轮改了什么
+
+| 文件 | 改了什么 |
+|---|---|
+| `docs/superpowers/sessions/2026-11-02-tree-map.md` | **新增** —— 三棵树权威对照表（路径 / 版本 / 补丁分布 / `oms:` 状态 / jar 归属 md5 / mvnRepo 版本矩阵 / DDL 出处） |
+| `docker/hd-napstar/DEFECTS.md` | 树表改成**三棵**；标记表加门户列；**D8 成因改归基线树**；**D10 缺口量化**；顶部加树名更正 banner |
+| `docs/OPERATIONS.md` | 10 处「门户树」→「**基线树**」（每处都指 `cpscloud1.0`）；3 处指门户容器本身的**没动** |
+| 4 份历史存档 / plan / spec | **正文不改**（结论不受影响），各加一条**树名更正 banner** 指向树图 |
+
+提交：`dd1b59e docs(hd): correct the tree names -- cpscloud1.0 is the baseline, not the portal`
+
+### 8.6 本轮踩的坑
+
+| # | 坑 | 对策 |
+|---|---|---|
+| 14 | **全局 `sed`/`perl` 替换会误伤刚写的 banner**（「真正的门户树」被当成旧词改掉） | 先打**保护标记**（`\x01PTREE\x01`）→ 全局替换 → 还原；改完逐行 `diff` 复核 |
+| 15 | **PS 5.1 的 `Get-Content`/`-File` 对 UTF-8 无 BOM 的中文按 ANSI 解码** | ① 写 `.ps1` 时**只用 ASCII**（中文改用 `[System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes(...))` 读）② 文本替换**放进容器里用 perl 做**（字节级安全） |
+| 16 | **`.ps1` 里出现中文路径 ⇒ `Test-Path` 恒为 false** | 实测踩到：`D:\work\info\...\华盾-napstar2.0\code` 被判「不存在」⇒ 误以为树没了。改用容器内 `find`（挂载后路径是纯 ASCII） |
+| 17 | **`read` 工具会重排 markdown 的 `**` 强调标记** | 改中文 markdown 时**按行**做精确替换（`sed -i "<行号>s/.../.../"`），不要拿 `read` 的多行输出当 `oldString` |
+
+> 📌 **下一轮照做**：**树名先对齐再引用** ——
+> 本轮之前，`树 B`、`门户树`、`基线树` 三种叫法在文档里混用，
+> 而它们指向的是**同一棵树**（`cpscloud1.0`）———
+> 一旦有一份权威树图，这种歧义就不会再发生。
