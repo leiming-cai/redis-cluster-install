@@ -2,7 +2,7 @@
 
 **日期**：2026-11-02
 **轮次**：华盾 napstar2.0 集群测试轮之后的第一轮修复
-**状态**：设计待用户复核
+**状态**：设计已确认（用户逐条确认 D1–D4；D2 范围 = **全部 4 个类，含 `CacheServiceImpl`**）
 **相关**：
 - 上一轮存档：`docs/superpowers/sessions/2026-11-02-hd-redis-cluster-test.md`（D6 / D7-a / D7-b / D8）
 - 上一轮 spec：`docs/superpowers/specs/2026-11-01-hd-redis-cluster-test-design.md`
