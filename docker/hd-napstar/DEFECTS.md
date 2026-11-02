@@ -16,6 +16,14 @@
 > > **2026-11-02 修复轮的状态**：D6 的适用条件已澄清 · **D7-a / D7-b / D8 已修** ·
 > > D2 (a) 已在**交付树**实施 · 新增 **D9** · 新增 **⚙️-A / ⚙️-B** 两条**环境缺口**
 > > （不是代码缺陷，但会让判据**不可执行**）。
+> >
+> > ⚠️ **2026-11-02 树名更正（重要）**：本文原先把
+> > `D:\javawork\1.2\cpscloud1.0\code` 称作「**门户树 / portal/SVN 树**」——
+> > **那是错的，它是「基线」**。真正的门户树是
+> > `D:\work\info\web\extendsystem\集控-IV区门户\code`（**此前从未被检查过**）。
+> > ⇒ 凡是引用「树 A / 树 B / 门户树」的旧结论，都按本表重新对号。
+> > 完整对照（版本 / 补丁分布 / `oms:` 状态 / jar 归属 / mvnRepo 矩阵）见
+> > `docs/superpowers/sessions/2026-11-02-tree-map.md`。
 
 ---
 
@@ -209,33 +217,46 @@ jmxUrl: {}          ← 来自 icms-controller.yaml 的 dashboard.jmx
 
 **选项 (a)（从 `bootstrap.yml` 里去掉引用）已经实施**，实施细节：
 
+> 📌 **2026-11-02 树名更正**：本节原先把 `D:\javawork\1.2\cpscloud1.0\code`
+> 叫作「**门户树**」—— **那是错的，它是「基线」**。
+> 真正的门户树是 `D:\work\info\web\extendsystem\集控-IV区门户\code`，
+> **此前从未被检查过**。完整对照见
+> `docs/superpowers/sessions/2026-11-02-tree-map.md`。
+> ⇒ 本节里所有「门户树」= **基线树**；「门户线」另指集控-IV区门户那棵树。
+
 | 项 | 值 |
 |---|---|
-| 实施在哪棵树 | **门户树** `D:\javawork\1.2\cpscloud1.0\code`（**不是**华盾交付树） |
+| 实施在哪棵树 | **基线树** `D:\javawork\1.2\cpscloud1.0\code`（**不是**华盾交付树） |
 | 改的文件 | `platform/backend/modelserver/controller/src/main/resources/bootstrap.yml` |
 | 改的内容 | `shared-configs: []`（不再引用 `share_base.yaml` / `ext_base.yaml`），只留 `napstarmappingconfig.yaml` |
 | mtime | **2026-11-01 14:49:35** |
-| 怎么部署的 | 从**门户树**重新编译 `model-controller` → `target/model-controller-1.0.14.jar`（mtime **2026-11-01 15:15:32**）→ 拷进容器 `/opt/napstar_app/model-controller-3.0.0.jar`（mtime **2026-11-01 15:15**） |
+| 怎么部署的 | 从**基线树**重新编译 `model-controller` → `target/model-controller-1.0.14.jar`（mtime **2026-11-01 15:15:32**）→ 拷进容器 `/opt/napstar_app/model-controller-3.0.0.jar`（mtime **2026-11-01 15:15**） |
 
-**逐字节证据**：门户树那个产物的 md5 = `c41735d81db324e1a69dc4aa3e47ada2`
+**逐字节证据**：基线树那个产物的 md5 = `c41735d81db324e1a69dc4aa3e47ada2`
 = 容器里部署的那份 jar 的 md5，**完全一致**。
 
-> 🔴 **代价：这次「改 A 树、编 B 树的 jar」把门户树的 `application.yml` 一起带进来了。**
+> 🔴 **代价：这次「改 A 树、编 B 树的 jar」把基线树的 `application.yml` 一起带进来了。**
 >
 > | 树 | `application.yml` mtime | `oms:` 块 |
 > |---|---|---|
-> | **门户树** | 2026-10-28 14:40 | **没被注释** —— `redisMode: cluster` + `clusters: [127.0.0.1:6379]` + `password: ""`（**集群占位符**） |
+> | **基线树** | 2026-10-28 14:40 | **没被注释** —— `redisMode: cluster` + `clusters: [127.0.0.1:6379]` + `password: ""`（**集群占位符**） |
 > | **华盾交付树** | 2025-06-27 | **被注释** —— `# oms:` + `hostname: 10.137.220.191` + `password: sac888` |
 >
-> ⇒ 容器里那个 jar 的 `oms:` 块来自**门户树**，不是华盾交付树。
+> ⇒ 容器里那个 jar 的 `oms:` 块来自**基线树**，不是华盾交付树。
 > ⇒ 后果 = **D8**：`model-controller` 在 standalone 模式下**起不来**（NOAUTH）。
 >
+> 📌 **实测复核（2026-11-02）**：那份 jar 内嵌的 `application.yml`
+> md5 = `541faf69eeb2c5ffe049bd303f962ba0`，
+> **逐字节等于基线树**同名文件
+> （`platform/backend/modelserver/controller/src/main/resources/application.yml`）。
+> ⇒ **D8 的成因归属从「门户树」更正为「基线树」**（结论不变，归属变了）。
+>
 > 📌 **教训**：**不要从另一棵树编译交付物。**
-> 改 `bootstrap.yml` 改的是**门户树**的，但编译出来的 jar 带着门户树的
+> 改 `bootstrap.yml` 改的是**基线树**的，但编译出来的 jar 带着基线树的
 > `application.yml` —— 而那个文件里的 `oms:` 是**集群占位符**，不是华盾的部署配置。
 > 改配置要改**真正被部署的那棵树**（华盾交付树），否则编出来的东西带着别处的配置。
 >
-> 📌 **现状（2026-11-02 更新）**：D2 本身（dataId 名对不上）**已经被 (a) 解决了**（在门户树里）。
+> 📌 **现状（2026-11-02 更新）**：D2 本身（dataId 名对不上）**已经被 (a) 解决了**（在基线树里）。
 > 但那份 jar **没有留在交付树** —— 交付树的 `bootstrap.yml` 仍然是引用那两个
 > 不存在的 dataId 的状态。
 > ⇒ **D2 已于 2026-11-02 在交付树实施**
@@ -243,8 +264,8 @@ jmxUrl: {}          ← 来自 icms-controller.yaml 的 dashboard.jmx
 > 改后与基线树同名文件 **SHA256 全等**）+ **从交付树重编了 `model-controller`**
 > （md5 `0ce5a08a…`）⇒ **D8 一并解决**。
 > ⇒ ⚠️ **历史上曾写过「D2 在华盾交付树里还没修」**
-> —— **那半句已过时**（见汇总表 D2 行）；但**「绝不能直接拿门户树编出来的 jar 去部署」
-> 仍然成立**（门户树那份 jar 带着门户树的 `application.yml`，那就是 D8 的成因）。
+> —— **那半句已过时**（见汇总表 D2 行）；但**「绝不能直接拿基线树编出来的 jar 去部署」
+> 仍然成立**（基线树那份 jar 带着基线树的 `application.yml`，那就是 D8 的成因）。
 
 ---
 
@@ -359,8 +380,8 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
 
 **证据**（2026-11-01/02 实测）：
 
-> ⚠️ **这组证据取自门户树编的 jar（`c41735d8…`），不是交付树编的。**
-> 门户树那份的 `application.yml` 里 `oms:` 是**活的**（`redisMode: cluster` +
+> ⚠️ **这组证据取自基线树编的 jar（`c41735d8…`），不是交付树编的。**
+> 基线树那份的 `application.yml` 里 `oms:` 是**活的**（`redisMode: cluster` +
 > `clusters: [127.0.0.1:6379]` + 空密码），所以 jar 才压过 Nacos。
 
 - 给 Nacos 的 `icms-controller.yaml` 的 `oms:` 加 `redisMode: standalone`，
@@ -372,14 +393,14 @@ jar 内的 `application.yml` 硬编码了 `oms:` 块。**实测优先级**是：
   就变成 `*** Using Redis Standalone at node1:6379`，**立刻生效**。
 
 ⇒ **「jar 里的 `oms:` 压不过 Nacos 这句话是错的」** ——
-在**门户树**那种 jar 上，是 **Nacos 压不过 jar**；所以在**那份 jar** 上
+在**基线树**那种 jar 上，是 **Nacos 压不过 jar**；所以在**那份 jar** 上
 Nacos 里改 `oms:` **没有用**，只能走命令行 ——
 见 `scripts/start-hd-apps.sh` 的 `HD_REDIS_CLUSTER=1` 开关。
 ⇒ **但交付树编的 jar 不是那样**（`oms:` 注释着）→ **Nacos 侧改 `oms:` 是有效的**。
 
 > 📌 **连带影响**：`docs/OPERATIONS.md` §4.5 原本要求
 > 「`oms:` 要在**三个** Nacos dataId 各填一份」——
-> **在门户树那种 jar 下那条指引不生效**（jar 的 `oms:` 赢）。
+> **在基线树那种 jar 下那条指引不生效**（jar 的 `oms:` 赢）。
 > **2026-11-02 复核后已回改 §4.5**，改成
 > 「**生效，但前提是 jar 里没有活的 `oms:` 块**」，并补上实测优先级表。
 >
@@ -406,7 +427,7 @@ Nacos 里改 `oms:` **没有用**，只能走命令行 ——
 `icms-real-controller.yaml` / `napstarweb-controller.yaml`）就行，
 **不必**把密码放命令行。
 
-只有当部署的是**门户树**那种 jar（`oms:` 是活的）时，才需要二选一：
+只有当部署的是**基线树**那种 jar（`oms:` 是活的）时，才需要二选一：
 
 1. 改 `application.yml` 里的 `oms.clusters` / `oms.password`，或
 2. 走 `bootstrap.yml` 的 override 开关，把敏感值从 Nacos 侧注入，**不进命令行**。
@@ -435,25 +456,40 @@ Nacos 里改 `oms:` **没有用**，只能走命令行 ——
 > ① 树 A 的 platform 依赖**全部解析到基线树编的 1.0.14**（同一个 jar 里混两版 platform）；
 > ② **修复点在 `monitor` 模块，不在 `web-controller`**（后者自己零 Redis）。
 
-### ⚠️ 先说清楚：机器上有**两棵** napstar2.0 源码树
+### ⚠️ 先说清楚：机器上有**三棵**源码树
 
 这是本条分析错过的根源 —— 「源码树」这个说法**有歧义**，
-两棵树里**有一堆同名同路径的文件**（`application/backend/napstarweb/...`、
+树里**有一堆同名同路径的文件**（`application/backend/napstarweb/...`、
 `platform/backend/realserver/...`），但内容不同。
 
-| | **树 A** | **树 B** |
-|---|---|---|
-| 路径 | `D:\work\info\web\extendsystem\华盾-napstar2.0\code` | `D:\javawork\1.2\cpscloud1.0\code` |
-| 是什么 | **napstar2.0 交付树** | **门户 / SVN 工作副本**（`cpscloud1.0`） |
-| 上一级目录里有 | `install/`（`web-3.2.2.zip`、`web_3.2.3.zip` 等发布包）、`doc/`、交付用的 `.docx`/`.doc` | `.svn/`、`svn.log`、`doc/` |
-| 产出的 `monitor` jar | `monitor-3.0.0.jar`（467531 字节，2026/11/1 00:18） | `monitor-1.0.14.jar`（564353 字节，2026/10/31 06:33） |
-| **是不是交付出去的那个** | **是**（见下面的 md5） | 否 |
+| | **树 A** | **树 B** | **树 C** |
+|---|---|---|---|
+| 路径 | `D:\work\info\web\extendsystem\华盾-napstar2.0\code` | `D:\javawork\1.2\cpscloud1.0\code` | `D:\work\info\web\extendsystem\集控-IV区门户\code` |
+| 是什么 | **napstar2.0 交付树**（华盾业务线） | **基线**（`cpscloud1.0`，SVN 工作副本） | **门户**（集控-IV区门户，另一条业务线） |
+| 上一级目录里有 | `install/`（`web-3.2.2.zip`、`web_3.2.3.zip` 等发布包）、`doc/`、交付用的 `.docx`/`.doc` | `.svn/`、`svn.log`、`doc/` | `install/`、`doc/` |
+| 自有版本 | `3.0.0` | `1.0.14` | `2.0.2` |
+| `platform.version` | `[1.0.0,2.0.0)` | `[1.0.0,2.0.0)` | `2.0.0`（**定点**） |
+| 产出的 `monitor` jar | `monitor-3.0.0.jar`（467531 字节，2026/11/1 00:18） | `monitor-1.0.14.jar`（564353 字节，2026/10/31 06:33） | `monitor-2.0.2.jar` |
+| **是不是交付出去的那个** | **是**（见下面的 md5） | 否 | 否 |
 
+> 📌 **2026-11-02 树名更正**：本节原先把树 B 叫「**门户 / SVN 工作副本**」——
+> **那是错的，它是「基线」**。
+> 真正的门户树是树 C（集控-IV区门户），**此前从未被检查过**。
+> 完整对照见 `docs/superpowers/sessions/2026-11-02-tree-map.md`。
+>
 > 📌 **本次部署用的 jar 就是树 A 编译出来的**，
-> 而**集群补丁只在树 B 的源码里、以及基线树编的共享二进制里**
+> 而**集群补丁只在树 B（基线）的源码里、以及基线编的共享二进制里**
 > （详见 D7-a）。
-> 所以本文里凡是提到「交付树」「portal/SVN 树」，都指上表这两棵，
+> 所以本文里凡是提到「交付树」「基线树」，都指上表这两棵，
 > 不再用含糊的「源码树」。
+>
+> ⚠️ **树 C（门户）的能力**：实测**一个集群标记都没有**
+> （`isCluster` / `RedisClusterHelper` / `RedisClusterHashPipeline` /
+> `writeWithRetry` 全 **0**），也**没有** `realserver/common/oms` 模块
+> ⇒ **门户线要切集群的话，得从基线把整套补丁搬过去**（跟华盾当时一样）。
+> 另外门户的 `3dmanager` flyway 迁移是 **MySQL 方言**
+> （`AUTO_INCREMENT`/`COMMENT`/`ON UPDATE CURRENT_TIMESTAMP`），
+> 而门户库 `cpspg` 是 **PostgreSQL** ⇒ 那是门户线自己的问题，与华盾无关。
 
 ### D7-a — 集群补丁只落在 platform 侧，application 侧的调用点从来没跟上（**已修**，详见汇总表）
 
@@ -579,15 +615,20 @@ docker run --rm \
    done'
 ```
 
-| 标记（整棵树里含该标记的 `.java` 文件数） | **树 A（交付树）** | **树 B（portal/SVN 树）** |
-|---|---|---|
-| java 文件总数 | **1792** | **1635** |
-| `executePipelined` | **41** | 23 |
-| `isCluster` | **0** | **29** |
-| `RedisClusterHelper` | **0** | **22** |
-| `RedisClusterHashPipeline` | **0** | **10** |
-| `RedisPipelineUtil` | 17 | 19 |
-| `writeWithRetry` | **0** | **1** |
+| 标记（整棵树里含该标记的 `.java` 文件数） | **树 A（交付树·华盾）** | **树 B（基线）** | **树 C（门户）** |
+|---|---|---|---|
+| java 文件总数 | **1792** | **1635** | 693 |
+| `executePipelined` | **41** | 23 | 12 |
+| `isCluster` | **0** | **29** | **0** |
+| `RedisClusterHelper` | **0** | **22** | **0** |
+| `RedisClusterHashPipeline` | **0** | **10** | **0** |
+| `RedisPipelineUtil` | 17 | 19 | 4 |
+| `writeWithRetry` | **0** | **1** | **0** |
+
+> 📌 **2026-11-02 补测**：树 C（集控-IV区门户）的三列是**第一次**被纳入对照 ——
+> 实测**集群标记全 0**。
+> ⚠️ **树 A 那一列是「修之前」的数**（`isCluster` 0 → 修完是 4 个 class），
+> 其余两列是当前值。
 
 > ⚠️ **别再引用「10 处 `executePipelined` 全部加了 `isCluster()`」** ——
 > 那个说法只对**树 B**成立（而且 10 是「站点数」，不是文件数）。
@@ -717,7 +758,7 @@ strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的�
 
 **实测结果**：
 
-| class | 树 A（交付树）`monitor-3.0.0.jar`<br>md5 `340d66a5…` | 树 B（portal/SVN 树）`monitor-1.0.14.jar`<br>md5 `2551839c…` |
+| class | 树 A（交付树）`monitor-3.0.0.jar`<br>md5 `340d66a5…` | 树 B（基线树）`monitor-1.0.14.jar`<br>md5 `2551839c…` |
 |---|---|---|
 | `SVGCacheServiceImpl` | A=0  B=0  C=0 | **A=1  B=1  C=4** |
 | `RTListener` | A=0  B=0  C=0 | **A=1  B=1  C=4** |
@@ -745,7 +786,7 @@ strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的�
 
 对照**树 B**（同样的文件路径）：
 
-| 文件（**树 B** = portal/SVN 树） | `isCluster` | `@Async` | `.join()` | `writeWithRetry` |
+| 文件（**树 B** = 基线树） | `isCluster` | `@Async` | `.join()` | `writeWithRetry` |
 |---|---|---|---|---|
 | `SVGCacheServiceImpl.java` | **5** | 0 | 0 | 0 |
 | `RTListener.java` | **5** | 0 | 0 | 0 |
@@ -755,7 +796,7 @@ strings "$C" | grep -c 'isCluster'           # C 常量池里带这个名字的�
 | `OmsWriteByKafkaServiceImpl.java` | **6** | 2 | **2** | **4** |
 
 ⇒ 结论：**交付树（树 A）里没有任何一个集群分支**；
-补丁只在 portal/SVN 树（树 B）里，以及共享模块的二进制里。
+补丁只在 基线树（树 B）里，以及共享模块的二进制里。
 
 #### 影响面
 
@@ -1054,7 +1095,7 @@ real_graph:* key 数 = 0      ← 单机模式也没有
 于是方法体里抛出来的异常被**封在这个 future 里**，没有任何人观察它 ——
 既不进日志，也不进 stderr。
 
-⚠️ **`@Async` 的位置 —— 交付树（树 A）和 portal/SVN 树（树 B）不一样**：
+⚠️ **`@Async` 的位置 —— 交付树（树 A）和 基线树（树 B）不一样**：
 
 > 📌 **下面这一段是「改前」的实测**，对象是**改前**部署的
 > `rtdata-module-3.0.0.jar`（= 树 A **改前**编译的产物）。
@@ -1076,7 +1117,7 @@ OmsWriteByKafkaServiceImpl.batchWirtePip      -> @Async("consumerRunExecutor")
 
 **两棵树的对照**（这是本条的关键 —— 别拿树 B 去推断交付树的行为）：
 
-| | **树 A（交付树）· 改前** | **树 A（交付树）· 改后（2026-11-02）** | **树 B（portal/SVN 树）** |
+| | **树 A（交付树）· 改前** | **树 A（交付树）· 改后（2026-11-02）** | **树 B（基线树）** |
 |---|---|---|---|
 | `RedisRealDataServiceImpl.wirteOmsPip` | **仍带 `@Async`** | **不带 `@Async`**（与基线 `1.0.14` 逐字节相同；javadoc 明写「不再标注 `@Async`」） | 不带 `@Async`（类的 javadoc 明写「本类不再标注 @Async」，方法注释写「本方法为同步执行，异常直接抛给调用方」） |
 | `OmsWriteByKafkaServiceImpl.batchWirte` / `batchWirtePip` | **仍带 `@Async`**（2 处） | 仍带 `@Async(value = "consumerRunExecutor")`（2 处，**与基线一致**） | 同样带 `@Async(value = "consumerRunExecutor")` |
@@ -1174,13 +1215,13 @@ D7-b 让这个失效**连日志都不留**。只修 D7-a 不修 D7-b，
 ```
 D2 决定用选项 (a)：把 bootstrap.yml 里对 share_base.yaml / ext_base.yaml 的引用去掉
    ↓
-但改的是**门户树**的 bootstrap.yml（D:\javawork\1.2\cpscloud1.0\code\...\bootstrap.yml，mtime 2026-11-01 14:49:35）
+但改的是**基线树**的 bootstrap.yml（D:\javawork\1.2\cpscloud1.0\code\...\bootstrap.yml，mtime 2026-11-01 14:49:35）
    —— 不是华盾交付树
    ↓
-从门户树重新编译 model-controller
+从基线树重新编译 model-controller
    ↓
-编译产物把**门户树的 application.yml 一起打进 jar**了
-   （门户树的 mtime 2026-10-28 14:40，`oms:` 块是**没被注释的集群占位符**：
+编译产物把**基线树的 application.yml 一起打进 jar**了
+   （基线树的 mtime 2026-10-28 14:40，`oms:` 块是**没被注释的集群占位符**：
      redisMode: cluster / clusters: [127.0.0.1:6379] / password: ""
     而华盾交付树的 application.yml（mtime 2025-06-27）里 `oms:` 是**被注释**的：
      # oms: / hostname: 10.137.220.191 / password: sac888）
@@ -1196,19 +1237,19 @@ D2 决定用选项 (a)：把 bootstrap.yml 里对 share_base.yaml / ext_base.yam
 
 | 东西 | md5 | mtime |
 |---|---|---|
-| 门户树 `target/model-controller-1.0.14.jar` | `c41735d81db324e1a69dc4aa3e47ada2` | 2026-11-01 **15:15:32** |
+| 基线树 `target/model-controller-1.0.14.jar` | `c41735d81db324e1a69dc4aa3e47ada2` | 2026-11-01 **15:15:32** |
 | 容器里 `/opt/napstar_app/model-controller-3.0.0.jar` | `c41735d81db324e1a69dc4aa3e47ada2` | 2026-11-01 **15:15** |
 | D2 备份的 jar（= 基线部署的那份） | `064ba5fa05266dcf5b2e14c594abbfed` | 2026-11-01 00:16 |
 
-⇒ **容器里那份 jar 就是门户树编出来的**（md5 完全一致，不是「像」，是**逐字节相同**）。
+⇒ **容器里那份 jar 就是基线树编出来的**（md5 完全一致，不是「像」，是**逐字节相同**）。
 
 > 📌 **交叉引用 D2** —— 见上面 D2 的「✅ 实测更新」一节：
-> 那次实施在**门户树**里、编译产物**带着门户树的 `application.yml`**。
+> 那次实施在**基线树**里、编译产物**带着基线树的 `application.yml`**。
 > **D8 是 D2 那次操作的直接后果**，不是两件独立的事。
 >
 > 📌 **两条通用教训**（比这个具体的 jar 更重要）：
 > 1. **不要从另一棵树编译交付物。**
->    改配置要改**真正被部署的那棵树**。门户树的 `application.yml` 里的
+>    改配置要改**真正被部署的那棵树**。基线树的 `application.yml` 里的
 >    `oms:` 是**集群占位符**（给门户那套集群部署用的），
 >    拿它编 HD 的 jar 等于把占位符当成真配置发出去。
 > 2. **「重新编译一个 jar」不是局部操作。**
@@ -1233,7 +1274,7 @@ SUMMARY: PASS=84 FAIL=2 SKIP=3
 
 | jar | md5 | mtime | `BOOT-INF/classes/application.yml` 里的 `oms:` 块 |
 |---|---|---|---|
-| **当前部署的**（= 门户树编的） | `c41735d81db324e1a69dc4aa3e47ada2` | Nov 1 **15:15** | **没被注释** —— `redisMode: cluster` + `clusters: [127.0.0.1:6379]` + `password: ""` |
+| **当前部署的**（= 基线树编的） | `c41735d81db324e1a69dc4aa3e47ada2` | Nov 1 **15:15** | **没被注释** —— `redisMode: cluster` + `clusters: [127.0.0.1:6379]` + `password: ""` |
 | **D2 备份的**（= 华盾交付树编的） | `064ba5fa05266dcf5b2e14c594abbfed` | Nov 1 00:16 | **被注释掉了** —— 只有一行 `# oms:` |
 
 两份 jar 的 `oms:` 块差的就是**一个注释符**。后果：
@@ -1311,7 +1352,7 @@ awk '/^oms:/{f=1} f&&/^[a-zA-Z]/&&!/^oms:/{exit} f' mcyml/BOOT-INF/classes/appli
 1. **正解**：**从华盾交付树重新编译** `model-controller`（那份树的 `application.yml`
    里 `oms:` 是注释掉的、`password: sac888`），并把 D2 选项 (a) 的改动
    （`bootstrap.yml` 里去掉 `shared-configs` 对那两个 dataId 的引用）
-   **做在交付树里** —— 而不是像现在这样「改门户树、编门户树的 jar」。
+   **做在交付树里** —— 而不是像现在这样「改基线树、编基线树的 jar」。
    ⇒ **一次改动同时解决 D2（在交付树里没修）和 D8（jar 带着别处的配置）。**
    ⇒ 编之前**先核对** `target/classes/application.yml` 里的 `oms:` 块跟
    交付树源文件一致 —— 这是「jar 里的配置跟树对得上」的最小检查。
@@ -1324,7 +1365,7 @@ awk '/^oms:/{f=1} f&&/^[a-zA-Z]/&&!/^oms:/{exit} f' mcyml/BOOT-INF/classes/appli
 
 ### ⚠️ 一个**必须记住**的操作残留
 
-> ⚠️ **本节记录的是 `c41735d8…` 那份 jar（门户树编的）的残留；
+> ⚠️ **本节记录的是 `c41735d8…` 那份 jar（基线树编的）的残留；
 > 本轮已换成交付树编的 `0ce5a08a…`**
 > （`oms:` 注释着 → Nacos 赢）⇒ **重新起得来，残留已消除**。
 > 旧的仍备份在 `/opt/napstar_app/backup-20261102/`。
@@ -1363,7 +1404,7 @@ model-controller 是怎么起来的**
 | 磁盘 jar 的 mtime | **2026-11-02 03:36:09** —— **比 JVM 启动晚 93 秒** |
 | inode：磁盘 vs `/proc/402367/fd/4` | **267624 == 267624** → 文件是**原地覆盖**，不是替换 |
 | `/proc/402367/cmdline` 里的 `--oms.*` | **0 个** |
-| 磁盘 jar 现在的 md5 | `c41735d8…`（= 门户树编的那份，`oms:` 未注释、`redisMode: cluster`） |
+| 磁盘 jar 现在的 md5 | `c41735d8…`（= 基线树编的那份，`oms:` 未注释、`redisMode: cluster`） |
 | 备份那份的 md5 | `064ba5fa…`（`oms:` **被注释**，只有一行 `# oms:`） |
 
 **推论**：
@@ -1618,11 +1659,11 @@ mtime 2026-11-01 00:15~00:17 —— 上一轮有人 install 过）。
 | D3 | 🟡 | 安装包 | 本轮部署时补（`pg_hba.conf` + reload） |
 | D4 | 🟡 | 安装包（按生产拓扑写的） | 本轮部署时改（Nacos + 命令行覆盖） |
 | D5 | 🟢 | 本轮 | 已修 |
-| D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。📌 **实测优先级**（2026-11-01/02）：**命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId** —— 但**只有当 jar 里有**活的** `oms:` 块时，jar 才压过 Nacos**。📌 **2026-11-02 复核更正**：**交付树**编出来的三个 jar 里 `oms:` 块是**注释着的**（`web-controller:108` / `modelserver/controller:92` / `rtdata-consumer:43`）⇒ **jar 不覆盖 Nacos ⇒ Nacos 的 `oms:` 生效** ⇒ 生产**不必**把密码放命令行（Nacos 里配就行）。上一轮那条「Nacos 压不过 jar」的证据取自**门户树**编的 jar（`c41735d8…`），**不是交付树的**。⇒ `docs/OPERATIONS.md` §4.5 已**在 2026-11-02 复核后**回改为「生效，但前提是 jar 里没有活的 `oms:` 块」 |
+| D6 | 🟡 | 本轮（集群模式接入） | ⚠️ **本轮接受**：密码走命令行，与仓库现有惯例一致（`redis-cli -a`）。📌 **实测优先级**（2026-11-01/02）：**命令行 `--oms.*` > jar 内 `application.yml` > Nacos dataId** —— 但**只有当 jar 里有**活的** `oms:` 块时，jar 才压过 Nacos**。📌 **2026-11-02 复核更正**：**交付树**编出来的三个 jar 里 `oms:` 块是**注释着的**（`web-controller:108` / `modelserver/controller:92` / `rtdata-consumer:43`）⇒ **jar 不覆盖 Nacos ⇒ Nacos 的 `oms:` 生效** ⇒ 生产**不必**把密码放命令行（Nacos 里配就行）。上一轮那条「Nacos 压不过 jar」的证据取自**基线树**编的 jar（`c41735d8…`），**不是交付树的**。⇒ `docs/OPERATIONS.md` §4.5 已**在 2026-11-02 复核后**回改为「生效，但前提是 jar 里没有活的 `oms:` 块」 |
 | D7-a | 🔴 → 🟡 | **集群补丁只落在 platform 侧，application 侧的调用点从来没跟上**（树 A `D:\work\info\web\extendsystem\华盾-napstar2.0\code`）。**platform 依赖不带 `<version>` → 由 `platform.version [1.0.0,2.0.0)` 解析到基线树编的 `1.0.14`**（那份二进制**带**集群类 ✅）；**树 A 自己编的 `monitor-3.0.0.jar` / `rtdata-module-3.0.0.jar` 不带**（`isCluster` = 0，`executePipelined` = 4 ❌）⇒ **同一个 jar 里混 1.0.14 和 3.0.0 两版 platform**） | ✅ **已修（2026-11-02）**：`napstarweb/monitor` 的 **6 处**（不是 5 处 —— `SVGParseService` ×2 / `CalculateService` ×2 / `SVGCacheServiceImpl` / `RTListener`）全部加了 `if (redisClusterHelper.isCluster())` 分支：写路径用 `redisTemplate.execute(cb)`（非 pipeline，按槽路由，多 key 也安全），多 key 读用 `oms` 的 `RedisClusterHashPipeline.getAllHashes` / `getAllValues`（**返回顺序与入参一致**）。**不需要新增模块**（`realserver-oms` 那份二进制本身已带集群分支）。📌 **实测**：部署的 `monitor-3.0.0.jar` 里含 `isCluster` 的 class 由 **0 → 4**；6 处 `executePipelined` **全部**在 `else` 分支里。🟡 **残留缺口**：`monitor` 这 6 处在本环境**运行时未覆盖**（模型元数据表空 → 图形解析路径跑不到；「启动无 UOE」是假绿）⇒ 只做了静态核验 + 逐处审阅，详见 D7-a 节末。📌 **修复点在 `monitor` 模块，不在 `web-controller`**（后者 9 个文件、零 Redis） |
 | D7-b | 🔴 → ✅ | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | ✅ **已修（2026-11-02）**，两条路径都通了：<br>**① 二进制**：部署的 `rtdata-consumer-3.0.0.jar` 里装的是**基线 `rtdata-module-1.0.14.jar`**（那份带 `writeWithRetry` / `.join()` / `isCluster` / `RedisClusterHashPipeline`）—— **重编本身就把 D7-b 修好了**（旧 jar 里装的是树 A 自编的无补丁 `rtdata-module-3.0.0`）。⇒ **判据 C2（发一条 INCDATA Kafka 消息 ⇒ 应用自己写的 `real_data:<otype>:<obid>` 进集群且能读回载荷）本轮 PASS**、C3（无 UOE）PASS。<br>**② 源码**：树 A 的 `rtdata-module` 源码也已与基线对齐（`RedisRealDataServiceImpl` / `OmsWriteByKafkaServiceImpl` / 新增 `FailSetCounter`），并补了 **12 条 Mockito 单测**（含**变异测试**证明：删掉写入体 / 禁用 `&` 拆分 → 各有 1 条失败）⇒ **防止将来切版本区间或发 1.0.15 时回退**。⚠️ **不是**「重编修不掉」了 —— 上一轮那个判断是基于「树 A 的源码不进包」这个当时的事实，而**重编的产物内容取决于版本区间，不取决于源码新旧** |
-| D8 | 🟡 → ✅ | **实施 D2 选项 (a) 时的副作用**（在**门户树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**门户树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与门户树产物**逐字节相同**） | ✅ **已修（2026-11-02）**：**从交付树重编** `model-controller`，并把 **D2 (a) 的改动做在交付树里**（`bootstrap.yml`：`shared-configs: []` + 只留 `napstarmappingconfig.yaml`；改后与基线树同名文件 **SHA256 全等**）⇒ **一次同时解决 D2 和 D8**。📌 **实测**：新 jar md5 `0ce5a08a…`（旧的 `c41735d8…` 已备份到 `/opt/napstar_app/backup-20261102/`）；jar 里 `application.yml` 的 `oms:` 块**是注释着的** → **Nacos 赢** → 启动日志 `*** Using Redis Standalone at node1:6379`，致命错误 0。📌 **并且**：重编后 jar 里的 platform 集合**与门户 jar 一致**（都是 `model-service-1.0.14` / `realserver-oms-1.0.14`）⇒ **重编不降集群能力**。⚠️ 「jar 文件换回 ≠ 运行中的 JVM 换回」这条教训已落成**可追溯机制**：`start-hd-apps.sh` 现在启动前打印 jar 的 **路径 + md5 + mtime**，回归矩阵的 A0 段也打印同样三项 ⇒ 换过 jar 的回归**必须**重跑，数字可不可比一眼能看出来 |
+| D8 | 🟡 → ✅ | **实施 D2 选项 (a) 时的副作用**（在**基线树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**基线树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与基线树产物**逐字节相同**） | ✅ **已修（2026-11-02）**：**从交付树重编** `model-controller`，并把 **D2 (a) 的改动做在交付树里**（`bootstrap.yml`：`shared-configs: []` + 只留 `napstarmappingconfig.yaml`；改后与基线树同名文件 **SHA256 全等**）⇒ **一次同时解决 D2 和 D8**。📌 **实测**：新 jar md5 `0ce5a08a…`（旧的 `c41735d8…` 已备份到 `/opt/napstar_app/backup-20261102/`）；jar 里 `application.yml` 的 `oms:` 块**是注释着的** → **Nacos 赢** → 启动日志 `*** Using Redis Standalone at node1:6379`，致命错误 0。📌 **并且**：重编后 jar 里的 platform 集合**与门户 jar 一致**（都是 `model-service-1.0.14` / `realserver-oms-1.0.14`）⇒ **重编不降集群能力**。⚠️ 「jar 文件换回 ≠ 运行中的 JVM 换回」这条教训已落成**可追溯机制**：`start-hd-apps.sh` 现在启动前打印 jar 的 **路径 + md5 + mtime**，回归矩阵的 A0 段也打印同样三项 ⇒ 换过 jar 的回归**必须**重跑，数字可不可比一眼能看出来 |
 | D9 | 🟡 | **本轮新发现**（版本区间） | 树 A 的 platform 源码比基线旧；`platform.version=[1.0.0,2.0.0)` 使交付物取基线 `1.0.14`（**带**集群补丁 ✅）。⇒ **切回 `[3.0.0,4.0.0)` 或发 `1.0.15` 就会静默降级**（不需要覆盖 1.0.14，**是区间挑版本**）。✅ 本轮已把影响集群能力的 4 个类与基线对齐 + 12 条单测兜底。🟡 **待交付方确认**：「先编 platform 再 install」是不是交付流程 ⇒ 在此之前**禁止 install 树 A 的 platform**，详见正文 |
-| D10 | 🔴 | 安装包 | **`sac` / `cmt` / `hds` 的建表 DDL 缺失** → 挡住 `transformNapstarModel`。平台上 `SystemTable.sql` 是 **MySQL 方言**（不是 PG 方言）→ 要转换。**上一轮遗留，本轮未处理** |
+| D10 | 🔴 | 安装包 | **`sac` / `cmt` / `hds` 的建表 DDL 缺失** → 挡住 `transformNapstarModel`。**上一轮遗留，本轮未处理**。📌 **2026-11-02 补测（缺口大小已量化）**：三个 schema 的**角色和 schema 都建好了**（`initPostgresDB.sql` 建 4 角色 + 4 schema），但**表全是 0 张**。**`sac`** 有 MySQL 源可转 —— 平台包的 `mysql_install/SystemTable.sql`（154 行 / 15 表，`engine = innodb`×15、`smallint(5)`×14）建的 `AttributeTypes`/`ObjectTypes`/`Choice`/`Wiring` **正好对得上** mapper 里的 `sac.attributetypes`/`sac.objecttypes`/`sac.choice`/`sac.wiring` ⇒ **转方言即可**。**`cmt`（`commitlist`）与 `hds`（`h_daymvpointstat_` 等，mapper 引用上百次）在安装包里连建表脚本都没有** ⇒ **源都要另外找**（大概率是历史库导出）。完整实测见 `docs/superpowers/sessions/2026-11-02-tree-map.md` §七 |
 | ⚙️-A | ⚙️ | **容器环境**（Docker Desktop 重启 → 容器非正常停 → ZK 里残留 ephemeral `/brokers/ids/<id>` → Kafka broker 启动即致命错误退出） | **待修（交付方）**：`hd-entrypoint.sh` 起 broker 前先清掉自己的 `/brokers/ids/<brokerId>`。🟡 **不是代码缺陷**，但会让应用层判据 C2 **静默不可执行**（长得跟 PASS 一模一样）。本轮已手工恢复（node1 755 / node2 756），详见正文 |
 | ⚙️-B | ⚙️ | **测试环境**（`/tmp/hd-token.txt` 里的 JWT 会过期） | **每次跑应用层判据前重新铸**：`bash /opt/hd/mint-hd-token.sh`。🟡 **不是代码缺陷**，但会让 B2 **必然**失败（HTTP 500 + Shiro 认证失败），**看起来像「应用写不进集群」**。本轮已重新铸（`exp = now + ~86400s`），详见正文 |
