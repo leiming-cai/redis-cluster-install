@@ -28,6 +28,7 @@
 | **C9** | 宿主 PowerShell 里 `bash -c "..."` 的 `$` 会被 PowerShell 先吃掉 | 复杂脚本**写成文件**再 `docker cp` 进容器跑 |
 | **C10** | **树 A 里改的每一个文件，改之前都要先快照到 `.hd-work/treeA-baseline/`** | 树 A **没有版本控制**（无 `.git`、无 `.svn`）→ 不快照就没有 diff、没法审、没法回滚 |
 | **C11** | **改树 A 的 platform 源码时，不要改 pom 的版本区间** | 区间决定选哪个二进制；改动区间会让**无补丁的树 A 源码**顶上来（见设计文档 §2.2 的风险表） |
+| **C12** | **本机离线编译必须加 `-llr`**（`-o -llr`） | 共享 `mvnRepo` 里 plugin 依赖的 `_remote.repositories` **缺 `aliyun-central` 这个 key**（`settings.xml` 把 `central` 镜像成了 `aliyun-central`）→ Maven 的增强型本地仓库管理器在离线模式下据此判定「不可用」→ 编译报 `The following artifacts could not be resolved: org.codehaus.plexus:plexus-utils:jar:2.0.4, ...`。`-llr`（legacy local repository）忽略 `_remote.repositories` 即可，**不改任何全局配置、不改 pom**。这是本机仓库元数据的历史遗留，与本轮改动无关 |
 
 ### 0.1 路径速查
 
@@ -506,7 +507,7 @@ import com.sac.platform.realserver.oms.utils.RedisClusterHelper;
 - [ ] **Step 1.11: 编译 `monitor`（**只编，不 package，不 install**）**
 
 ```powershell
-& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -pl napstarweb/monitor -DskipTests compile
+& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -llr -pl napstarweb/monitor -DskipTests compile
 ```
 
 工作目录：`D:\work\info\web\extendsystem\华盾-napstar2.0\code\application\backend`
@@ -520,8 +521,8 @@ Expected: `BUILD SUCCESS`。
 $M = "D:\work\info\web\extendsystem\华盾-napstar2.0\code\application\backend\napstarweb\monitor\src\main\java\com\sac\application\napstarweb\monitor"
 foreach ($f in @("services\SVGParseService.java","services\CalculateService.java","services\impl\SVGCacheServiceImpl.java","kafka\RTListener.java")) {
   $c = Get-Content "$M\$f" -Raw
-  "{0,-40} isCluster={1}  executePipelined={2}  getAllHashes={3}  getAllValues={4}" -f (Split-Path $f -Leaf),
-    ([regex]::Matches($c,"isCluster")).Count,
+  "{0,-40} branch={1}  executePipelined={2}  getAllHashes={3}  getAllValues={4}" -f (Split-Path $f -Leaf),
+    ([regex]::Matches($c,"redisClusterHelper\.isCluster\(\)")).Count,
     ([regex]::Matches($c,"executePipelined")).Count,
     ([regex]::Matches($c,"getAllHashes")).Count,
     ([regex]::Matches($c,"getAllValues")).Count
@@ -530,12 +531,15 @@ foreach ($f in @("services\SVGParseService.java","services\CalculateService.java
 
 Expected:
 ```
-SVGParseService.java                 isCluster=2  executePipelined=2  getAllHashes=0  getAllValues=1
-CalculateService.java                isCluster=2  executePipelined=2  getAllHashes=2  getAllValues=0
-SVGCacheServiceImpl.java             isCluster=1  executePipelined=1  getAllHashes=0  getAllValues=0
-RTListener.java                      isCluster=1  executePipelined=1  getAllHashes=0  getAllValues=0
+SVGParseService.java                 branch=2  executePipelined=2  getAllHashes=0  getAllValues=1
+CalculateService.java                branch=2  executePipelined=2  getAllHashes=2  getAllValues=0
+SVGCacheServiceImpl.java             branch=1  executePipelined=1  getAllHashes=0  getAllValues=0
+RTListener.java                      branch=1  executePipelined=1  getAllHashes=0  getAllValues=0
 ```
 
+> ⚠️ **`branch` 必须用精确正则 `redisClusterHelper\.isCluster\(\)`** —— 用 `"isCluster"` 会把
+> `RedisClusterHelper` / `RedisClusterHashPipeline` / `JedisCluster` 里的子串也算进去
+> （实测会得到 13/12/7/7）。**实测过，别用宽松正则。**
 > ⚠️ **`executePipelined` 的计数不应归零** —— 单机路径仍然用它。归零反而说明把单机路径也删了。
 
 - [ ] **Step 1.13: 提交（**树 A 没有版本控制 → 把 diff 存进本仓库**）**
@@ -596,7 +600,7 @@ Expected: 2 个文件。
 - [ ] **Step 2.2: 跑测试，确认它**红**了（这一步是判据，不是形式）**
 
 ```powershell
-& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -pl realserver/plugins/rtdata-module test
+& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -llr -pl realserver/plugins/rtdata-module test
 ```
 
 工作目录：`D:\work\info\web\extendsystem\华盾-napstar2.0\code\platform\backend`
@@ -642,7 +646,7 @@ Expected: 复制成功（树 B 440 行）。
 - [ ] **Step 2.5: 跑测试，确认它**绿**了**
 
 ```powershell
-& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -pl realserver/plugins/rtdata-module test
+& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -llr -pl realserver/plugins/rtdata-module test
 ```
 
 工作目录：`D:\work\info\web\extendsystem\华盾-napstar2.0\code\platform\backend`
@@ -653,7 +657,7 @@ Expected: `BUILD SUCCESS`，`Tests run: 8, Failures: 0, Errors: 0`
 - [ ] **Step 2.6: 编译 `model-service`（**只编，不 package**）**
 
 ```powershell
-& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -pl modelserver/services -DskipTests compile
+& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -llr -pl modelserver/services -DskipTests compile
 ```
 
 工作目录：`D:\work\info\web\extendsystem\华盾-napstar2.0\code\platform\backend`
@@ -795,7 +799,7 @@ from the portal tree is what produced the jar mismatch behind D8." 2>&1 | Select
 - [ ] **Step 4.1: 编译 `web-controller`（含 `monitor`）**
 
 ```powershell
-& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -pl napstarweb/web-controller -am -DskipTests package
+& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -llr -pl napstarweb/web-controller -am -DskipTests package
 ```
 
 工作目录：`D:\work\info\web\extendsystem\华盾-napstar2.0\code\application\backend`
@@ -807,7 +811,7 @@ Expected: `BUILD SUCCESS`。
 - [ ] **Step 4.2: 编译 `model-controller`**
 
 ```powershell
-& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -pl modelserver/controller -am -DskipTests package
+& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -llr -pl modelserver/controller -am -DskipTests package
 ```
 
 工作目录：`D:\work\info\web\extendsystem\华盾-napstar2.0\code\platform\backend`
@@ -817,7 +821,7 @@ Expected: `BUILD SUCCESS`。
 - [ ] **Step 4.3: 编译 `rtdata-consumer`**
 
 ```powershell
-& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -pl realserver/plugins/rtdata-consumer -am -DskipTests package
+& "D:\java\apache-maven\apache-maven-3.8.6\bin\mvn.cmd" -o -llr -pl realserver/plugins/rtdata-consumer -am -DskipTests package
 ```
 
 工作目录：`D:\work\info\web\extendsystem\华盾-napstar2.0\code\platform\backend`
