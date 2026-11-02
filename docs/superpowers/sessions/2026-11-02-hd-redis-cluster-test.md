@@ -76,13 +76,18 @@ DM 那份导出包也一样 → **不是导出遗漏**。
 
 ### 3.1 配置优先级（本轮最重要的结论）
 
+> 🔴 **本节的结论已被 §十 第 1 条推翻（2026-11-02 复核）** —— 「jar 赢过 Nacos」**只对门户树编的 jar 成立**
+> （下面「证据 A」取自 D8 那个门户 jar `c41735d8…`）。
+> **交付树**编出来的三个 jar 里 `oms:` 块是**注释着的** → **Nacos 赢** → `OPERATIONS.md` §4.5 **生效**。
+> ⇒ 下面这张表和「证据 A」**保留作历史记录**，但**不要照着它操作**；现在的结论看 §十 第 1 条。
+
 | 优先级 | 来源 | 结果 |
 |---|---|---|
 | 1（最高） | **命令行 `--oms.*`** | ✅ **赢** |
-| 2 | jar 内 `application.yml` | ✅ **赢过 Nacos** |
-| 3（最低） | Nacos dataId 里的 `oms:` | ❌ **输** |
+| 2 | jar 内 `application.yml` | ✅ **赢过 Nacos**（**仅当 jar 里有**活的** `oms:` 块** —— 门户树编的 jar 才是） |
+| 3（最低） | Nacos dataId 里的 `oms:` | ✅ **赢**（前提：jar 里没有活的 `oms:` 块 —— **交付树**编的 jar 就是） |
 
-**证据 A —— Nacos 覆盖不了 jar**：
+**证据 A —— Nacos 覆盖不了 jar**（⚠️ 取自**门户树**编的 jar `c41735d8…`，**不是交付树的**）：
 
 给 `MODELSERVER_GROUP/icms-controller.yaml` 的 `oms:` 加 `redisMode: standalone`，
 重启 model-controller，日志仍然是：
@@ -673,6 +678,10 @@ D2 决定用选项 (a)：把 bootstrap.yml 里对 share_base.yaml / ext_base.yam
 **根因就是 §3.1 的优先级**：jar 内 `application.yml` 硬编码了 `oms:` 块，
 Nacos 压不过它 → 只能走命令行。
 
+> 📌 **2026-11-02 复核更正**：这个根因**只对门户树编的 jar 成立**（那才带着活的 `oms:` 块）。
+> **交付树**编出来的 jar 里 `oms:` 是**注释着的** → Nacos 赢 → **生产走 Nacos 即可，密码不必上命令行**。
+> 详见 §十 第 1 条 + `docker/hd-napstar/DEFECTS.md` 的 D6。
+
 **生产的真正解法**（本轮不做）：改 jar 里的 `oms:` 块本身，
 或走 `bootstrap.yml` 的 override 开关把敏感值从 Nacos 侧注入，**不进命令行**。
 
@@ -919,7 +928,7 @@ b16a7e4 test(hd): add the redis cluster tool-level verification
 | **2** | **把 `.join()` + `writeWithRetry` + 去 `@Async` 移植进交付树** | 🔴 | D7-b。**必须跟 #1 一起做** —— 只修 #1 的话异常照样被吞 |
 | **3** | **从交付树重编 `model-controller`，把 D2 (a) 做在交付树里** | 🟡 | D8。**一次同时解决 #1 之外的 D2 和 D8**。⚠️ **不要用门户树编出来的 jar** |
 | **4** | **回归前显式写清 model-controller 是怎么起来的** | 🟡 | D8 的操作残留。jar 文件换回 ≠ 运行中的 JVM 换回。⚠️ **残留目前仍是潜伏的**（§4.4） |
-| **5** | **生产上 `oms:` 到底放哪** | 🟡 | Nacos 赢不了 jar 的 `application.yml`。要么改 jar，要么在 `bootstrap.yml` 里开 `override-none: false` + `allow-override: true`（**需单独验证**） |
+| **5** | **生产上 `oms:` 到底放哪** | 🟡 | ~~Nacos 赢不了 jar 的 `application.yml`。要么改 jar，要么在 `bootstrap.yml` 里开 `override-none: false` + `allow-override: true`（**需单独验证**）~~ → **2026-11-02 复核已定**：**走 Nacos**（交付树编的 jar 里 `oms:` 是注释着的 → Nacos 赢）。见 §十 第 1 条 |
 | **6** | **同一个 jar 里混 1.0.14 和 3.0.0 两版 platform，是有意的吗？** | 🟡 | **新增待交付方确认项**（§4.1·二）。树 A 的 `platform/backend` 是 3.0.0，但**它的源码根本没进包** —— 装的是仓库里基线树编的 1.0.14。**交付流程是不是漏了「先编 platform 再 install」这一步？** |
 | **7** | **`sche-viewer-server` 的 15 处裸 `executePipelined`** | 🟡 | 它当前不参与构建且是 standalone，暂时安全，**将来切集群前必须一并处理** |
 | **8** | **`application/backend-gd/` 是同一批代码的副本目录** | 🟡 | 不参与发版，但留着不改以后会再咬人 |
