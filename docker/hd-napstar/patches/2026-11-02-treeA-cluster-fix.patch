@@ -1468,10 +1468,10 @@ index f1b50f7..700bf32 100644
 +}
 diff --git a/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImplTest.java b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImplTest.java
 new file mode 100644
-index 0000000..f76d970
+index 0000000..40e9e72
 --- /dev/null
 +++ b/platform/backend/realserver/plugins/rtdata-module/src/test/java/com/sac/platform/realserver/service/impl/OmsWriteByKafkaServiceImplTest.java
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,217 @@
 +package com.sac.platform.realserver.service.impl;
 +
 +import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1489,6 +1489,7 @@ index 0000000..f76d970
 +import java.nio.charset.StandardCharsets;
 +import java.util.Arrays;
 +import java.util.Collections;
++import java.util.List;
 +import java.util.concurrent.CompletableFuture;
 +
 +import org.junit.jupiter.api.BeforeEach;
@@ -1577,6 +1578,28 @@ index 0000000..f76d970
 +    }
 +
 +    /**
++     * 一条 Kafka 记录里可以含多个 & 连接的点（RTListener 的 QUERYRESPONSE 就是这个形状）。
++     * 单机分支不做预先拆分，由 processItem 自己拆 &。
++     */
++    @Test
++    void batchWirtePipSplitsAmpersandJoinedPointsBeforeDelegating() {
++        when(redisRealDataService.wirteOmsPip(eq("real_data"), anyList()))
++                .thenReturn(CompletableFuture.completedFuture(true));
++
++        service.batchWirtePip(Arrays.asList(
++                "47245270977;1,1,123.45,1712345678000&47245270979;2,3,4,5"), "real_data");
++
++        ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
++        verify(redisRealDataService, times(1)).wirteOmsPip(eq("real_data"), captor.capture());
++        List<?> captured = captor.getValue();
++
++        assertEquals(2, captured.size());
++        assertEquals("47245270977;1,1,123.45,1712345678000", captured.get(0));
++        assertEquals("47245270979;2,3,4,5", captured.get(1));
++        assertEquals(0L, FailSetCounter.getCount());
++    }
++
++    /**
 +     * 单机/哨兵分支自己写 Redis（processItem），不经过 redisRealDataService。
 +     * key / field / value 的拼法与坏点容错都靠这一条守住：
 +     * 解析失败的点整条丢弃，成功的点逐 field 写 hSet 并计数。
@@ -1620,6 +1643,49 @@ index 0000000..f76d970
 +        // 没有重试过，也就没有失败计数
 +        assertEquals(0L, FailSetCounter.getCount());
 +        // 单机分支自己写，不委托给 redisRealDataService
++        verifyNoInteractions(redisRealDataService);
++    }
++
++    /**
++     * 单机分支收到的是未拆分的原始记录，& 的拆分在 processItem 里做。
++     * 拆出来的每个分片各自算一个 key、各自写一次 hSet。
++     */
++    @Test
++    @SuppressWarnings("unchecked")
++    void batchWirteStandaloneSplitsAmpersandJoinedPointsOfOneRecord() {
++        RedisSerializer<String> serializer = new StringRedisSerializer();
++        doReturn(serializer).when(redisTemplate).getKeySerializer();
++        doReturn(serializer).when(redisTemplate).getHashKeySerializer();
++        doReturn(serializer).when(redisTemplate).getHashValueSerializer();
++
++        RedisConnection connection = mock(RedisConnection.class);
++        doAnswer(invocation -> {
++            RedisCallback<Object> callback = invocation.getArgument(0);
++            callback.doInRedis(connection);
++            return Collections.emptyList();
++        }).when(redisTemplate).executePipelined(any(RedisCallback.class));
++
++        // 一条 Kafka 记录里含多个 & 连接的点
++        service.batchWirte(Arrays.asList(
++                "47245270977;1,1,123.45,1712345678000&47245270979;2,3,4,5"), "real_data");
++
++        ArgumentCaptor<byte[]> key = ArgumentCaptor.forClass(byte[].class);
++        ArgumentCaptor<byte[]> field = ArgumentCaptor.forClass(byte[].class);
++        ArgumentCaptor<byte[]> value = ArgumentCaptor.forClass(byte[].class);
++        verify(connection, times(2)).hSet(key.capture(), field.capture(), value.capture());
++
++        assertEquals("real_data:11:47245270977", new String(key.getAllValues().get(0), StandardCharsets.UTF_8));
++        assertEquals("1", new String(field.getAllValues().get(0), StandardCharsets.UTF_8));
++        assertEquals("123.45,1712345678000,1", new String(value.getAllValues().get(0), StandardCharsets.UTF_8));
++
++        assertEquals("real_data:11:47245270979", new String(key.getAllValues().get(1), StandardCharsets.UTF_8));
++        assertEquals("2", new String(field.getAllValues().get(1), StandardCharsets.UTF_8));
++        // value = contents[2] + "," + contents[3] + "," + contents[1] = "4,5,3"
++        assertEquals("4,5,3", new String(value.getAllValues().get(1), StandardCharsets.UTF_8));
++
++        assertEquals(2L, TotalSetCounter.getCount());
++        assertEquals(2L, SecSetCounter.getCount());
++        assertEquals(0L, FailSetCounter.getCount());
 +        verifyNoInteractions(redisRealDataService);
 +    }
 +}
