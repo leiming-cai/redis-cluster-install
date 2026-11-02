@@ -21,6 +21,11 @@
 其中 3 处直接改变了工作范围，
 1 处推翻了一个「结论对、推理错」的机制说明。
 
+> 📌 **本轮结束时的独立复核**：一个 reviewer 重新核了**全部实测数字**
+> （patch 12/12 字节还原、三个 jar 的 md5、依赖解析、`oms:` 注释状态、单测 5+7 条、
+> `mvnRepo` 零改动、门户快照差异归因）—— **全部对得上**。
+> 它查出的 6 条重要问题**全在文档层**（代码没问题），已全部抹平 → 见 §6.1·一。
+
 | # | 上一轮的说法 | 本轮的实测 |
 |---|---|---|
 | 1 | 「jar 赢过 Nacos → `OPERATIONS.md` §4.5 不生效」 | **只对门户树编的 jar 成立**。交付树三个 app 的 `oms:` 是**注释着的** → **Nacos 赢** → §4.5 生效 |
@@ -262,6 +267,8 @@ portal napstar info 表数 **30** → **30** · image id **同** · databases �
 | 9 | **`stop_apps()` 会杀所有 HD app JVM** ⇒ 「batch 1」和「batch 1b」凑不到一起 | 回归矩阵里用与 `start_one()` 相同的命令行**单独**起 `model-controller` |
 | 10 | **跑 base 矩阵前必须先停 Redis 集群** —— 集群在跑时 C 段会把 `hd-cluster-verify.sh` 的计数并进来 → SUMMARY 数字**与基线不可比** | 顺序固定：跑完集群测试 → `hd-redis-cluster.sh stop` → 再跑 base 矩阵 |
 | 11 | **`verify.sh` 里的 `BATCH="${1:-1}"` 是死变量**（没人用） | 记进 DEFECTS，本轮不改 |
+| 12 | **`read` 工具会重排 markdown 的 `**` 强调标记** —— 原文里跨空行配对的 `**` 被显示成「每行各自配对」→ 照着 `read` 的显示写 `oldString` 会匹配失败 | 改中文 markdown 时，`**` 密集的区域用 **PowerShell + .NET（`ReadAllText`/`WriteAllText` + UTF-8 无 BOM）+ 行锚点**做精确替换，改完用 `.Contains()` 逐条字节级校验 |
+| 13 | **`test-hd-cluster-merge-wiring.sh` 集群没跑时会「静默跳过」** —— 退出码 0，但 `PASS=0`（C 段整段 SKIP ⇒ 测不到「合并」这一步） | **「退出码 0」不等于「测到了」** ⇒ 起集群重跑才是有效的（本轮 `PASS=8`） |
 
 ---
 
@@ -270,6 +277,9 @@ portal napstar info 表数 **30** → **30** · image id **同** · databases �
 ### 6.1 提交列表（本轮）
 
 ```
+7b9383b docs(hd): record the script self-tests in the session log
+0b49f3c docs(hd): mark the superseded precedence claims in the earlier session log
+7b47b54 docs(hd): reconcile the defect list and the operations manual with the fix
 bc9cc24 docs(hd): record the cluster fix session and correct the precedence conclusion
 c544f0b fix(hd): make the jar each app was started from visible
 2739e9b fix(hd): drop the two Nacos dataIds that the install package does not ship
@@ -293,7 +303,32 @@ cd1371a docs(hd): confirm the design and the D2 scope
 > ⇒ 本列表的标题一律**照抄 `git log`**，不做「按内容改写」。
 
 （本轮起点：`54346d4` docs(hd): correct the D8 timeline and record how the platform jars are resolved）
-（本存档自身的提交：`bc9cc24`）
+（本存档自身的提交：`bc9cc24` `7b47b54` `0b49f3c` `7b9383b`）
+
+### 6.1·一 本轮做过的审查（**下一轮别重复**）
+
+每个 Task 都过了「规格符合性 + 代码质量」两道审查，**最后还做了一次整体审查**。
+整体审查独立复核了**全部实测数字**（patch 12/12 字节还原、三个 jar 的 md5、
+依赖版本、`oms:` 注释状态、单测 5+7 条、`mvnRepo` 零改动、门户快照差异归因）——
+**全部对得上**。
+
+它查出的问题**全在文档层**（代码没问题），已全部抹平：
+
+| # | 问题 | 状态 |
+|---|---|---|
+| I-1 | `OPERATIONS.md` §4.3 仍在写「Nacos 的 `oms:` 一律不生效」，且**把读者导向**已被推翻的结论 | ✅ 加了 banner + 5 处逐个标注 |
+| I-2 | DEFECTS.md **D6 正文**与汇总表矛盾（同一份文件两个相反说法） | ✅ 正文按新结论重写 |
+| I-3 | DEFECTS.md **D7-b 正文**标题仍写「交付树里依然存在，重新编译也修不掉」 | ✅ 加「改后」列 + 现状说明 |
+| I-4 | DEFECTS.md **D8 正文**写「修法本轮不做」「下次重启会又起不来」 | ✅ 改「已实施」+ 标注残留对象已消除 |
+| I-5 | DEFECTS.md **D2 正文**的「还没修」结论已过时 | ✅ 改为「已实施」 |
+| **I-6** | **上一轮的 🔴「`sac`/`cmt`/`hds` 建表 DDL」在两轮之间静默消失** | ✅ DEFECTS 加 D10 + 存档下一轮入口加第 10 条 |
+| M-1~M-8 | 8 条次要（行尾数字、模块数、`§4.3` 的交叉引用…） | ✅ 全修 |
+| S-1~S-4 | 4 条建议 | ✅ 全做 |
+
+> 📌 **教训（下一轮照做）**：
+> **改了汇总表就要改正文** —— 只改一处会留下「同一份文件两个相反说法」。
+> 同样，**上一轮存档正文的旧结论也要标「已作废」**，光在末尾加一节「更正」不够
+> （读者可能只引用正文那一句）。
 
 ### 6.2 树 A 的完整 diff（归档）
 
