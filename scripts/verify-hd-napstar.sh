@@ -50,6 +50,24 @@ echo "############ A — 应用 ############"
 #
 # ⚠️ realserver **不在名单里** —— 用户说明它没用，不需要启动。
 #    （它确实能起来，但 Redis 走的是 OmsConfig 硬编码那条路，见 DEFECTS.md）
+echo "############ A0 — 启动来源（必答项）############"
+# ⚠️ D8 的教训：「jar 文件换回」≠「运行中的 JVM 换回」。
+#    换过 jar 的回归**必须**重跑，不能沿用上一轮的数字。
+#    这里把每个 app 的 jar 指纹打出来 —— 没有它，下一轮无法判断数字可不可比。
+APPDIR=/opt/napstar_app
+for n in web-controller rtdata-consumer model-controller; do
+  for f in "$APPDIR/$n"-*.jar; do
+    [ -f "$f" ] || continue
+    echo "  $n  md5=$(md5sum "$f" 2>/dev/null | cut -d' ' -f1)  mtime=$(stat -c '%y' "$f" 2>/dev/null)"
+  done
+done
+echo "  Redis 生效模式（来自各 app 日志，逐字打印生效值）："
+for n in web-controller rtdata-consumer model-controller; do
+  printf "    %-18s " "$n"
+  grep -a -oE '\*\*\* Using Redis (Cluster with nodes: [^)]*|Standalone at [^)]*)' \
+    "/opt/hd/logs/$n.log" 2>/dev/null | tail -1 || echo "(无)"
+  echo
+done
 for n in web-controller realalarmconsumer rtdata-consumer model-controller; do
   L="$LOGDIR/$n.log"
   [ -f "$L" ] || { skip "A1 $n 没日志"; continue; }

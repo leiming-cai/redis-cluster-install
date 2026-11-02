@@ -87,6 +87,14 @@ stop_apps() {
 start_one() {
   local name="$1" jar="$2"
   if [ ! -f "$APP_DIR/$jar" ]; then echo "  SKIP $name (no $jar)"; return; fi
+  # ⚠️ 打印这个 jar 的指纹 —— D8 的教训：「jar 文件换回」≠「运行中的 JVM 换回」。
+  #    每一轮回归都必须能回答「这个 app 是用哪份 jar、什么时候的、怎么起来的」。
+  #    md5 用来认出是哪个构建产物；mtime 用来认出是不是刚换的。
+  if [ -f "$APP_DIR/$jar" ]; then
+    echo "    jar  : $APP_DIR/$jar"
+    echo "    md5  : $(md5sum "$APP_DIR/$jar" 2>/dev/null | cut -d' ' -f1)"
+    echo "    mtime: $(stat -c '%y' "$APP_DIR/$jar" 2>/dev/null)"
+  fi
   echo "  starting $name ($jar)"
   cd "$APP_DIR" || return
   # ⚠️ transformNapstarModel 的 application.yml（**打进了 jar 里**）把 sac/cmt
@@ -174,8 +182,12 @@ if [ "${HD_REDIS_CLUSTER:-0}" = "1" ]; then
   echo "    集群端点: $CLUSTER_IP:16379,$CLUSTER_IP:16380,$CLUSTER_IP:16381"
 else
   echo "=== Redis 模式: 默认（走 jar/Nacos 自己的 oms.*）==="
-  echo "    ⚠️ model-controller 的 jar 内 oms.* 硬编码成 cluster+127.0.0.1:6379+空密码，"
-  echo "       在这个环境里**起不来**（NOAUTH）。要跑集群请设 HD_REDIS_CLUSTER=1。"
+  # 📌 交付树的三个 app 的 application.yml 里 oms: 块是**注释着的**
+  #    （web-controller:108 / modelserver/controller:92 / rtdata-consumer:43）
+  #    → jar 不覆盖 Nacos → Nacos 的 oms: 生效 → node1:6379 + sac888（standalone）。
+  # 📌 只有**门户树**编出来的 jar 才把 oms: 固化成 cluster+127.0.0.1:6379+空密码
+  #    → 那种 jar 在这个环境里起不来（NOAUTH）。本仓库部署的 jar 来自交付树。
+  echo "    ℹ️ 交付树的 jar 里 oms: 是注释的 → 生效值来自 Nacos（standalone node1:6379）。"
 fi
 
 echo "=== stopping any running app from a previous batch ==="
