@@ -526,7 +526,7 @@ Expected:
 ```
   单机 field 数 = 12
   集群 field 数 = 12
-SUMMARY: PASS=5 FAIL=0
+SUMMARY: PASS=6 FAIL=0
 ```
 退出码 0。
 
@@ -766,7 +766,9 @@ Expected: `TEST SUMMARY: PASS=8 FAIL=0`，退出码 0。
 docker exec hd-node1 bash /opt/hd/hd-monitor-runtime-verify.sh; Write-Output "exit=$LASTEXITCODE"
 ```
 
-Expected: `SUMMARY: PASS=5 FAIL=0`，退出码 0。
+Expected: `SUMMARY: PASS=6 FAIL=0`，退出码 0。
+（6 条判据：S1 / S2 / C1 / C2 / C3 / C4 —— 计划里原先写的「PASS=5」是**数错了**，
+脚本里是 6 个 `ok()`；已按实测改正。）
 
 - [ ] **Step 6: 提交**
 
