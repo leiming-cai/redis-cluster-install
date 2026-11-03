@@ -45,6 +45,13 @@ case "$IP" in
   ''|*' '*|*$'\n'*|*[!0-9.]*) echo "!! 容器 IP 解析失败: '$IP'" >&2; exit 1 ;;
 esac
 
+# 纯逻辑库（比对 field、判异常数）—— 从本脚本拆出来，好写边界测试
+LIB_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hd-monitor-runtime-lib.sh"
+[ -f "$LIB_SELF" ] || LIB_SELF=/opt/hd/hd-monitor-runtime-lib.sh
+if [ ! -f "$LIB_SELF" ]; then echo "!! 找不到 hd-monitor-runtime-lib.sh" >&2; exit 3; fi
+# shellcheck source=/dev/null
+. "$LIB_SELF"
+
 # 集群里读 hash（-c 跟随 MOVED）
 rcc() { timeout 5 "$REDIS_CLI" -c -h "$IP" -p "$1" -a "$PASS_WORD" --no-auth-warning "${@:2}" 2>&1 | tr -d '\r'; }
 # 单机里读 hash
@@ -179,7 +186,7 @@ S_FIELDS=$(grep -c . /tmp/mrv-standalone-fields.txt)
 echo "  单机 field 数 = $S_FIELDS"
 echo "  单机 field 列表:"
 sed 's/^/      /' /tmp/mrv-standalone-fields.txt
-if [ "$S_FIELDS" -eq "$EXPECT_FIELDS" ]; then
+if mrv_field_count_ok /tmp/mrv-standalone-fields.txt "$EXPECT_FIELDS"; then
   ok "S1 单机模式 field 数 = $EXPECT_FIELDS"
 else
   bad "S1 单机模式 field 数 = $S_FIELDS（期望 $EXPECT_FIELDS）"
@@ -187,8 +194,7 @@ fi
 # 每个 field 的 objType 段必须是种子编号
 SEEN_SEED=0
 for f in $(cat /tmp/mrv-standalone-fields.txt); do
-  ot=$(echo "$f" | cut -d_ -f1)
-  case " $SEED_OTYPES " in *" $ot "*) SEEN_SEED=$((SEEN_SEED+1)) ;; esac
+  if mrv_field_is_seed "$f" "$SEED_OTYPES"; then SEEN_SEED=$((SEEN_SEED+1)); fi
 done
 if [ "$SEEN_SEED" -eq "$EXPECT_FIELDS" ]; then
   ok "S2 单机模式的 field 全部来自种子编号（$SEEN_SEED/$EXPECT_FIELDS）"
@@ -249,10 +255,12 @@ C2_CNT=$(grep -c . /tmp/mrv-cluster-fields.txt)
 if [ "${C2_CNT:-0}" -eq 0 ]; then
   # 两边都是 0 个 field 时 diff 也会「成功」—— 那是空比，不能算「逐个相等」
   bad "C2 集群模式的 field 数是 0 —— 没有 field 可比，不能判「逐个相等」"
-elif diff -u /tmp/mrv-standalone-fields.txt /tmp/mrv-cluster-fields.txt > /tmp/mrv-field-diff.txt 2>&1; then
+elif mrv_fields_match /tmp/mrv-standalone-fields.txt /tmp/mrv-cluster-fields.txt; then
+  diff -u /tmp/mrv-standalone-fields.txt /tmp/mrv-cluster-fields.txt > /tmp/mrv-field-diff.txt 2>&1
   ok "C2 集群模式的 field 名与单机模式**逐个相等**（$C2_CNT 个）"
 else
   bad "C2 集群模式的 field 名与单机模式**不一致**："
+  diff -u /tmp/mrv-standalone-fields.txt /tmp/mrv-cluster-fields.txt > /tmp/mrv-field-diff.txt 2>&1
   sed 's/^/      /' /tmp/mrv-field-diff.txt
 fi
 
