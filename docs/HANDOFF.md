@@ -2,7 +2,8 @@
 
 > 📌 **napstar2.0 部分的现状以 `docs/superpowers/sessions/2026-11-0*.md` 为准**
 > （`…-cluster-test.md` = 集群测试轮 · `…-cluster-fix.md` = 交付树集群修复轮 ·
-> **`…-monitor-runtime-coverage.md` = 树名更正 + 运行时覆盖轮（最新）**）——
+> `…-monitor-runtime-coverage.md` = 树名更正 + 运行时覆盖轮 ·
+> **`…-hd-cluster-test-round.md` = 集群全量回归轮（最新）**）——
 > 下面这份交接文档**截止到 2026-10-30**，**没有**覆盖那几轮的工作。
 > 🌲 **三棵源码树的对照表（先看这个）：`docs/superpowers/sessions/2026-11-03-tree-map.md`**
 

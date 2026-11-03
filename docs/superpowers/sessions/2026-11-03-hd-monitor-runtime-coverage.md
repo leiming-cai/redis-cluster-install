@@ -4,6 +4,9 @@
 > 打开它 == 拿到本会话的**全部产出**：环境体检、**一个横跨全部文档的树名错误**、
 > D10 的重新定性、`monitor` 的运行时覆盖、回归中查出的 3 个判据缺陷、2 个新环境缺口。
 >
+> > 📌 **下一份存档（最新）**：`docs/superpowers/sessions/2026-11-03-hd-cluster-test-round.md`
+> > （用 Redis 集群跑一轮全量回归 —— 8 项判据全绿 + 一个批次顺序的坑）
+>
 > - 上一份存档：`docs/superpowers/sessions/2026-11-02-hd-redis-cluster-fix.md`（§九 / §十 是本会话的前半段）
 > - **本会话的树图**：`docs/superpowers/sessions/2026-11-03-tree-map.md`（**先看这个**，它是理解其它文档的钥匙）
 > - 本轮计划：`docs/superpowers/plans/2026-11-03-hd-monitor-runtime-coverage.md`
