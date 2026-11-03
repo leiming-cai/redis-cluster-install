@@ -20,7 +20,7 @@
 # 退出码约定（给下游判定脚本用）:
 #   0 = 成功（--status 只要读得到行数就算 0）
 #   1 = 连上了库、但行数不对（--seed 期望 3/12/12，--clean 期望 0/0/0）
-#   2 = 连不上库 / 读不到行数
+#   2 = 连不上库 / 写操作失败 / 读不到行数
 set -uo pipefail
 
 export PGPASSWORD="${PGPASSWORD:-postgres}"
