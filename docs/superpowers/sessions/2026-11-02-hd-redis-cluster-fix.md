@@ -629,3 +629,86 @@ curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18848/nacos/v1/console/h
 > **灌 27 行元数据，换 6 处里的 1 处真正在集群模式下跑一次。**
 > **另外 5 处仍缺运行时覆盖** —— 已记进 DEFECTS 的 D11，**不假装覆盖了**。
 > 要覆盖剩下 5 处，得先解决「SVG 文件从哪来」和「COMMITDATAINCRE 消息格式」两个输入问题。
+
+---
+
+## 十、2026-11-03 追加轮：给 `monitor` 的集群分支补上**运行时**覆盖
+
+> 承接 §九。§九 记录了「灌 27 行元数据」这件事本身；本节是**完整结果**
+> （含回归中查出并修掉的 3 个缺陷）。
+
+### 10.1 收尾状态（全部实测）
+
+| 判据 | 结果 |
+|---|---|
+| 集群层测试 `hd-cluster-app-test.sh` | **`PASS=36 FAIL=0 SKIP=0`**（上一轮 `34/0/1`） |
+| ↳ **A2 从 SKIP 变成真 PASS** | `PASS A2 应用写的 real_graph:realscope 在集群里` |
+| 底层集群验证 `hd-cluster-verify.sh` | `PASS=39 FAIL=0` |
+| base 回归矩阵 `verify.sh` | **`PASS=47 FAIL=0 SKIP=4`**（与基线同数） |
+| `test-hd-cluster-summary.sh` | `PASS=19 FAIL=0` |
+| `test-hd-cluster-merge-wiring.sh` | `PASS=8 FAIL=0`（**要集群在跑**，见 §10.4） |
+| `test-hd-portal-baseline.sh` | `PASS=40 FAIL=0`（**要 `rc-e2e-runner`**，`/out` 挂载） |
+| `test-hd-monitor-runtime-verify.sh` | `PASS=16 FAIL=0` |
+
+**单机与集群的 `real_graph:realscope` 各 12 个 field，field 名逐个相等** ——
+这就是「集群分支真的执行了，且与单机分支行为等价」的证据。
+
+### 10.2 回归中查出并修掉的 3 个缺陷
+
+| # | 缺陷 | 根因 | 修法 |
+|---|---|---|---|
+| **1** | 种子脚本的清缓存**是空操作** | 模式写的是 `objecttypes*`，而**真实**的缓存 key 是 `model:objecttypes:*` / `model:attributetypes:*`（`@Cacheable` 的 value 经 RedisCacheManager 序列化后带 `model:` 前缀）⇒ 匹配 **0** 个，实测有 **8** 个 | 模式改成 `model:*`；函数改名 `clear_model_cache`；注释记下实测到的 key 名 |
+| **2** | base 矩阵的 **B2 报 FAIL** | B2 的接口级判据**按报错文案**判（`属性名称非法或不存在` ⇒ SKIP）。灌了元数据后 `matchAType("Value")` 成功，请求走得更远，报错变成 `Map.get 返回 null` ⇒ 不匹配 ⇒ 落到 `"code":500` ⇒ **FAIL**。而**真正**的原因是：曲线接口要先读**第三方实例数据**（`getHisMVPoint` → `modelEntityDataService.read` → 查 `sac`/`hds`），这两个 schema **一张表都没有** ⇒ 接口级判据**本来就不可能执行** | 改成**判前置条件**（第三方 schema 有没有表），没有就 SKIP 并说清原因；**SQL 层那条真判据照跑** |
+| **3** | 集群测试的 **E 清理判据 FAIL**（增量 7） | E 段要求「key 数回到基线」，但灌了元数据后应用**真的会**写自己的 key：6 个 `model:*` 缓存 + 1 个 `real_graph:realscope`（**正是 A2 判据要求它存在的**）。⇒ E 段**自相矛盾**：前一条判据说「model:* 还在是对的」，后一条说「总数必须回基线」 | 增量统计**扣除应用自己的 `model:*` / `real_graph:*` 命名空间**（基线与终值用同一口径）；本脚本自己的 key 全在 `hd:test:apptest:*` 下，由前一条判据单独查 |
+
+> 📌 **缺陷 3 的意义超出本轮**：那条判据在**任何有模型元数据的环境里都必然失败**
+> （真实部署也有模型元数据）⇒ 它是**过严**，不是应用的 bug。
+> 上一轮之所以绿，是因为元数据表是空的 ⇒ 应用什么都写不出来 ⇒ 增量恰好是 0。
+
+### 10.3 本轮新增的文件
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/seed-hd-model-metadata.sh` | 灌 / 清 **27 行**模型元数据夹具（3 objecttype + 12 attribute + 12 关联），`source_code='HDTEST'`，编号 `900001+`，幂等可清除 |
+| `scripts/hd-monitor-runtime-verify.sh` | **单机 + 集群**两遍跑，比对 `real_graph:realscope` 的 field 逐个相等（**10 条判据**） |
+| `scripts/hd-monitor-runtime-lib.sh` | 判据的**纯逻辑**（可 source，不碰网络/库） |
+| `scripts/test-hd-monitor-runtime-verify.sh` | 判据的**边界自测**（**16 条**，含「必须 FAIL」的反例） |
+
+### 10.4 三个「必须记住的执行顺序」
+
+| # | 顺序 | 为什么 |
+|---|---|---|
+| 1 | **跑 base 矩阵前必须恢复单机态**（集群停 + 应用按 standalone 起 + `model-controller` 单独起） | 集群在跑时 base 矩阵会把集群的计数并进来（C 段）⇒ SUMMARY **不可比**；而且集群测试会用 `HD_REDIS_CLUSTER=1` 重启应用并**截断日志** ⇒ base 矩阵的 A2/A2b（找 `Using Redis Standalone at` 那行）会 **FAIL**。实测：顺序错了会得到 `PASS=78 FAIL=8` |
+| 2 | `test-hd-cluster-merge-wiring.sh` **要在集群在跑时**跑 | 集群没跑时它**静默跳过**（退出码 0 但 `PASS=0`）—— 「退出码 0」**不等于**「测到了」 |
+| 3 | `test-hd-portal-baseline.sh` **要在 `rc-e2e-runner` 里**跑 | 它要读 `/out/portal-snapshot-cluster.txt`（`/out` 是宿主 `.hd-work` 的挂载点，`hd-node1` 里**没有**）⇒ 在 `hd-node1` 里跑会退出码 2 |
+
+### 10.5 ⚙️-D（新增的环境缺口）：**base 矩阵读的是缓存里的 JWT，从不刷新**
+
+本轮第一次跑 base 矩阵时，`/tmp/hd-token.txt` 的 JWT **在开跑前 4 秒刚好过期**
+（铸于 11-02 12:48，24 小时 TTL）⇒ **2 条假 FAIL**（两端点都 500，消息是 `TokenExpiredException`）。
+
+**矩阵自己不会重铸 token** ⇒ 每一轮跑矩阵之前都得**手动**：
+```bash
+bash /opt/hd/mint-hd-token.sh
+```
+（这是 §七 #5 已经记过的 ⚙️-B，但**矩阵本身不自带**这个动作 ⇒ 容易忘。）
+**下一轮开工前必查**：`exp` 是否还没到。
+
+### 10.6 本轮踩的坑（续 §九.4 的 18–22）
+
+| # | 坑 | 对策 |
+|---|---|---|
+| 23 | **`redis-cli KEYS` 空结果会打一个换行** ⇒ `\| wc -l` 数出 **1** 而不是 0 | 数 key 用 `grep -c` 或 `EVAL "return #redis.call('keys',...)"`，**不要用 `wc -l`** |
+| 24 | **改了夹具 ⇒ 应用行为变了 ⇒ base 矩阵里原本 SKIP 的判据变成 FAIL** | 判据必须**判前置条件**（能不能被驱动），不能判**报错文案**（文案会随数据变） |
+| 25 | **集群测试的「DBSIZE 增量必须为 0」在有模型元数据时必然失败** | 增量统计要**扣除应用自己的命名空间**；否则这条判据只在一个「应用什么都写不出来」的空环境里才成立 |
+
+### 10.7 下一轮照做
+
+> **「跑判据」不等于「判据还是那个判据」。**
+> 本轮 3 个缺陷里有 2 个是**判据本身过时**（按文案判、按总数判）——
+> 它们在旧环境下是绿的，只是因为**应用什么都没跑**。
+> ⇒ 每次加夹具 / 灌数据后，要重新问一遍：**每条判据在「应用真的会干活」的世界里还成立吗？**
+>
+> 另外还有两件没做完的（§七 #1 的其余部分）：
+> **C/D/E/F 四处**仍无运行时覆盖（缺 SVG 文件 / websocket 订阅），
+> `RTListener` 那处缺一条 Kafka `COMMITDATAINCRE` 消息。
