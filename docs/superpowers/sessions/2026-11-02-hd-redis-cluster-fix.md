@@ -377,7 +377,7 @@ cd1371a docs(hd): confirm the design and the D2 scope
 | **7** | **`application/backend-gd/` 是同一批代码的副本目录** | 🟡 | 不参与发版，但留着不改以后会再咬人 |
 | **8** | **基线的几个次要设计问题** | 🟢 | `FailSetCounter` 只写不读（没接出口）· `add(data.size())` 的单位在集群/单机两条路上不一致（点数 vs 记录数）· `wirteOmsPip` 去 `@Async` 后写操作占用 `consumerRunExecutor`（core=16 + CallerRunsPolicy → Redis 故障时可能反压到 Kafka 消费线程）· `processItem` 异常时 `return 0` 会丢掉该 item 已累计的 fieldCount · `CacheServiceImpl` 单机分支的 try/catch 粒度比集群分支粗。**这些都是基线设计，本轮「与基线对齐」时没改** |
 | **9** | **平台基线树的其它业务逻辑差异** | 🟡 | 树 A 的 platform 源码与基线 1.0.14 在**业务逻辑**上也有差异（本轮只对齐了影响集群能力的 4 个类）⇒ 见 D9 |
-| **10** | **`sac` / `cmt` / `hds` 的建表 DDL** | 🔴 | **上一轮遗留，本轮未处理**。挡住 `transformNapstarModel`。平台上 `SystemTable.sql` 是 **MySQL 方言**（不是 PG 方言）→ 要转换 |
+| **10** | **`sac` / `cmt` / `hds` 的第三方数据没接进来** | 🟡 | **上一轮遗留，本轮未处理**，但**定性已变**（见 §8.3）：这三个 schema 是**第三方系统表**，本项目**只读** ⇒ **不由本项目建表**。原写的「缺 DDL → 转 MySQL 方言 → 补建表」**方向错了**。真正要解决的是「**把第三方数据接进来**」（接第三方库，或拿第三方的 PG 建表脚本 + 授权）。⚠️ 顺带查清：平台包的 `mysql_install/SystemTable.sql` **大概率是 `sac` 在 MySQL 布局下的建表脚本**（表名与 mapper 完全对得上），但**没有任何脚本执行它** ⇒ 孤儿文件，要用得先问第三方 |
 
 > **🚫 明确不做**：`hisDataProducer` / `hisDataSend` 的 PG 驱动缺失（D1，用户已决定不修改这两个模块）。
 
@@ -455,14 +455,49 @@ cd1371a docs(hd): confirm the design and the D2 scope
 ⇒ **D9 的机制（版本区间挑版本）对门户线不成立** —— 门户用定点 `2.0.0`。
 ⇒ **门户线要切集群的话，得从基线把整套补丁搬过去**（跟华盾当时一样）。
 
-### 8.3 D10 的缺口被量化（结论不变，边界更清楚）
+### 8.3 🔴→🟡 **D10 的性质变了**：`sac`/`cmt`/`hds` 是**第三方系统表**，本项目**只读**
 
-| 需求 | 源 | 方言 | 状态 |
-|---|---|---|---|
-| `info` 30 表 | `/pkg/database/postgresql_install/sqls/info/InitTable/*.sql` | PG | ✅ 已装 |
-| `sac` | 平台包 `mysql_install/SystemTable.sql`（15 表，`engine=innodb`×15 / `smallint(5)`×14）—— `AttributeTypes`/`ObjectTypes`/`Choice`/`Wiring` **正好对得上** mapper 里的 `sac.attributetypes`/`sac.objecttypes`/`sac.choice`/`sac.wiring` | MySQL | ❌ **要转方言** |
-| `cmt`（`commitlist`） | **安装包里没有建表脚本** | — | ❌ **源都要另找** |
-| `hds`（`h_daymvpointstat_` 等，mapper 引用上百次） | **安装包里没有建表脚本**（`CreatehistoryTable.sql` 只建 `H_AlarmEvents`/`H_DataEdits`/`H_TempId`/`H_TimeStamp`） | — | ❌ **源都要另找** |
+> 📌 **用户 2026-11-03 明确**：`cmt`、`sac`、`hds` 是**第三方系统表**，
+> 该项目**有读取权限** ⇒ **不由本项目建表**。
+> 这一点把 D10 从「缺 DDL，要补」改成了「**环境/依赖缺口**」。
+
+**只读是实测确认的**（mapper XML 口径，HD 交付树）：
+
+| schema | select | insert | update | delete |
+|---|---|---|---|---|
+| `sac` | 32 | **0** | **0** | **0** |
+| `cmt` | 12 | **0** | **0** | **0** |
+| `hds` | 1160 | **0** | **0** | **0** |
+| **`info`（本项目自有）** | 0 | **4** | 0 | 0 |
+
+（基线树同形；Java 代码里对这三个 schema 也**零** DDL/DML。）
+
+**活库的权限模型印证**：
+
+- `sac`/`cmt`/`hds` 三个 schema 各自 **owner 是自己**，跨 schema **只授 USAGE**（`U`）——
+  **表级 SELECT 权限由建表的第三方单独授予**。
+- `initPostgresDB.sql` 建 **4 角色 + 4 schema**，但**只给 `info` 建表**（本项目负责的那部分）。
+- `info` 的 30 张表上 `info` 角色有全 7 种权限；**其它三个 schema 一张表都没有**。
+
+**⇒ 真正的阻塞不是「缺 DDL」，是「本环境没有第三方数据」。**
+`transformNapstarModel` 是**读** sac/cmt、**写** info 的**转换作业**
+（三段数据源 `SacDataSourceConfig`/`CmtDataSourceConfig`/`InfoDataSourceConfig`），
+它要的是第三方库**里有数据**，不是本项目去建表。
+⇒ 要让它跑起来，得**把第三方数据接进来**（接第三方库，或拿第三方的 PG 建表脚本 + 授权）。
+
+**顺带查清的事实**（供找第三方时用）：
+- 平台上唯一像 `sac` 源的是 `mysql_install/SystemTable.sql`（154 行 / 15 表，MySQL 方言），
+  建的 `AttributeTypes`/`ObjectTypes`/`Choice`/`Wiring` **正好对得上** mapper 里的
+  `sac.attributetypes`/`sac.objecttypes`/`sac.choice`/`sac.wiring`
+  ⇒ 大概率就是 `sac` 在 **MySQL 布局**下的建表脚本。
+  ⚠️ 但**没有任何脚本执行它**（`mysql_server_info_init.sh` 只跑 `info` 那 6 个）⇒ **孤儿文件**。
+- `hds.*`（`h_day*`/`h_hour*`/`h_cycle_*`/`hmonth_`，mapper 引用 1160 次）
+  和 `cmt.commitlist` **在安装包里完全没有建表脚本**；
+  `CreatehistoryTable.sql` 建的是 `H_AlarmEvents`/`H_DataEdits`/`H_TempId`/`H_TimeStamp`
+  —— **表名形态完全不同**，不是 hds 那批。
+- `hds` 的表名形态 = **统计/历史产物** ⇒ 由**采集侧**产出。
+
+完整实测见 `docs/superpowers/sessions/2026-11-02-tree-map.md` §七。
 
 ### 8.4 顺带发现（**门户线自己的问题，与华盾无关**）
 
