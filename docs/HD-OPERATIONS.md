@@ -1,13 +1,26 @@
-# 华盾 napstar2.0 — 部署 / 运行手册
+# 华盾 napstar2.0 — 单机改集群 · 部署 / 运行手册
 
 > **这份文档讲的是「华盾 napstar2.0」这一条产品线**（交付树
 > `D:\work\info\web\extendsystem\华盾-napstar2.0\code`）。
 >
-> **它的读者**是：拿到这套系统、要在**真实机器**上把 Redis / ZooKeeper / Kafka
-> 装成集群、再把四个后台程序配对跑起来的人。
+> **它描述的是一次改造**：把**现在跑在一台机器上的单机**
+> Redis / ZooKeeper / Kafka，改成**两台机器的集群**，
+> 并把四个后台程序的配置改到能正确连上集群。
+>
+> | | 现状 | 改成 |
+> |---|---|---|
+> | Redis | 一台机器上两个独立单机（6379 + 6389） | 两台机器，3 master + 3 replica |
+> | ZooKeeper | 单节点 | 2 voter ensemble |
+> | Kafka | 单 broker | 2 broker |
+> | 四个后台程序 | 连单机（`oms: hostname: node1`） | 连集群（`oms: redisMode: cluster`） |
+>
+> **它的读者**是：执行这次改造的实施人员。
 >
 > 📌 **先读 §0.4** —— 那里有一条规则，**照着源码里的 yaml 改 = 不生效**。
 > 这一条能省掉实施人员一整天。
+>
+> 📌 **§1.1 是全局前提** —— 现状是**一台**机器，不是两台。
+> 把 6379 和 6389 想成「在两台机器上」是本章最常见的误读。
 
 ---
 
@@ -17,9 +30,19 @@
 
 | 你是谁 | 读哪几章 |
 |---|---|
-| **实施人员**（要把这套东西装上线） | §1 → §2（Redis）→ §3（ZK+Kafka）→ §4（YAML）→ §5（构建启动验证）→ §6（改错了长什么样） |
-| **运维**（已经在跑了，出了问题） | §7 故障排查速查表 → §8.3 容易记错的点 |
+| **实施人员**（执行这次改造） | §1（先看现状）→ §2（Redis）→ §3（ZK+Kafka）→ §4（YAML）→ §5（构建启动验证）→ §6（改错了长什么样） |
+| **运维**（改造后日常维护 / 出问题了） | §7 故障排查速查表 → §8.3 容易记错的点 |
 | **只想知道「现在是什么状况」** | §1 全链路总览 + §2.1 / §3.1 两节「现状」 |
+
+### 0.1.1 ⭐ 这次改造的三条硬顺序
+
+> **顺序错了不会立刻报错，会「看着装好了其实没装好」** —— 这是本项目反复踩过的坑。
+
+| # | 顺序 | 违反的后果 |
+|---|---|---|
+| 1 | **先停应用 → 再停中间件** | 应用还在跑而 Redis 没了 ⇒ 应用疯狂报错、可能写坏数据 |
+| 2 | **中间件装好 → 改 Nacos → 最后迁数据** | Nacos 还是旧的单机地址 ⇒ 应用**静默连单机**（已停）⇒ 起不来；集群装好但数据没迁 ⇒ 应用读到**空库**（看着像「数据丢了」） |
+| 3 | **迁数据期间应用全停** | 边迁边写 ⇒ 数据不一致 |
 
 ### 0.2 与其它文档的分工
 
@@ -211,11 +234,21 @@ NAPSTARWEB_GROUP/scheviewer.yaml
 
 ---
 
-## 2. 【中间件】Redis：从两个独立单机到集群
+## 2. 【中间件】Redis：从单机改成集群
 
 ### 2.1 ⭐ 生产现状：同一台机器上跑着**两个独立单机**
 
 这是本文最重要的一条前提事实。**照着「改个配置」的想法做 Redis 集群化会失败。**
+**为什么不能只改配置**：
+
+| | 现状 | 集群 | 差在哪 |
+|---|---|---|---|
+| 机器数 | **1 台** | **2 台** | 要**加机器**、装 Redis、建用户、放行端口 |
+| 实例数 | 2 个（6379 / 6389） | **6 个**（6379-6384） | 要新建 4 个实例 |
+| 关系 | **两个互不相干**（没有 `replicaof`） | 3 master + 3 replica | 要重新分配主从 |
+| 数据 | 各自有一份 | 合并成一个 keyspace | ⚠️ **要迁数据**（§2.3 末） |
+
+⇒ **四个维度全变了**，没有一个是改配置能覆盖的。
 
 **实测证据**（安装包 `/pkg/env/redis/`）：
 
@@ -261,6 +294,11 @@ redis.conf:1408        appendonly no
 cp cluster.conf.example cluster.conf
 vim cluster.conf
 ```
+
+> 📌 **注意区分两件事**：
+> `cluster.conf` 是**给脚本看的**（描述「集群长什么样」：几台机器、哪些端口、什么密码），
+> **不是**「把现有单机改成集群」的一键开关 ——
+> 脚本**只负责组网**，**不停现有实例、不迁数据**（那两步在 §2.3 第 0 步和 §2.3 末）。
 
 华盾环境的模板（**按你的实际机器改 `<...>`**）：
 
@@ -546,7 +584,7 @@ grep -a 'Using Redis Standalone at' /opt/hd/logs/<app>.log   # 应该**没有**�
 
 ---
 
-## 3. 【中间件】ZooKeeper + Kafka：从单节点到两节点集群
+## 3. 【中间件】ZooKeeper + Kafka：从单机改成两节点集群
 
 > ⚠️ **先说清边界**：本章的模板来自本仓库 `scripts/e2e-kafka-cluster.sh`，
 > **已在 Docker E2E 环境验证过，但没有在真机上验证过**。
@@ -611,6 +649,11 @@ bash install_zk.sh 2 /home/cps     # ← 在 node2 上
 > 但要**知道脚本里有这个坑**。
 
 ### 3.1 生产现状：单节点 ZK + 单 broker + 5 个 RF=1 的 topic
+
+> 📌 **ZK 与 Kafka 的改造与 Redis 是**独立的** —— 它们不依赖对方，
+> 但**都必须在改 Nacos 之前完成**（§0.1.1 第 2 条）。
+> ⇒ 实施上可以**先在 node2 上把 ZK/Kafka 装好**（不动现网），
+> 再挑停机窗口一次性切 Redis + ZK + Kafka + Nacos + 迁数据 + 启应用。
 
 #### 3.1.1 ZooKeeper（实测 `/pkg/env/zookeeper/zoo.cfg`，去掉注释）
 
@@ -1031,7 +1074,18 @@ jinfo -sysprops <kafka 的 pid> 2>/dev/null | grep MaxHeapSize
 
 ---
 
-## 4. 【程序】四个应用的 YAML 配置
+## 4. 【程序】四个应用的 YAML 配置：从单机改成集群
+
+> 📌 **这一章是本次改造的「程序侧」部分**：
+> 中间件装成集群之后，**四个应用的配置必须跟着改**，
+> 否则它们会**继续连那个已经被停掉的单机**。
+>
+> | 应用 | 要改的 dataId | 改什么 |
+> |---|---|---|
+> | web-controller | `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | `oms:` + `spring.redis:` + `spring.kafka.bootstrap-servers` |
+> | commitDataIncreProducer | `MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml` | **补 `oms:` 块**（现在没有）+ `spring.redis:` + `spring.kafka.bootstrap-servers` |
+> | rtdata-consumer | `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | `oms:` + `spring.kafka.bootstrap-servers` |
+> | model-controller | `MODELSERVER_GROUP/icms-controller.yaml` | `oms:` + `spring.redis:` |
 
 ### 4.1 ⭐ 生效优先级（先记住这条，其余都好办）
 
@@ -1510,6 +1564,9 @@ done
 
 ## 5. 【程序】构建 → 启动 → 验证
 
+> 📌 **多数情况下这一章不用做** —— 改配置**不需要重编 jar**（§4.1）。
+> 只有「要改 Java 代码」时才需要走构建流程。
+>
 > ⛔ **在读这一章之前，先确认一件事**：
 > **交付流程是不是「先编 platform 再 `mvn install`」？**
 > 这件事没确认之前，**禁止 `mvn install` 华盾树的 platform**。
