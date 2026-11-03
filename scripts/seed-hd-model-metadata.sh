@@ -16,9 +16,13 @@
 # ⚠️ **幂等**：--seed 会先删掉同 source_code 的旧行再插 ⇒ 连跑两次结果一致。
 # ⚠️ **编号用 900001+ 显眼段** —— obj_type 会进 Redis field 名（`<objType>_<attrType>`），
 #    不能撞真实业务编号。
+#
+# 退出码约定（给下游判定脚本用）:
+#   0 = 成功（--status 只要读得到行数就算 0）
+#   1 = 连上了库、但行数不对（--seed 期望 3/12/12，--clean 期望 0/0/0）
+#   2 = 连不上库 / 读不到行数
 set -uo pipefail
 
-PSQL="psql -U postgres -h 127.0.0.1 -d napstar -At"
 export PGPASSWORD="${PGPASSWORD:-postgres}"
 REDIS_CLI=/opt/software/redis-8.10.0/bin/redis-cli
 
@@ -26,6 +30,23 @@ REDIS_CLI=/opt/software/redis-8.10.0/bin/redis-cli
 SEED_SRC=HDTEST
 # 超级用户的 id（info.base_user 里那行）
 OPERATOR=1561967773586952192
+
+# ⚠️ 用函数而不是「多词变量 + 无引号展开」——
+#    无引号展开靠 word splitting，参数一旦带空格就散架。
+psqlq() {
+  psql -U postgres -h 127.0.0.1 -d napstar -At "$@"
+}
+
+# 跑一条「写」类 psql（delete / insert）。输出照旧缩进；失败时打诊断并返回非 0。
+# （用 ${PIPESTATUS[0]} 抓 psql 的真实退出码，不依赖 sed 的退出码。）
+psql_write() {
+  psqlq "$@" 2>&1 | sed 's/^/  /'
+  local rc=${PIPESTATUS[0]}
+  if [ "${rc:-0}" -ne 0 ]; then
+    echo "!! 数据库操作失败（psql 退出码 ${rc}）" >&2
+  fi
+  return "${rc:-0}"
+}
 
 usage() {
   echo "用法: $0 --seed | --clean | --status" >&2
@@ -44,13 +65,13 @@ ACTION="$1"
 #    （MVPoint=2 个 / DPSPoint=2 个 / Machine=8 个 ⇒ 共 12 个属性）
 seed() {
   echo "=== 清理旧的种子行（source_code='$SEED_SRC'）==="
-  $PSQL -c "delete from info.model_objectattribute where source_code='$SEED_SRC'" 2>&1 | sed 's/^/  /'
-  $PSQL -c "delete from info.model_attribute where source_code='$SEED_SRC'" 2>&1 | sed 's/^/  /'
-  $PSQL -c "delete from info.model_objecttype where source_code='$SEED_SRC'" 2>&1 | sed 's/^/  /'
+  psql_write -c "delete from info.model_objectattribute where source_code='$SEED_SRC'" || return 2
+  psql_write -c "delete from info.model_attribute where source_code='$SEED_SRC'" || return 2
+  psql_write -c "delete from info.model_objecttype where source_code='$SEED_SRC'" || return 2
 
   echo "=== 插入种子 ==="
   # --- 1) model_objecttype：3 个类型 ---
-  $PSQL -c "
+  psql_write -c "
 insert into info.model_objecttype
   (id, obj_type, obj_name, obj_desc, sort_attribute_type, source_code, isused,
    create_time, update_time, create_operator, update_operator)
@@ -58,10 +79,10 @@ values
   (900001, 900001, 'MVPoint',  'HDTEST seed: kafkabus MVPoint',  900001, '$SEED_SRC', 1, now(), now(), $OPERATOR, $OPERATOR),
   (900002, 900002, 'DPSPoint', 'HDTEST seed: kafkabus DPSPoint', 900002, '$SEED_SRC', 1, now(), now(), $OPERATOR, $OPERATOR),
   (900003, 900003, 'Machine',  'HDTEST seed: kafkabus Machine',  900003, '$SEED_SRC', 1, now(), now(), $OPERATOR, $OPERATOR);
-" 2>&1 | sed 's/^/  /'
+" || return 2
 
   # --- 2) model_attribute：12 个属性（dt_type 挂现成的 model_datatype）---
-  $PSQL -c "
+  psql_write -c "
 insert into info.model_attribute
   (id, attr_type, attr_name, attr_desc, dt_type, wiringtable, source_code,
    create_time, update_time, create_operator, update_operator)
@@ -78,10 +99,10 @@ values
   (900110, 900110, 'MemSystemEx',    'HDTEST seed', 9, null, '$SEED_SRC', now(), now(), $OPERATOR, $OPERATOR),
   (900111, 900111, 'SyncStatus',     'HDTEST seed', 9, null, '$SEED_SRC', now(), now(), $OPERATOR, $OPERATOR),
   (900112, 900112, 'SyncPhase',      'HDTEST seed', 1, null, '$SEED_SRC', now(), now(), $OPERATOR, $OPERATOR);
-" 2>&1 | sed 's/^/  /'
+" || return 2
 
   # --- 3) model_objectattribute：12 条关联 ---
-  $PSQL -c "
+  psql_write -c "
 insert into info.model_objectattribute
   (obj_type, attr_type, attr_order, data_scope, strlen, enumtype_code,
    numeric_precision, numeric_scale, source_code, isused, isprimkey,
@@ -99,11 +120,71 @@ values
   (900003, 900110, 6, 0, null, null, null, null, '$SEED_SRC', 1, 0, now(), now(), $OPERATOR, $OPERATOR),
   (900003, 900111, 7, 0, null, null, null, null, '$SEED_SRC', 1, 0, now(), now(), $OPERATOR, $OPERATOR),
   (900003, 900112, 8, 0, null, null, null, null, '$SEED_SRC', 1, 0, now(), now(), $OPERATOR, $OPERATOR);
-" 2>&1 | sed 's/^/  /'
+" || return 2
 
   echo "=== 灌完的行数（期望 3 / 12 / 12）==="
   status
+  if [ "${STATUS_OK:-1}" -ne 0 ]; then
+    echo "!! 无法读取行数（数据库不可达或查询失败）" >&2
+    return 2
+  fi
+  if [ "${STATUS_O:-}" != "3" ] || [ "${STATUS_A:-}" != "12" ] || [ "${STATUS_OA:-}" != "12" ]; then
+    echo "!! 灌完后行数不对：期望 3 / 12 / 12，实际 ${STATUS_O:-ERR} / ${STATUS_A:-ERR} / ${STATUS_OA:-ERR}" >&2
+    return 1
+  fi
 
+  clear_objecttypes_cache
+}
+
+# ---------------------------------------------------------------
+# 清理
+# ---------------------------------------------------------------
+clean() {
+  echo "=== 删除种子行（source_code='$SEED_SRC'）==="
+  psql_write -c "delete from info.model_objectattribute where source_code='$SEED_SRC'" || return 2
+  psql_write -c "delete from info.model_attribute where source_code='$SEED_SRC'" || return 2
+  psql_write -c "delete from info.model_objecttype where source_code='$SEED_SRC'" || return 2
+  echo "=== 剩余行数（期望 0 / 0 / 0）==="
+  status
+  if [ "${STATUS_OK:-1}" -ne 0 ]; then
+    echo "!! 无法读取行数（数据库不可达或查询失败）" >&2
+    return 2
+  fi
+  if [ "${STATUS_O:-}" != "0" ] || [ "${STATUS_A:-}" != "0" ] || [ "${STATUS_OA:-}" != "0" ]; then
+    echo "!! 删除后行数不对：期望 0 / 0 / 0，实际 ${STATUS_O:-ERR} / ${STATUS_A:-ERR} / ${STATUS_OA:-ERR}" >&2
+    return 1
+  fi
+
+  clear_objecttypes_cache
+}
+
+# ---------------------------------------------------------------
+# 状态
+# ---------------------------------------------------------------
+status() {
+  local o a oa
+  o=$(psqlq -c "select count(*) from info.model_objecttype where source_code='$SEED_SRC'" 2>/dev/null | tr -d '\r')
+  a=$(psqlq -c "select count(*) from info.model_attribute where source_code='$SEED_SRC'" 2>/dev/null | tr -d '\r')
+  oa=$(psqlq -c "select count(*) from info.model_objectattribute where source_code='$SEED_SRC'" 2>/dev/null | tr -d '\r')
+  echo "  model_objecttype     = ${o:-ERR}"
+  echo "  model_attribute      = ${a:-ERR}"
+  echo "  model_objectattribute= ${oa:-ERR}"
+  # 把「能否读到」和原始计数交给调用方（全局变量）。
+  STATUS_O="${o:-}"
+  STATUS_A="${a:-}"
+  STATUS_OA="${oa:-}"
+  if [ -n "$o" ] && [ -n "$a" ] && [ -n "$oa" ]; then
+    STATUS_OK=0
+  else
+    STATUS_OK=1
+  fi
+}
+
+# ---------------------------------------------------------------
+# 清 Redis 的 objecttypes 缓存（防御性：实测失败不写缓存，这里只是以防万一）。
+# --seed 和 --clean 都调 —— 万一缓存里真有 key，清掉避免指向已删的行。
+# ---------------------------------------------------------------
+clear_objecttypes_cache() {
   echo "=== 清 Redis 的 objecttypes 缓存（防御性：实测失败不写缓存，这里只是以防万一）==="
   local_keys=$($REDIS_CLI -h 127.0.0.1 -p 6379 -a sac888 --no-auth-warning KEYS 'objecttypes*' 2>/dev/null | grep -c 'objecttypes')
   echo "  找到 objecttypes* key: $local_keys 个"
@@ -117,34 +198,12 @@ values
   fi
 }
 
-# ---------------------------------------------------------------
-# 清理
-# ---------------------------------------------------------------
-clean() {
-  echo "=== 删除种子行（source_code='$SEED_SRC'）==="
-  $PSQL -c "delete from info.model_objectattribute where source_code='$SEED_SRC'" 2>&1 | sed 's/^/  /'
-  $PSQL -c "delete from info.model_attribute where source_code='$SEED_SRC'" 2>&1 | sed 's/^/  /'
-  $PSQL -c "delete from info.model_objecttype where source_code='$SEED_SRC'" 2>&1 | sed 's/^/  /'
-  echo "=== 剩余行数（期望 0 / 0 / 0）==="
-  status
-}
-
-# ---------------------------------------------------------------
-# 状态
-# ---------------------------------------------------------------
-status() {
-  local o a oa
-  o=$($PSQL -c "select count(*) from info.model_objecttype where source_code='$SEED_SRC'" 2>/dev/null | tr -d '\r')
-  a=$($PSQL -c "select count(*) from info.model_attribute where source_code='$SEED_SRC'" 2>/dev/null | tr -d '\r')
-  oa=$($PSQL -c "select count(*) from info.model_objectattribute where source_code='$SEED_SRC'" 2>/dev/null | tr -d '\r')
-  echo "  model_objecttype     = ${o:-ERR}"
-  echo "  model_attribute      = ${a:-ERR}"
-  echo "  model_objectattribute= ${oa:-ERR}"
-}
-
 case "$ACTION" in
   --seed)   seed ;;
   --clean)  clean ;;
-  --status) status ;;
+  --status)
+    status
+    [ "${STATUS_OK:-1}" -eq 0 ] || exit 2
+    ;;
   *)        usage ;;
 esac
