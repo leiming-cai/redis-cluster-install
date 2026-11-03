@@ -1,8 +1,10 @@
 # cluster-config.sh 实施进度交接
 
-> 📌 **napstar2.0 部分的现状以 `docs/superpowers/sessions/2026-11-02-hd-redis-cluster-*.md` 为准**
-> （`…-test.md` = 集群测试轮存档 · `…-fix.md` = 交付树集群修复轮存档）——
-> 下面这份交接文档**截止到 2026-10-30**，**没有**覆盖那两轮的工作。
+> 📌 **napstar2.0 部分的现状以 `docs/superpowers/sessions/2026-11-0*.md` 为准**
+> （`…-cluster-test.md` = 集群测试轮 · `…-cluster-fix.md` = 交付树集群修复轮 ·
+> **`…-monitor-runtime-coverage.md` = 树名更正 + 运行时覆盖轮（最新）**）——
+> 下面这份交接文档**截止到 2026-10-30**，**没有**覆盖那几轮的工作。
+> 🌲 **三棵源码树的对照表（先看这个）：`docs/superpowers/sessions/2026-11-03-tree-map.md`**
 
 **更新时间**：2026-10-30（会话收尾；第十七轮的工作全部完成并已推送）
 **工作分支**：无 —— 第七~十七轮都在 `main` 上，**全部已推送**

@@ -9,7 +9,7 @@
 **Tech Stack:** bash 5.1 / PostgreSQL 14（`psql`）/ Redis 8.10（`redis-cli -c` 集群模式）/ curl / jq 不用（纯 bash + `sort`）
 
 **设计文档：** `docs/superpowers/specs/2026-11-03-hd-monitor-runtime-coverage-design.md`
-**相关：** `docker/hd-napstar/DEFECTS.md` §七 #1 · `docs/superpowers/sessions/2026-11-02-tree-map.md`
+**相关：** `docker/hd-napstar/DEFECTS.md` §七 #1 · `docs/superpowers/sessions/2026-11-03-tree-map.md`
 
 ---
 

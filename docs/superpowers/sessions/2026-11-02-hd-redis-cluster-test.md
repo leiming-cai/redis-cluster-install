@@ -11,7 +11,7 @@
 > ⚠️ **2026-11-02 树名更正（后补）**：本文里的「**门户树**」/「**portal/SVN 树**」
 > 指的是 `D:\javawork\1.2\cpscloud1.0\code` —— **那是「基线」，不是门户**。
 > 真正的门户树是 `D:\work\info\web\extendsystem\集控-IV区门户\code`，
-> **此前从未被检查过**。树图见 `docs/superpowers/sessions/2026-11-02-tree-map.md`。
+> **此前从未被检查过**。树图见 `docs/superpowers/sessions/2026-11-03-tree-map.md`。
 > **本文的结论本身不受影响** —— 改的只是那棵树的**名字**。
 ---
 

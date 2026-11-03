@@ -23,7 +23,7 @@
 > > `D:\work\info\web\extendsystem\集控-IV区门户\code`（**此前从未被检查过**）。
 > > ⇒ 凡是引用「树 A / 树 B / 门户树」的旧结论，都按本表重新对号。
 > > 完整对照（版本 / 补丁分布 / `oms:` 状态 / jar 归属 / mvnRepo 矩阵）见
-> > `docs/superpowers/sessions/2026-11-02-tree-map.md`。
+> > `docs/superpowers/sessions/2026-11-03-tree-map.md`。
 
 ---
 
@@ -221,7 +221,7 @@ jmxUrl: {}          ← 来自 icms-controller.yaml 的 dashboard.jmx
 > 叫作「**门户树**」—— **那是错的，它是「基线」**。
 > 真正的门户树是 `D:\work\info\web\extendsystem\集控-IV区门户\code`，
 > **此前从未被检查过**。完整对照见
-> `docs/superpowers/sessions/2026-11-02-tree-map.md`。
+> `docs/superpowers/sessions/2026-11-03-tree-map.md`。
 > ⇒ 本节里所有「门户树」= **基线树**；「门户线」另指集控-IV区门户那棵树。
 
 | 项 | 值 |
@@ -475,7 +475,7 @@ Nacos 里改 `oms:` **没有用**，只能走命令行 ——
 > 📌 **2026-11-02 树名更正**：本节原先把树 B 叫「**门户 / SVN 工作副本**」——
 > **那是错的，它是「基线」**。
 > 真正的门户树是树 C（集控-IV区门户），**此前从未被检查过**。
-> 完整对照见 `docs/superpowers/sessions/2026-11-02-tree-map.md`。
+> 完整对照见 `docs/superpowers/sessions/2026-11-03-tree-map.md`。
 >
 > 📌 **本次部署用的 jar 就是树 A 编译出来的**，
 > 而**集群补丁只在树 B（基线）的源码里、以及基线编的共享二进制里**
@@ -1664,7 +1664,7 @@ mtime 2026-11-01 00:15~00:17 —— 上一轮有人 install 过）。
 | D7-b | 🔴 → ✅ | **交付树里的代码缺陷**（`batchWirtePip` 丢弃 `CompletableFuture`，异常被吞；交付树的 `wirteOmsPip` 仍带 `@Async`、仍无 `.join()`） | ✅ **已修（2026-11-02）**，两条路径都通了：<br>**① 二进制**：部署的 `rtdata-consumer-3.0.0.jar` 里装的是**基线 `rtdata-module-1.0.14.jar`**（那份带 `writeWithRetry` / `.join()` / `isCluster` / `RedisClusterHashPipeline`）—— **重编本身就把 D7-b 修好了**（旧 jar 里装的是树 A 自编的无补丁 `rtdata-module-3.0.0`）。⇒ **判据 C2（发一条 INCDATA Kafka 消息 ⇒ 应用自己写的 `real_data:<otype>:<obid>` 进集群且能读回载荷）本轮 PASS**、C3（无 UOE）PASS。<br>**② 源码**：树 A 的 `rtdata-module` 源码也已与基线对齐（`RedisRealDataServiceImpl` / `OmsWriteByKafkaServiceImpl` / 新增 `FailSetCounter`），并补了 **12 条 Mockito 单测**（含**变异测试**证明：删掉写入体 / 禁用 `&` 拆分 → 各有 1 条失败）⇒ **防止将来切版本区间或发 1.0.15 时回退**。⚠️ **不是**「重编修不掉」了 —— 上一轮那个判断是基于「树 A 的源码不进包」这个当时的事实，而**重编的产物内容取决于版本区间，不取决于源码新旧** |
 | D8 | 🟡 → ✅ | **实施 D2 选项 (a) 时的副作用**（在**基线树** `D:\javawork\1.2\cpscloud1.0\code` 里改 `bootstrap.yml` 并重编 `model-controller` → 那个 jar 带着**基线树的 `application.yml`**（`oms:` 未注释、`redisMode: cluster` + `127.0.0.1:6379` + 空密码）→ Nov 1 15:15 部署，md5 `c41735d8…` 与基线树产物**逐字节相同**） | ✅ **已修（2026-11-02）**：**从交付树重编** `model-controller`，并把 **D2 (a) 的改动做在交付树里**（`bootstrap.yml`：`shared-configs: []` + 只留 `napstarmappingconfig.yaml`；改后与基线树同名文件 **SHA256 全等**）⇒ **一次同时解决 D2 和 D8**。📌 **实测**：新 jar md5 `0ce5a08a…`（旧的 `c41735d8…` 已备份到 `/opt/napstar_app/backup-20261102/`）；jar 里 `application.yml` 的 `oms:` 块**是注释着的** → **Nacos 赢** → 启动日志 `*** Using Redis Standalone at node1:6379`，致命错误 0。📌 **并且**：重编后 jar 里的 platform 集合**与门户 jar 一致**（都是 `model-service-1.0.14` / `realserver-oms-1.0.14`）⇒ **重编不降集群能力**。⚠️ 「jar 文件换回 ≠ 运行中的 JVM 换回」这条教训已落成**可追溯机制**：`start-hd-apps.sh` 现在启动前打印 jar 的 **路径 + md5 + mtime**，回归矩阵的 A0 段也打印同样三项 ⇒ 换过 jar 的回归**必须**重跑，数字可不可比一眼能看出来 |
 | D9 | 🟡 | **本轮新发现**（版本区间） | 树 A 的 platform 源码比基线旧；`platform.version=[1.0.0,2.0.0)` 使交付物取基线 `1.0.14`（**带**集群补丁 ✅）。⇒ **切回 `[3.0.0,4.0.0)` 或发 `1.0.15` 就会静默降级**（不需要覆盖 1.0.14，**是区间挑版本**）。✅ 本轮已把影响集群能力的 4 个类与基线对齐 + 12 条单测兜底。🟡 **待交付方确认**：「先编 platform 再 install」是不是交付流程 ⇒ 在此之前**禁止 install 树 A 的 platform**，详见正文 |
-| D10 | 🟡 | **第三方系统**（非本项目） | **`sac` / `cmt` / `hds` 是第三方系统的表，本项目只有读权限 —— 不由本项目建表。** 📌 **2026-11-02 复核（结论从 🔴 降为 🟡，且性质变了）**：① **只读是实测确认的**：三棵树里对这三个 schema 的 mapper **只有 SELECT**（HD：sac 32 / cmt 12 / hds 1160 次 select，**insert/update/delete 全 0**；基线同理），而对本项目自有的 `info` schema **有 4 处 INSERT** ⇒ 读写边界清楚。② **权限模型印证**：活库里 `sac`/`cmt`/`hds` 三个 schema 各自 **owner 是自己**、跨 schema 只授 **USAGE**（`U`）—— 表级 SELECT 由**建表的第三方**单独授予。③ **本项目只负责 `info`**（30 表，装在 `/pkg/database/postgresql_install/sqls/info/`）。④ ⇒ **原表述「缺 DDL → 要转方言 → 挡住 transformNapstarModel」是错的方向**：`transformNapstarModel` 是**读** sac/cmt、**写** info 的转换作业，它要的是**第三方库里有数据**，不是本项目去建表。**真正的阻塞是「环境里没有第三方数据」**，不是「缺 DDL」。**上一轮遗留，本轮未处理**。详见 `docs/superpowers/sessions/2026-11-02-tree-map.md` §七 |
+| D10 | 🟡 | **第三方系统**（非本项目） | **`sac` / `cmt` / `hds` 是第三方系统的表，本项目只有读权限 —— 不由本项目建表。** 📌 **2026-11-02 复核（结论从 🔴 降为 🟡，且性质变了）**：① **只读是实测确认的**：三棵树里对这三个 schema 的 mapper **只有 SELECT**（HD：sac 32 / cmt 12 / hds 1160 次 select，**insert/update/delete 全 0**；基线同理），而对本项目自有的 `info` schema **有 4 处 INSERT** ⇒ 读写边界清楚。② **权限模型印证**：活库里 `sac`/`cmt`/`hds` 三个 schema 各自 **owner 是自己**、跨 schema 只授 **USAGE**（`U`）—— 表级 SELECT 由**建表的第三方**单独授予。③ **本项目只负责 `info`**（30 表，装在 `/pkg/database/postgresql_install/sqls/info/`）。④ ⇒ **原表述「缺 DDL → 要转方言 → 挡住 transformNapstarModel」是错的方向**：`transformNapstarModel` 是**读** sac/cmt、**写** info 的转换作业，它要的是**第三方库里有数据**，不是本项目去建表。**真正的阻塞是「环境里没有第三方数据」**，不是「缺 DDL」。**上一轮遗留，本轮未处理**。详见 `docs/superpowers/sessions/2026-11-03-tree-map.md` §七 |
 | D11 | 🟡 | 本轮夹具 | **`monitor` 的 6 处集群分支只覆盖了 1 处**（`SVGCacheServiceImpl`）。另外 4 处缺 SVG 文件/订阅，`RTListener` 那处缺 Kafka 消息 ⇒ **6 处里有 5 处仍未在集群模式下真正执行过**。「jar 里 `isCluster` 的 class 数 = 4」这个静态判据**不代表**运行时正确。✅ **2026-11-03 已覆盖的那 1 处**：单机与集群模式下 `real_graph:realscope` **各有 12 个 field 且逐个相等**（`scripts/hd-monitor-runtime-verify.sh`，10 条判据；边界自测 16 条） |
 | ⚙️-D | 🟡 | 环境 | **base 回归矩阵读的是缓存里的 JWT，从不刷新** ⇒ token 过期时矩阵会给出**假 FAIL**（实测：开跑前 4 秒过期 ⇒ 2 条 500 `TokenExpiredException`）。**每轮跑矩阵之前必须手动** `bash /opt/hd/mint-hd-token.sh`（= ⚙️-B，但矩阵**自身不带**这个动作 ⇒ 容易忘）。见会话存档 §十.5 |
 | ⚙️-A | ⚙️ | **容器环境**（Docker Desktop 重启 → 容器非正常停 → ZK 里残留 ephemeral `/brokers/ids/<id>` → Kafka broker 启动即致命错误退出） | **待修（交付方）**：`hd-entrypoint.sh` 起 broker 前先清掉自己的 `/brokers/ids/<brokerId>`。🟡 **不是代码缺陷**，但会让应用层判据 C2 **静默不可执行**（长得跟 PASS 一模一样）。本轮已手工恢复（node1 755 / node2 756），详见正文 |

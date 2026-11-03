@@ -8,11 +8,13 @@
 > - 本轮设计：`docs/superpowers/specs/2026-11-02-hd-redis-cluster-fix-design.md`
 > - 本轮计划：`docs/superpowers/plans/2026-11-02-hd-redis-cluster-fix.md`
 > - 缺陷清单：`docker/hd-napstar/DEFECTS.md`（D6 / D7-a / D7-b / D8 已修；新增 **D9** + **⚙️-A / ⚙️-B**）
+> - **下一份存档（2026-11-03）：`docs/superpowers/sessions/2026-11-03-hd-monitor-runtime-coverage.md`**
+>   —— 树名更正（本文件里的「门户树」其实是**基线**）+ 给 `monitor` 的集群分支补**运行时**覆盖
 
 > ⚠️ **2026-11-02 树名更正（后补）**：本文里的「**门户树**」/「**portal/SVN 树**」
 > 指的是 `D:\javawork\1.2\cpscloud1.0\code` —— **那是「基线」，不是门户**。
 > 真正的门户树是 `D:\work\info\web\extendsystem\集控-IV区门户\code`，
-> **此前从未被检查过**。树图见 `docs/superpowers/sessions/2026-11-02-tree-map.md`。
+> **此前从未被检查过**。树图见 `docs/superpowers/sessions/2026-11-03-tree-map.md`。
 > **本文的结论本身不受影响** —— 改的只是那棵树的**名字**。
 ---
 
@@ -497,7 +499,7 @@ cd1371a docs(hd): confirm the design and the D2 scope
   —— **表名形态完全不同**，不是 hds 那批。
 - `hds` 的表名形态 = **统计/历史产物** ⇒ 由**采集侧**产出。
 
-完整实测见 `docs/superpowers/sessions/2026-11-02-tree-map.md` §七。
+完整实测见 `docs/superpowers/sessions/2026-11-03-tree-map.md` §七。
 
 ### 8.4 顺带发现（**门户线自己的问题，与华盾无关**）
 
@@ -509,7 +511,7 @@ cd1371a docs(hd): confirm the design and the D2 scope
 
 | 文件 | 改了什么 |
 |---|---|
-| `docs/superpowers/sessions/2026-11-02-tree-map.md` | **新增** —— 三棵树权威对照表（路径 / 版本 / 补丁分布 / `oms:` 状态 / jar 归属 md5 / mvnRepo 版本矩阵 / DDL 出处） |
+| `docs/superpowers/sessions/2026-11-03-tree-map.md` | **新增** —— 三棵树权威对照表（路径 / 版本 / 补丁分布 / `oms:` 状态 / jar 归属 md5 / mvnRepo 版本矩阵 / DDL 出处） |
 | `docker/hd-napstar/DEFECTS.md` | 树表改成**三棵**；标记表加门户列；**D8 成因改归基线树**；**D10 缺口量化**；顶部加树名更正 banner |
 | `docs/OPERATIONS.md` | 10 处「门户树」→「**基线树**」（每处都指 `cpscloud1.0`）；3 处指门户容器本身的**没动** |
 | 4 份历史存档 / plan / spec | **正文不改**（结论不受影响），各加一条**树名更正 banner** 指向树图 |
