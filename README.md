@@ -12,6 +12,12 @@
 > 两台已有 Redis 的机器如何用脚本组网、ZooKeeper/Kafka 怎么配集群、
 > 程序的 `oms:` / `spring.kafka.*` YAML 怎么配、程序怎么构建启动与验证。
 > 本 README 是**速查**，手册是**照着做的那一份**。
+>
+> 📖 **[`docs/HD-OPERATIONS.md`](docs/HD-OPERATIONS.md) — 华盾 napstar2.0 操作手册**：
+> **另一条产品线**（交付树 `华盾-napstar2.0`）的 Redis / ZooKeeper / Kafka
+> 集群化与四个后台程序的 YAML 配置。
+> ⚠️ **它有一条不同的关键规则**：华盾交付树源码里的 `application.yml`
+> **大段是注释**，**不是真值** —— 真值在安装包的 Nacos 导出包里。
 
 ## 前提条件
 
