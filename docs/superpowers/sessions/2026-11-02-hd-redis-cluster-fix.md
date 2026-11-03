@@ -368,7 +368,7 @@ cd1371a docs(hd): confirm the design and the D2 scope
 
 | # | 事 | 严重度 | 说明 |
 |---|---|---|---|
-| **1** | **`monitor` 的 6 处补运行时覆盖** | 🟡 | 本轮只做了静态核验。**要补模型元数据表的数据**（`info.model_objecttype` / `model_attribute` / `model_objectattribute`），或在有真实模型数据的环境上再跑一次集群模式。**「启动无 UOE」不能当判据**（假绿） |
+| **1** | **`monitor` 的 6 处补运行时覆盖** | 🟡 | **部分完成（2026-11-03）**：灌了 **27 行最小模型元数据**（`scripts/seed-hd-model-metadata.sh`，数据源 = Nacos 的 `kafkabus.yaml`）⇒ **`SVGCacheServiceImpl` 的写路径（6 处里的 1 处）拿到了运行时覆盖**，`real_graph:realscope` 在单机与集群模式下**各有 12 个 field 且逐个相等**（`scripts/hd-monitor-runtime-verify.sh`）。⚠️ **另外 4 处（`CalculateService`×2、`SVGParseService`×2）仍无运行时覆盖** —— 它们需要 **SVG 文件**（容器里一个 `*-ScheFile.svg` 都没有）或 websocket 订阅才能到达，那是**图形侧**的数据准备。`RTListener` 那处只差一条 Kafka `COMMITDATAINCRE` 消息，未做。**「启动无 UOE」依然不能当判据**（假绿） |
 | **2** | **交付方确认交付流程** | 🔴 | 「先编 platform 再 `mvn install`」吗？若是 ⇒ 必须先完成树 A 与基线的**整体**对齐；在此之前**禁止 install 树 A 的 platform**、**禁止把区间切到 `[3.0.0,4.0.0)`**（见 D9） |
 | **3** | **`napstarweb` 的 `kafkabus.yaml`** | 🟡 | 先确认真实 Nacos 里有没有它；有 → 无事；没有 → 按 D2 (a) 同样方式处理（见 D2 节末） |
 | **4** | **`hd-entrypoint.sh` 加一步清 `/brokers/ids/<id>`** | 🟡 | 否则**下一个容器重启周期还会再犯** ⚙️-A，而它会让 C2 **静默不可执行** |
@@ -529,3 +529,103 @@ cd1371a docs(hd): confirm the design and the D2 scope
 > 本轮之前，`树 B`、`门户树`、`基线树` 三种叫法在文档里混用，
 > 而它们指向的是**同一棵树**（`cpscloud1.0`）———
 > 一旦有一份权威树图，这种歧义就不会再发生。
+
+---
+
+## 九、2026-11-03 追加轮：给 `monitor` 的集群分支补运行时覆盖
+
+> 承接 §八 #1（「`monitor` 的 6 处补运行时覆盖」）。
+
+### 9.1 先把「假绿」坐实
+
+上轮说「6 处已修」，验收只有**静态**证据（jar 里 `isCluster` 的 class 数 0 → 4）。
+本轮实测确认：**那 6 处一次都没在集群模式下真正执行过**。
+
+- `info.model_objecttype` / `model_attribute` / `model_objectattribute` **全是 0 行**
+- ⇒ `CacheServiceImpl.matchOTypeCode(name)` 走 `else` → **`throw new OTypeException(name)`**
+- ⇒ 写路径在 `matchOType(...)` 就抛了，**走不到那行 Redis 调用**
+- ⇒ 「日志里没有 UOE」是「**没跑**」换来的
+
+**实测佐证**：web-controller 日志里 `OTypeException` **23 次**
+（`MVPoint`/`DPSPoint`/`Machine` 各 1 次，其余 20 次是别的类型，来自 SVG 解析路径），
+`UnsupportedOperationException` **0 次**。
+
+### 9.2 逐处追调用链 ⇒ 6 处分三档
+
+| 档 | 位置 | 到达它需要什么 | 本轮 |
+|---|---|---|---|
+| **A** | `SVGCacheServiceImpl:85` | `matchOType(oname)` 成功 —— `oname` 就在 **Nacos 的 `kafkabus.yaml`** 里 | ✅ **做了** |
+| B | `RTListener:142` | 一条 Kafka `COMMITDATAINCRE` 消息 | ⏸ 未做（用户定最小集） |
+| C/D/E/F | `CalculateService`×2、`SVGParseService`×2 | **SVG 文件**（容器里一个都没有）或 websocket 订阅 | ⏸ 未做 |
+
+### 9.3 做了什么
+
+| 文件 | 内容 |
+|---|---|
+| `scripts/seed-hd-model-metadata.sh` | 灌 / 清 **27 行**种子（3 objecttype + 12 attribute + 12 关联），`source_code='HDTEST'`，编号 `900001+`，幂等可清除 |
+| `scripts/hd-monitor-runtime-verify.sh` | **单机 + 集群**两遍跑，比对 `real_graph:realscope` 的 field **逐个相等** |
+| `scripts/hd-monitor-runtime-lib.sh` | 判据的纯逻辑（可 source） |
+| `scripts/test-hd-monitor-runtime-verify.sh` | 判据的**边界自测**（假绿防线） |
+
+**数据源不用编**：Nacos 的 `kafkabus.yaml`（`NAPSTARWEB_GROUP`，HTTP 200）就是应用自己声明的清单
+（`MVPoint`/`DPSPoint`/`Machine` + 12 个属性）⇒ 照抄，不另造。
+
+**实测数字**：
+- 单机模式 `real_graph:realscope` = **12 个 field**
+- 集群模式 = **同样的 12 个 field**（field 名逐个相等）
+- `kafkabus` 那 3 个类型的 `OTypeException` → **0**（总数仍 23，来自其它类型）
+- 判据自测 `PASS=16 FAIL=0`
+
+### 9.4 本轮踩的坑
+
+| # | 坑 | 对策 |
+|---|---|---|
+| 18 | **PS 5.1 的 `Get-Content`/`-File` 对 UTF-8 无 BOM 的中文按 ANSI 解码** ⇒ `.ps1` 里写中文路径时 `Test-Path` **恒为 false** | 一律用 `docker cp` + `docker exec`；文本替换放容器里用 `perl`（字节级安全）；`.ps1` 只写 ASCII |
+| 19 | **shell 里写含 `\|` `(` `'` 的中文替换串 ⇒ 引号地狱**（连续踩了 3 次） | 替换文本放**独立文件**，脚本按行号/前缀定位替换，不在 shell 里拼长串 |
+| 20 | **全局 `perl -0777 -pe` 替换会误伤刚写的说明文字** | 保护标记 → 替换 → 还原；改完逐行 `diff` |
+| 21 | **判据脚本里 `${N3:-0}` 把「测不到」变成「测到 0」⇒ 假绿** | 改成「日志必须存在 + 必须有 `Started` 行」才可测；空/非数字单独判 FAIL |
+| 22 | **判据脚本没删旧 hash ⇒ 上一次跑的残留能让判据假绿** | 每种模式**起应用之前**先 `DEL` 那个 hash ⇒ 找到 12 个 field 就一定是本次写的 |
+
+### 9.5 ⚙️-C（新发现的环境缺口）：**Nacos 会在长时间运行后退出**
+
+**现象**：hd-node1 里的 **Nacos 在 10:47:19 优雅退出**（JVM 的 shutdown 钩子跑了）。
+它从容器启动（11-02 01:37Z）活到那一刻，**约 33 小时**。
+
+**影响**：Nacos 不在 ⇒ 所有应用起不来（`NacosException: Client not connected, current status:STARTING`）
+⇒ **所有判据都不可执行**（不是 FAIL，是「没法测」）。
+
+**已排除的原因**（都实测过）：
+
+| 假设 | 结论 |
+|---|---|
+| `stop_apps()` 的 pkill 误杀 | ❌ **排除** —— 用 Nacos 真实 cmdline 测模式不匹配；**实弹跑那条 pkill，Nacos 存活**（pid 前后不变） |
+| 容器被重启 | ❌ `RestartCount=0`，`StartedAt` 没变 |
+| 容器 OOM | ❌ `OOMKilled=false` |
+| GC 抖动 | ❌ GC 日志无死前记录 |
+| Redis 集群脚本 | ❌ 它的 pkill 只匹配 `redis-server \*:port` |
+
+⇒ **死因未查明**（Nacos 的 `start.out` 被重启覆盖了，关键证据没了）。
+
+**恢复办法**（实测 26 秒就绪）：
+
+```bash
+docker exec hd-node1 bash -c "cd /opt/software/nacos/bin && nohup sh startup.sh -m standalone >/tmp/nacos-restart.log 2>&1 &"
+# 等 readiness 200
+```
+
+**下一轮开工前必查**：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18848/nacos/v1/console/health/readiness
+```
+
+—— 不是 200 就先按上面重启，**否则所有判据都跑不了**。
+
+> 📌 **顺带证明了判据的 S0 有用**：Nacos 挂掉时，S0 报的是
+> **FAIL（应用启动失败）**，而不是让脚本带着「0 个异常」继续跑出一个假绿。
+
+### 9.6 下一轮照做
+
+> **灌 27 行元数据，换 6 处里的 1 处真正在集群模式下跑一次。**
+> **另外 5 处仍缺运行时覆盖** —— 已记进 DEFECTS 的 D11，**不假装覆盖了**。
+> 要覆盖剩下 5 处，得先解决「SVG 文件从哪来」和「COMMITDATAINCRE 消息格式」两个输入问题。
