@@ -235,6 +235,31 @@ dbsize_snapshot() {
   done
   echo "${out# }"
 }
+# 集群里「**应用自己写的** key」的命名空间 ——
+#   model:*       —— model-controller 的 @Cacheable 模型缓存
+#   real_graph:*  —— 应用的数据（`real_graph:realscope` 正是 A2 判据要求它存在的）
+#
+# ⚠️ **2026-11-03**：模型元数据夹具灌上之后，应用**真的会**写这些 key
+#    （实测 6 个 model:* + 1 个 real_graph:realscope）。
+#    ⇒ 原来的「DBSIZE 增量必须 == 0」在**任何有模型元数据的环境里都必然失败**
+#    （真实环境里也一定有模型元数据）⇒ 那条判据是**过严**，不是应用有 bug。
+#
+#    所以增量统计要**扣掉这两个命名空间**：
+#    剩下的差额才是「本脚本多删了 / 少删了别人的 key」。
+#    （本脚本自己的 key 全在 `hd:test:apptest:*` 下，由上一条判据单独查。）
+dbsize_snapshot_excl_app() {
+  local p d m g out=""
+  for p in $P1 $P2 $P3; do
+    d=$(r "$p" DBSIZE | tr -d '\r')
+    case "$d" in
+      ''|*[!0-9]*) d="-1" ;;
+    esac
+    m=$(r "$p" KEYS 'model:*' | grep -c 'model:')
+    g=$(r "$p" KEYS 'real_graph:*' | grep -c 'real_graph:')
+    out="$out $((d - m - g))"
+  done
+  echo "${out# }"
+}
 # 基线 -> 现在 的 key 数增量（-1 = 某个 master 的 DBSIZE 读不到）
 dbsize_delta() {
   local before="$1" after="$2"
@@ -616,8 +641,10 @@ chk "L0 cluster_state" "$state" "ok"
 #    后者只在集群本来是空的时候才是对的判据，在有真实数据的集群上
 #    会误报，还可能掩盖「清理脚本多删了别人的 key」。
 #    顺带也证明了「清理没有越界」。
-DBSIZE_BASELINE=$(dbsize_snapshot)
-echo "  DBSIZE 基线（$P1 $P2 $P3）= $DBSIZE_BASELINE"
+# ⚠️ 基线要跟「最后那次」**用同一个口径**（都扣掉应用自己的命名空间），
+#    否则两边的数不可比。
+DBSIZE_BASELINE=$(dbsize_snapshot_excl_app)
+echo "  DBSIZE 基线（$P1 $P2 $P3，已扣除 model:* / real_graph:*）= $DBSIZE_BASELINE"
 
 echo
 echo "############ A — web-controller（napstarweb）############"
@@ -963,17 +990,17 @@ done
 chk "E 清理后无残留测试 key（限本脚本前缀；总账见下面的 DBSIZE 增量）" "$left" "0"
 
 echo "  --- 三个 master 现在的 DBSIZE（跟基线比）---"
-DBSIZE_NOW=$(dbsize_snapshot)
+DBSIZE_NOW=$(dbsize_snapshot_excl_app)
 echo "    基线 = $DBSIZE_BASELINE"
-echo "    现在 = $DBSIZE_NOW"
+echo "    现在 = $DBSIZE_NOW  （已扣除 model:* / real_graph:*）"
 DB_DELTA=$(dbsize_delta "$DBSIZE_BASELINE" "$DBSIZE_NOW")
 if [ "$DB_DELTA" = "-1" ]; then
   bad "E 读不到某个 master 的 DBSIZE（节点掉了？）—— 没法比基线"
 else
   if [ "$DB_DELTA" -eq 0 ]; then
-    ok "E 清理后三个 master 的 key 数回到基线（增量 $DB_DELTA）"
+    ok "E 清理后三个 master 的 key 数回到基线（增量 $DB_DELTA，已扣除应用自己的 model:* / real_graph:*）"
   else
-    bad "E 清理后 key 数跟基线不符（增量 $DB_DELTA）—— 清理越界了或没清干净"
+    bad "E 清理后 key 数跟基线不符（增量 $DB_DELTA，已扣除应用自己的 model:* / real_graph:*）—— 清理越界了或没清干净"
   fi
 fi
 
