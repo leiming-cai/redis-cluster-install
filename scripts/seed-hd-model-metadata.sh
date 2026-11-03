@@ -133,7 +133,7 @@ values
     return 1
   fi
 
-  clear_objecttypes_cache
+  clear_model_cache
 }
 
 # ---------------------------------------------------------------
@@ -155,7 +155,7 @@ clean() {
     return 1
   fi
 
-  clear_objecttypes_cache
+  clear_model_cache
 }
 
 # ---------------------------------------------------------------
@@ -181,20 +181,31 @@ status() {
 }
 
 # ---------------------------------------------------------------
-# 清 Redis 的 objecttypes 缓存（防御性：实测失败不写缓存，这里只是以防万一）。
+# 清 Redis 的模型缓存（**防御性**）。
+#
+# ⚠️ **实测（2026-11-03）：真实的缓存 key 名带 `model:` 前缀**：
+#     model:objecttypes:names:<objName>
+#     model:objecttypes:types:<objType>
+#     model:attributetypes:names:<attrName>
+#     model:attributetypes:atypes:<attrType>
+#   （`CacheServiceImpl` 的 `@Cacheable(value={"objecttypes:names"})` 等
+#     经 RedisCacheManager 序列化后是这个形状。）
+#   ⚠️ **原来这里写的是 `objecttypes*` —— 匹配 0 个 key，清缓存是空操作。**
+#      留着已删行的缓存条目会让「夹具已清」变成假象。
+#
 # --seed 和 --clean 都调 —— 万一缓存里真有 key，清掉避免指向已删的行。
 # ---------------------------------------------------------------
-clear_objecttypes_cache() {
-  echo "=== 清 Redis 的 objecttypes 缓存（防御性：实测失败不写缓存，这里只是以防万一）==="
-  local_keys=$($REDIS_CLI -h 127.0.0.1 -p 6379 -a sac888 --no-auth-warning KEYS 'objecttypes*' 2>/dev/null | grep -c 'objecttypes')
-  echo "  找到 objecttypes* key: $local_keys 个"
+clear_model_cache() {
+  echo "=== 清 Redis 的模型缓存（model:*）==="
+  local_keys=$($REDIS_CLI -h 127.0.0.1 -p 6379 -a sac888 --no-auth-warning KEYS 'model:*' 2>/dev/null | grep -c 'model:')
+  echo "  找到 model:* key: $local_keys 个"
   if [ "${local_keys:-0}" -gt 0 ]; then
-    $REDIS_CLI -h 127.0.0.1 -p 6379 -a sac888 --no-auth-warning KEYS 'objecttypes*' 2>/dev/null \
-      | grep 'objecttypes' \
+    $REDIS_CLI -h 127.0.0.1 -p 6379 -a sac888 --no-auth-warning KEYS 'model:*' 2>/dev/null \
+      | grep 'model:' \
       | while read -r k; do $REDIS_CLI -h 127.0.0.1 -p 6379 -a sac888 --no-auth-warning DEL "$k" >/dev/null 2>&1; done
     echo "  已清"
   else
-    echo "  没有要清的（符合预期：matchOTypeCode 失败时不写缓存）"
+    echo "  没有要清的"
   fi
 }
 

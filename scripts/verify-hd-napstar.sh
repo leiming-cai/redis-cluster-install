@@ -145,25 +145,39 @@ else
     -H "Authorization: $TOK" -H 'Content-Type: application/json' \
     -d '[{"objectid":"999999","obid":999999}]' 2>&1)
   echo "  resp: $(echo "$r" | head -c 200)"
-  # ⚠️ 已知数据缺口: 华盾的模型定义不在安装包的 seed 里
-  #    (model_objecttype / model_attribute 都是空表) ->
-  #    曲线接口在「查模型」这一步就返回「属性名称非法或不存在」，
-  #    **根本走不到 mapper**。所以接口层验不了 V4，必须在 SQL 层验。
-  case "$r" in
-    *"属性名称非法或不存在"*)
-      skip "B2 接口在模型查询阶段就返回错了（model_objecttype 空表）→ 走不到 mapper，改用 SQL 层验证" ;;
-    *'"code":500'*) bad "B2 返回 500：$(echo "$r" | head -c 160)" ;;
-    *'"code"'*)     ok "B2 有业务响应（mapper 被调用到了）" ;;
-    *)             bad "B2 无响应" ;;
-  esac
+  # ⚠️ **前置条件判据（2026-11-03 实测后改）**：
+  #    曲线接口要走到 mapper，得先读**第三方实例数据**
+  #    （`CurveServiceImpl.getHisMVPoint` → `modelEntityDataService.read(objectid)`
+  #    → 查 `sac` / `hds`）。这两个 schema 是**第三方系统表**（本项目只读），
+  #    本环境**一张表都没有** ⇒ 接口级判据**不可执行**
+  #    ⇒ 跳过并说清原因，**不能**报 FAIL（那是「环境缺第三方数据」，不是「应用有 bug」）。
+  #
+  #    📌 **为什么不按「报错文案」判**：模型元数据夹具灌上之后，
+  #       报错文案从「属性名称非法或不存在」变成了别的
+  #       （实测是「Map.get 返回 null」和「数据库操作失败」）⇒ 按文案判不准。
+  #       改成判**前置条件**（第三方表在不在），与夹具有没有无关。
+  EXT_N=$($PSQL -d napstar -Atc "select count(*) from information_schema.tables where table_schema in ('sac','hds')" 2>/dev/null | tr -d '\r')
+  if [ "${EXT_N:-0}" = "0" ]; then
+    skip "B2 接口级判据不可执行：第三方 schema（sac/hds）一张表都没有 —— 曲线接口要先读第三方实例数据才到得了 mapper"
+    echo "        （安装包不含 HIS 历史数据，属已知遗留；"
+    echo "          **SQL 层那条判据照跑** —— 那才是 B2 的真判据）"
+  else
+    case "$r" in
+      *"属性名称非法或不存在"*)
+        skip "B2 接口在模型查询阶段就返回错了 → 走不到 mapper，改用 SQL 层验证" ;;
+      *'"code":500'*) bad "B2 返回 500：$(echo "$r" | head -c 160)" ;;
+      *'"code"'*)     ok "B2 有业务响应（mapper 被调用到了）" ;;
+      *)             bad "B2 无响应" ;;
+    esac
+  fi
   # 关键判据: SQL 里必须出现修好后的过滤写法
   n=$(grep -c "MOD(TO_NUMBER(TO_CHAR" /var/log/postgresql/postgresql-14-main.log 2>/dev/null | head -1)
-  if [ "${n:-0}" -gt 0 ]; then ok "B2 过滤条件进了 SQL（$n 条 MOD(TO_NUMBER(TO_CHAR...)）"; else skip "B2 SQL 里没抓到过滤 SQL（模型表为空，接口走不到 mapper）"; fi
+  if [ "${n:-0}" -gt 0 ]; then ok "B2 过滤条件进了 SQL（$n 条 MOD(TO_NUMBER(TO_CHAR...)）"; else skip "B2 SQL 里没抓到过滤 SQL（接口走不到 mapper）"; fi
   # 旧写法不能出现
   n=$(grep -c "TO_DATE(TO_CHAR" /var/log/postgresql/postgresql-14-main.log 2>/dev/null | head -1)
   chk "B2 SQL 里没有旧写法 TO_DATE(TO_CHAR" "${n:-0}" "0"
   # ⭐ 决定性判据：在真 PG 上直接验「过滤真的生效 + 旧写法是空操作」
-  #    （接口层验不了 —— 华盾的模型表 model_objecttype/model_attribute 在安装包 seed 里是空的）
+  #    （接口层验不了 —— 第三方实例数据（sac/hds）在本环境里一张表都没有）
   if [ -f /opt/hd/b2-curve-test.sh ]; then
     if bash /opt/hd/b2-curve-test.sh >/tmp/b2out.txt 2>&1; then
       ok "B2 曲线过滤在真 PG 上验证通过（改后只命中该命中的分钟；改前命中全部 → 旧写法是空操作）"
