@@ -142,7 +142,7 @@ rs 6379 DEL "$KEY" >/dev/null 2>&1
 bash /opt/hd/start-hd-apps.sh 1 >/tmp/mrv-standalone-app.log 2>&1
 SAPP_RC=$?
 echo "  起单机模式应用：start-hd-apps.sh 退出码 = $SAPP_RC"
-if [ "${SAPP_RC:-0}" -eq 0 ]; then
+if [ "$SAPP_RC" -eq 0 ]; then
   ok "S0 单机模式应用启动成功（start-hd-apps.sh 退出码 0）"
 else
   bad "S0 单机模式应用启动失败（start-hd-apps.sh 退出码 $SAPP_RC）"
@@ -150,11 +150,15 @@ fi
 # 等 web-controller 真的起来（Started 行出现）—— 固定 sleep 5 太薄，见 wait_started 的注释
 wait_started
 # 断言这次跑的是单机模式（Standalone 那行必须在日志里）—— 证明「单机分支」真的生效了
-if grep -aqE '\*\*\* Using Redis Standalone at [^)]*\)' "$A_LOG" 2>/dev/null; then
-  ok "S3 单机模式日志里有 Standalone 行（模式唯一）"
-else
-  bad "S3 单机模式日志里没有 Standalone 行 —— 模式判定有歧义"
-fi
+# ⚠️ **双向断言**：正确的行必须在，**错的行必须不在** ——
+  #    只查「有」不够：万一日志里两种行都有，模式就是有歧义的。
+  #    （house 脚本的 check_cluster_mode 就是这么做的。）
+  if grep -aqE '\*\*\* Using Redis Standalone at [^)]*\)' "$A_LOG" 2>/dev/null \
+     && ! grep -aqE '\*\*\* Using Redis Cluster with nodes:' "$A_LOG" 2>/dev/null; then
+    ok "S3 单机模式日志里有 Standalone 行、且没有 Cluster 行（模式唯一）"
+  else
+    bad "S3 单机模式的模式判定有歧义（Standalone 行缺失，或两种行同时出现）"
+  fi
 # 触发写路径（StartupRunner 启动时也会跑一次，这里主动再跑一次）
 TOK=$(cat /tmp/hd-token.txt 2>/dev/null)
 if [ -n "$TOK" ]; then
@@ -202,18 +206,20 @@ rcc "$P1" DEL "$KEY" >/dev/null 2>&1
 HD_REDIS_CLUSTER=1 bash /opt/hd/start-hd-apps.sh 1 >/tmp/mrv-cluster-app.log 2>&1
 CAPP_RC=$?
 echo "  起集群模式应用：start-hd-apps.sh 退出码 = $CAPP_RC"
-if [ "${CAPP_RC:-0}" -eq 0 ]; then
+if [ "$CAPP_RC" -eq 0 ]; then
   ok "C0 集群模式应用启动成功（start-hd-apps.sh 退出码 0）"
 else
   bad "C0 集群模式应用启动失败（start-hd-apps.sh 退出码 $CAPP_RC）"
 fi
 wait_started
 # 断言这次跑的是集群模式（Cluster 那行必须在日志里）—— 证明「集群分支」真的生效了
-if grep -aqE '\*\*\* Using Redis Cluster with nodes: [^)]*\)' "$A_LOG" 2>/dev/null; then
-  ok "C5 集群模式日志里有 Cluster 行（模式唯一）"
-else
-  bad "C5 集群模式日志里没有 Cluster 行 —— 集群分支没生效"
-fi
+# ⚠️ **双向断言**：正确的行必须在，**错的行必须不在**（同 S3 的理由）
+  if grep -aqE '\*\*\* Using Redis Cluster with nodes: [^)]*\)' "$A_LOG" 2>/dev/null \
+     && ! grep -aqE '\*\*\* Using Redis Standalone at' "$A_LOG" 2>/dev/null; then
+    ok "C5 集群模式日志里有 Cluster 行、且没有 Standalone 行（模式唯一）"
+  else
+    bad "C5 集群模式的模式判定有歧义（Cluster 行缺失，或两种行同时出现）"
+  fi
 CODE=$(curl -s -m 30 -o /tmp/mrv-cluster-resp.txt -w '%{http_code}' \
   -X POST -H "Authorization: $TOK" -H 'Content-Type: application/json' -d '{}' \
   "http://127.0.0.1:8099/napstarweb/svgCache/initGraph" 2>/dev/null)
@@ -242,7 +248,7 @@ echo "############ 3) 单机 vs 集群 —— field 名逐个比对 ############
 C2_CNT=$(grep -c . /tmp/mrv-cluster-fields.txt)
 if [ "${C2_CNT:-0}" -eq 0 ]; then
   # 两边都是 0 个 field 时 diff 也会「成功」—— 那是空比，不能算「逐个相等」
-  bad "C2 两种模式的 field 数都是 0 —— 没有 field 可比，不能判「逐个相等」"
+  bad "C2 集群模式的 field 数是 0 —— 没有 field 可比，不能判「逐个相等」"
 elif diff -u /tmp/mrv-standalone-fields.txt /tmp/mrv-cluster-fields.txt > /tmp/mrv-field-diff.txt 2>&1; then
   ok "C2 集群模式的 field 名与单机模式**逐个相等**（$C2_CNT 个）"
 else
