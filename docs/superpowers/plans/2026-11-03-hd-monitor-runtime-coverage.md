@@ -526,7 +526,7 @@ Expected:
 ```
   单机 field 数 = 12
   集群 field 数 = 12
-SUMMARY: PASS=6 FAIL=0
+SUMMARY: PASS=10 FAIL=0
 ```
 退出码 0。
 
@@ -766,9 +766,11 @@ Expected: `TEST SUMMARY: PASS=8 FAIL=0`，退出码 0。
 docker exec hd-node1 bash /opt/hd/hd-monitor-runtime-verify.sh; Write-Output "exit=$LASTEXITCODE"
 ```
 
-Expected: `SUMMARY: PASS=6 FAIL=0`，退出码 0。
-（6 条判据：S1 / S2 / C1 / C2 / C3 / C4 —— 计划里原先写的「PASS=5」是**数错了**，
-脚本里是 6 个 `ok()`；已按实测改正。）
+Expected: `SUMMARY: PASS=10 FAIL=0`，退出码 0。
+（**10 条判据**：S0（单机应用启动成功）/ S3（单机日志有 Standalone 行）/ S1 / S2 /
+C0（集群应用启动成功）/ C5（集群日志有 Cluster 行）/ C1 / C2 / C3 / C4。
+⚠️ 计划里原先写的「PASS=5」是数错了；质量审查后又**加了 4 条**（S0/S3/C0/C5），
+用来堵住「应用没起来 ⇒ 读到 0 个异常就报 PASS」这类**假绿**。）
 
 - [ ] **Step 6: 提交**
 
