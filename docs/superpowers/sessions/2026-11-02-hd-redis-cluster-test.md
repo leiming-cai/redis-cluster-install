@@ -7,6 +7,7 @@
 > - 本会话的 spec：`docs/superpowers/specs/2026-11-01-hd-redis-cluster-test-design.md`
 > - 本会话的 plan：`docs/superpowers/plans/2026-11-01-hd-redis-cluster-test.md`
 > - 本会话的缺陷清单：`docker/hd-napstar/DEFECTS.md`（D6 / D7-a / D7-b / D8）
+> - **下一份存档（2026-11-02 晚）：`docs/superpowers/sessions/2026-11-02-hd-redis-cluster-fix.md`**
 
 > ⚠️ **2026-11-02 树名更正（后补）**：本文里的「**门户树**」/「**portal/SVN 树**」
 > 指的是 `D:\javawork\1.2\cpscloud1.0\code` —— **那是「基线」，不是门户**。
