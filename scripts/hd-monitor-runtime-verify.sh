@@ -45,9 +45,10 @@ case "$IP" in
   ''|*' '*|*$'\n'*|*[!0-9.]*) echo "!! 容器 IP 解析失败: '$IP'" >&2; exit 1 ;;
 esac
 
-# 纯逻辑库（比对 field、判异常数）—— 从本脚本拆出来，好写边界测试
+# 纯逻辑库（比对 field、判 field 数、判种子编号）—— 从本脚本拆出来，好写边界测试
 LIB_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hd-monitor-runtime-lib.sh"
 [ -f "$LIB_SELF" ] || LIB_SELF=/opt/hd/hd-monitor-runtime-lib.sh
+[ -f "$LIB_SELF" ] || LIB_SELF=/repo/scripts/hd-monitor-runtime-lib.sh
 if [ ! -f "$LIB_SELF" ]; then echo "!! 找不到 hd-monitor-runtime-lib.sh" >&2; exit 3; fi
 # shellcheck source=/dev/null
 . "$LIB_SELF"
@@ -240,7 +241,7 @@ C_FIELDS=$(grep -c . /tmp/mrv-cluster-fields.txt)
 echo "  集群 field 数 = $C_FIELDS"
 echo "  集群 field 列表:"
 sed 's/^/      /' /tmp/mrv-cluster-fields.txt
-if [ "$C_FIELDS" -eq "$EXPECT_FIELDS" ]; then
+if mrv_field_count_ok /tmp/mrv-cluster-fields.txt "$EXPECT_FIELDS"; then
   ok "C1 集群模式 field 数 = $EXPECT_FIELDS"
 else
   bad "C1 集群模式 field 数 = $C_FIELDS（期望 $EXPECT_FIELDS）"
@@ -256,7 +257,6 @@ if [ "${C2_CNT:-0}" -eq 0 ]; then
   # 两边都是 0 个 field 时 diff 也会「成功」—— 那是空比，不能算「逐个相等」
   bad "C2 集群模式的 field 数是 0 —— 没有 field 可比，不能判「逐个相等」"
 elif mrv_fields_match /tmp/mrv-standalone-fields.txt /tmp/mrv-cluster-fields.txt; then
-  diff -u /tmp/mrv-standalone-fields.txt /tmp/mrv-cluster-fields.txt > /tmp/mrv-field-diff.txt 2>&1
   ok "C2 集群模式的 field 名与单机模式**逐个相等**（$C2_CNT 个）"
 else
   bad "C2 集群模式的 field 名与单机模式**不一致**："
