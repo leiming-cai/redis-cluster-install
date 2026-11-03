@@ -112,7 +112,7 @@ A2 现有判据是「应用写的 key 在集群里」——
 | **A2-R：集群分支的 key 落地了** | `real_graph:realscope` 这个 hash 存在，且 **field 数 = 12**（= 3 类型 × 各自属性数） | 空表时这个 hash **一个 field 都没有**（`continue` 掉了）⇒ 有 field 就证明 `hSet` 真执行了 |
 | **A2-V：field 里的 objType 段 = 种子编号** | field 形如 `900001_900001` | 证明是**种子数据**驱动的写入，不是别的路径 |
 | **A2-N：单机模式下也应有同样的 12 个 field** | 单机跑一遍对比 | 证明**集群分支与单机分支行为等价**（不是「集群多写了/少写了」） |
-| **A2-U：日志里 `OTypeException` 归零** | `grep -c OTypeException` | 从 23 → 0，证明 `matchOType` 成功了 |
+| **A2-U：kafkabus 那 3 个类型的 `OTypeException` 归零** | `grep -c 'oType数值非法或不存在：\(MVPoint\|DPSPoint\|Machine\)'` | 这 3 个类型各 1 次 → **0 次**。⚠️ **不是**「总数 23 → 0」—— 另外 20 次来自**别的类型**（PMSQltInfo×6 / PT / CT / Fuse / Jumper 等），由 **SVG 解析路径**触发，不在本轮范围 |
 
 ### 4.3 判据的「诚实性」检查
 
@@ -128,7 +128,7 @@ A2 现有判据是「应用写的 key 在集群里」——
 |---|---|---|---|
 | 1 | 写种子脚本 | `scripts/seed-hd-model-metadata.sh`（含 `--seed` / `--clean` 两个动作） | `bash -n` 通过 |
 | 2 | 灌种子 | 活库 `info` 三张表各 +N 行 | `psql` 查行数 + 抽样打印 |
-| 3 | **清 Redis 缓存** | `matchOTypeCode` 带 `@Cacheable("objecttypes:names")` ⇒ **必须清掉 `objecttypes:*`** | `redis-cli --scan --pattern 'objecttypes*'` |
+| 3 | **清 Redis 缓存（防御性）** | `matchOTypeCode` 带 `@Cacheable("objecttypes:names")`。⚠️ **实测：现在是 0 个 key**（失败不缓存）⇒ 严格说**不必清**；但仍清一次以防万一 | `redis-cli --scan --pattern "objecttypes*" | xargs -r redis-cli DEL` |
 | 4 | 重启应用 | `start-hd-apps.sh 1` + `1b` | 启动日志无致命错误 |
 | 5 | **单机模式**跑一遍 | `real_graph:realscope` 应有 12 个 field | 记录 field 列表（基线） |
 | 6 | **集群模式**跑一遍 | `initGraph` 触发 → 集群里应有**同样的 12 个 field** | 逐 field 比对 |
@@ -153,7 +153,7 @@ A2 现有判据是「应用写的 key 在集群里」——
 
 | # | 风险 | 对策 |
 |---|---|---|
-| 1 | **`@Cacheable("objecttypes:names")` 挡住新数据** | `matchOTypeCode` 上有 `@Cacheable(value={"objecttypes:names"}, key="#name", unless="#result < 0")` ⇒ 失败（抛异常）**不缓存**，但**成功的**结果会缓存 ⇒ 灌完数据**要清 `objecttypes:*`**，否则旧的负缓存/空缓存还在 |
+| 1 | **`@Cacheable("objecttypes:names")` 挡住新数据** | `matchOTypeCode` 上有 `@Cacheable(value={"objecttypes:names"}, key="#name", unless="#result < 0")`。⚠️ **实测（2026-11-03）**：单机 Redis 里 `objecttypes*` **0 个 key** ⇒ 失败（抛 `OTypeException`）**确实不写缓存** ⇒ **灌完数据不需要清缓存**。但脚本**仍然清一次** —— 防御性，且若将来有别的路径缓存了负结果也不会中招 |
 | 2 | 种子编号撞真实业务编号 | 用 **900001+** 显眼段；且 `real_graph:realscope` 是独立 key namespace，不与 `real_data:*` 混 |
 | 3 | 判据变成「假绿」（跟 A2 一样的坑） | 判据**必须**是**正向的 field 数**（12 个），不是「没抛异常」；且**单机/集群两边都验** |
 | 4 | 种子数据被误当生产数据 | `source_code='HDTEST'` 标记 + `--clean` 脚本可一键清 |
@@ -168,7 +168,9 @@ A2 现有判据是「应用写的 key 在集群里」——
 - [ ] Redis `objecttypes:*` 已清
 - [ ] **单机模式**下 `real_graph:realscope` 有 **12 个 field**
 - [ ] **集群模式**下 `real_graph:realscope` 有**同样的 12 个 field**（field 名与内容逐个相等）
-- [ ] web-controller 日志 `OTypeException` 从 23 → **0**
+- [ ] web-controller 日志里 **kafkabus 那 3 个类型**的 `OTypeException` 从各 1 次 → **0 次**
+      （⚠️ **总数不会归零**：另有 20 次来自 SVG 解析路径的其它类型 —— PMSQltInfo×6 / PT / CT / Fuse / Jumper 等 —— 不在本轮范围）
+
 - [ ] `hd-cluster-app-test.sh` 的 A2 从 **SKIP → PASS**（附新增的 A2-R/V/N/U 判据）
 - [ ] 集群层 `FAIL=0`；base 矩阵的差异**逐条解释**
 - [ ] DEFECTS.md 更新：#1 的状态 + C/D/E/F 四处**仍无运行时覆盖**的诚实声明
