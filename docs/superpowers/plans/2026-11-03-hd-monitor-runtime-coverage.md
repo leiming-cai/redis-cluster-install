@@ -918,7 +918,36 @@ docker exec hd-node1 bash /opt/hd/hd-cluster-verify.sh 2>&1 | Select-Object -Las
 
 Expected: `SUMMARY: PASS=39 FAIL=0`
 
-- [ ] **Step 3: 停集群**
+- [ ] **Step 3: 跑脚本自测（⚠️ 必须在集群停之前 —— `merge-wiring` 那条要集群在跑）**
+
+⚠️ **前三个在 `hd-node1` 里跑；第四个（`test-hd-portal-baseline.sh`）必须在 `rc-e2e-runner` 里跑** —— 它要读 `/out/portal-snapshot-cluster.txt`（`/out` 是宿主 `.hd-work` 的挂载点，**`hd-node1` 里没有这个挂载**）。在 `hd-node1` 里跑会因「找不到真实快照」**退出码 2**。
+
+```powershell
+# 前三个 —— hd-node1 里（此时集群还在跑 ⇒ merge-wiring 测得到「合并」那一步）
+docker exec hd-node1 bash /opt/hd/test-hd-cluster-summary.sh 2>&1 | Select-Object -Last 2
+docker exec hd-node1 bash /opt/hd/test-hd-cluster-merge-wiring.sh 2>&1 | Select-Object -Last 2
+docker exec hd-node1 bash /opt/hd/test-hd-monitor-runtime-verify.sh 2>&1 | Select-Object -Last 2
+# 第四个 —— rc-e2e-runner 里（需要 /repo 和 /out 两个挂载）
+docker run --rm -v "D:\work\rediscluterproject:/repo:ro" `
+  -v "D:\work\rediscluterproject\.hd-work:/out" `
+  -v /var/run/docker.sock:/var/run/docker.sock rc-e2e-runner:local `
+  bash /repo/scripts/test-hd-portal-baseline.sh 2>&1 | Select-Object -Last 2
+```
+
+Expected:
+```
+TEST SUMMARY: PASS=19 FAIL=0
+TEST SUMMARY: PASS=8 FAIL=0
+TEST SUMMARY: PASS=8 FAIL=0
+TEST SUMMARY: PASS=40 FAIL=0
+```
+
+> ⚠️ **`test-hd-cluster-merge-wiring.sh` 的坑**：集群没跑时它会**静默跳过**（退出码 0 但 `PASS=0`）——
+> 「退出码 0」**不等于**「测到了」。
+> ⇒ 看到 `PASS=0` 就是集群没在跑，**补跑**：`docker exec hd-node1 bash /opt/hd/hd-redis-cluster.sh start` 再跑一次。
+> ⇒ 这就是它必须排在「停集群」**之前**的原因。
+
+- [ ] **Step 4: 停集群**
 
 ```powershell
 docker exec hd-node1 bash /opt/hd/hd-redis-cluster.sh stop
@@ -927,7 +956,7 @@ docker exec hd-node1 bash -lc "ps -eo args | grep '[r]edis-server' | sed 's/.*re
 
 Expected: 只有 `*:6379` 和 `*:6389`。
 
-- [ ] **Step 4: 起单机应用 + 跑 base 回归矩阵**
+- [ ] **Step 5: 起单机应用 + 跑 base 回归矩阵**
 
 ```powershell
 docker exec hd-node1 bash -c "pkill -f '[-]jar .*web-controller.*\.jar' 2>/dev/null; pkill -f '[-]jar .*realalarmconsumer.*\.jar' 2>/dev/null; pkill -f '[-]jar .*model-controller.*\.jar' 2>/dev/null; pkill -f '[-]jar .*rtdata-consumer.*\.jar' 2>/dev/null; sleep 4; echo stopped"
@@ -938,7 +967,7 @@ docker exec hd-node1 bash -c "bash /opt/hd/verify.sh > /tmp/v5.txt 2>&1; grep '^
 
 Expected: `SUMMARY: PASS=47 FAIL=0 SKIP=4`
 
-- [ ] **Step 5: 与上一轮基线逐条比对**
+- [ ] **Step 6: 与上一轮基线逐条比对**
 
 ```powershell
 docker exec hd-node1 bash -lc "grep -E '^(  (PASS|FAIL|SKIP))' /tmp/v5.txt | sed -E 's/\(.*\)//' > /tmp/base-new.txt; grep -E '^(  (PASS|FAIL|SKIP))' /tmp/m2.txt | sed -E 's/\(.*\)//' > /tmp/base-old.txt; diff /tmp/base-old.txt /tmp/base-new.txt && echo 'IDENTICAL'"
@@ -949,23 +978,6 @@ Expected: `IDENTICAL`
 > ⚠️ **如果 base 矩阵的 SKIP 数变了**（灌了元数据 ⇒ 原本 SKIP 的判据可能变成 PASS），
 > **必须逐条解释差异**，不能当成「退化」。上一轮的基线是 `47 PASS / 0 FAIL / 4 SKIP`；
 > `SKIP` 变少、`PASS` 变多 ⇒ 是**预期内的**（元数据到位了）。
-
-- [ ] **Step 6: 跑三个脚本自测**
-
-```powershell
-docker exec hd-node1 bash /opt/hd/test-hd-cluster-summary.sh 2>&1 | Select-Object -Last 2
-docker exec hd-node1 bash /opt/hd/test-hd-cluster-merge-wiring.sh 2>&1 | Select-Object -Last 2
-docker exec hd-node1 bash /opt/hd/test-hd-portal-baseline.sh 2>&1 | Select-Object -Last 2
-docker exec hd-node1 bash /opt/hd/test-hd-monitor-runtime-verify.sh 2>&1 | Select-Object -Last 2
-```
-
-Expected:
-```
-TEST SUMMARY: PASS=19 FAIL=0
-TEST SUMMARY: PASS=8 FAIL=0
-TEST SUMMARY: PASS=40 FAIL=0
-TEST SUMMARY: PASS=8 FAIL=0
-```
 
 - [ ] **Step 7: 清理种子（可选）**
 
