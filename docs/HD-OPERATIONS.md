@@ -45,7 +45,7 @@
 | **交付树** | 华盾树的别称（它是给客户交付的那棵树） |
 | **`oms:`** | 本项目自己的 Redis 配置块（`RedisPropertiesConfig` 读它），**不是** Spring Boot 的 `spring.redis` |
 | **dataId** | Nacos 里的一个配置文件，由 `dataId` + `group` 两个坐标唯一确定 |
-| **node1 / node2** | 生产环境的两台机器别名（ZK 用 `node01`/`node02`，Redis/Kafka 用 `node1`/`node2`，**两个别名体系并存**） |
+| **node1 / node2** | 主机别名。⚠️ **现状是一台机器**（`install.sh` 把两个 IP 都设成 `127.0.0.1`），**扩成两台是这次要做的事**。另有一套 `node01`/`node02`（ZK 用）—— **两套别名体系并存** |
 
 ### 0.4 ⭐ 贯穿全文的一条规则：配置写在**哪**才生效
 
@@ -114,34 +114,55 @@ NAPSTARWEB_GROUP/scheviewer.yaml
 
 ## 1. 全链路总览
 
-### 1.1 拓扑（生产现状）
+### 1.1 拓扑（生产现状 → 目标）
+
+**现状：一台机器。** 目标：**扩成两台机器**，Redis / ZK / Kafka 三个都变集群。
 
 ```
-                        ┌──────────────┐
-                        │    Nacos     │  18848 (http) / 19848 (grpc)
-                        │  配置真值中心  │  ← oms: / spring.* 都在这里
-                        └──────┬───────┘
-                               │ 客户端拉配置
-        ┌──────────────────────┼──────────────────────┐
-        │                      │                      │
-   ┌────▼─────┐          ┌─────▼────┐          ┌─────▼─────┐
-   │ node1    │          │  node1   │          │  node1    │
-   │ Redis    │          │ZooKeeper │          │  Kafka    │
-   │  6379    │          │  2181    │          │  9092     │
-   │(redismaster)        │ (单节点) │          │broker.id=755
-   └────┬─────┘          └─────┬────┘          └─────┬─────┘
-        │                      │                      │
-   ┌────▼─────┐          ┌─────▼────┐          ┌─────▼─────┐
-   │ node2    │          │  node2   │          │  node2    │
-   │ Redis    │          │ZooKeeper │          │  Kafka    │
-   │  6389    │          │  2181    │          │  9092     │
-   │(redis.conf)        │ (目标)   │          │ (目标)    │
-   └──────────┘          └──────────┘          └───────────┘
+【现状：单台 node1】                        【目标：两台 node1 + node2】
 
-   ⛔ Redis：两个**独立单机**（不是集群，cluster-enabled 全是注释掉的）
-   ⛔ ZK   ：只有 node1（server.1）
-   ⛔ Kafka：只有 node1 一个 broker
+   ┌──────────────┐                             ┌──────────────┐
+   │    Nacos     │                             │    Nacos     │
+   │  18848/19848 │                             │  18848/19848 │
+   └──────┬───────┘                             └──────┬───────┘
+          │                                            │
+   ┌──────▼─────────────────────────┐      ┌──────────▼──────────┐
+   │            node1（一台）         │      │       node1         │
+   │  ┌───────────────────────────┐  │      │ Redis 6379  master │
+   │  │ Redis 6379  ┐             │  │      │ Redis 6380  master │
+   │  │ Redis 6389  ┘ 两个独立单机 │  │      │ Redis 6381  master │
+   │  │ ZK    2181  单节点         │  │      │ ZK    2181  voter#1 │
+   │  │ Kafka 9092  单 broker      │  │      │ Kafka 9092  broker#1│
+   │  │ PG    5432                 │  │      └──────────┬──────────┘
+   │  └───────────────────────────┘  │                 │
+   └────────────────────────────────┘      ┌──────────▼──────────┐
+                                          │       node2         │
+   ⛔ Redis：同一台机器上两个**独立单机**    │ Redis 6382  replica │
+   ⛔ ZK   ：单节点                       │ Redis 6383  replica │
+   ⛔ Kafka：单 broker                    │ Redis 6384  replica │
+                                          │ ZK    2181  voter#2 │
+                                          │ Kafka 9092  broker#2│
+                                          └─────────────────────┘
 ```
+
+**两处最容易搞错的地方**：
+
+| # | 容易以为 | 实际 |
+|---|---|---|
+| 1 | 6379 在 node1、6389 在 node2 | ⛔ **两个都在同一台机器上**。安装包 `1start_env.sh` 在**同一个目录**里起这两个实例；容器 `hd-node2` 里**零个** redis 进程，`hd-node1` 里**两个**都有 |
+| 2 | 生产已经是两台机器 | ⛔ **现在是单台**。安装包 `install.sh:6-13` 把 `ip_webserver_address` 和 `ip_napstar_address` **都设成 `127.0.0.1`**（两台合一），并写 `node1` / `node2` 两条 hosts。**扩成两台是这次要做的事** |
+
+> 📌 **安装包自带两节点集群的安装脚本** —— 不用手写配置：
+>
+> | 脚本 | 关键变量 | 现状 | 扩两台时改这里 |
+> |---|---|---|---|
+> | `/pkg/env/zookeeper/install_zk.sh` | `CLUSTER_HOSTS_ARRAY` | `(node01)` | `(node01 node02)` |
+> | `/pkg/env/kafka/install_kafka.sh` | `CLUSTER_HOSTS_ARRAY` | `(node01)` | `(node01 node02)` |
+>
+> 两个脚本都会**按数组长度自动生成 `server.N=` 行**，并按第一个入参 `MACHINE_ID`
+> 写 `myid` / 改 `broker.id` ⇒ **两台各跑一次、入参分别是 1 和 2** 即可。
+> ⚠️ 但 `install_kafka.sh` 里有两处是**硬编码 `node1`** 的（`advertised.listeners`、
+> `zookeeper.connect`），扩两台时**必须改**，详见 §3.2.3。
 
 ### 1.2 组件与文件位置对照
 
@@ -166,26 +187,33 @@ NAPSTARWEB_GROUP/scheviewer.yaml
 | `/pkg/bin/2start_kafka.sh` | 起 Kafka + **建 5 个 topic** |
 | `/pkg/bin/3start_nacos.sh` | 起 Nacos |
 
-### 1.3 一次完整上线的顺序
+### 1.3 一次完整扩容的顺序
 
 ```
-[1] 备份两个 Redis 的数据目录 + Nacos 配置导出
-[2] 装 Redis 集群          → §2
-[3] 装 ZK + Kafka 集群      → §3
-[4] 改 Nacos 的 oms: 块      → §4.7
-[5] 构建 / 启动应用          → §5
-[6] 验证                    → §5.3
+[0] 备份两个 Redis 的数据目录 + Nacos 配置导出 + 现有 ZK/Kafka 配置
+[1] ⛔ 停应用（全部四个）→ 停 Redis（6379/6389）→ 停 ZK/Kafka
+[2] 装 Redis 集群（扩到两台）  → §2
+[3] 装 ZK + Kafka 集群（扩到两台）→ §3
+[4] 改 Nacos 的 oms: 块 + spring.kafka.*  → §4.7
+[5] 迁数据（6379 + 6389 → 集群） → §2.3 末
+[6] 构建 / 启动应用              → §5
+[7] 验证                        → §5.3
 ```
 
-⛔ **[3] 必须在 [4] 之前** —— ZK/Kafka 集群化了但 Nacos 还是旧的 `node1:6379` 单机地址，
-应用会**静默连到单机 Redis**（见 §6）。
-⛔ **[2] 与 [3] 的先后无所谓**，但**两者都要在 [4] 之前**。
+⛔ **[2]、[3]、[4] 都必须在 [5] 之前** —— 集群装好了、数据还没迁，
+应用连上去会读到**空库**（看着像「数据丢了」）。
+⛔ **[4] 必须在 [2][3] 之后** —— Nacos 里还是旧的 `node1:6379` 单机地址，
+应用会**静默连到单机**（那个单机已经被停掉了）⇒ 应用起不来（见 §6）。
+
+> 📌 **[1] 停应用的顺序在前**：Redis 的停机在 ZK/Kafka 之后会有一段
+> 「应用还在跑但 Redis 没了」的窗口 ⇒ 应用会疯狂报错、可能写坏数据。
+> ⇒ **先停应用，再停中间件**。
 
 ---
 
 ## 2. 【中间件】Redis：从两个独立单机到集群
 
-### 2.1 ⭐ 生产现状：不是集群，是**两个独立单机**
+### 2.1 ⭐ 生产现状：同一台机器上跑着**两个独立单机**
 
 这是本文最重要的一条前提事实。**照着「改个配置」的想法做 Redis 集群化会失败。**
 
@@ -200,7 +228,8 @@ redis.conf:1070        requirepass <Redis口令>
 redis.conf:1408        appendonly no
 ```
 
-两份配置里 **`cluster-enabled yes` 全是注释掉的**，而且：
+**三份 conf 全是单机**（`/pkg/env/redis/` 下还有第三份 `redis-full.conf`，
+它是 `include redis.conf` + Redis Stack 模块，不是集群配置）：
 
 | 项 | 6379 | 6389 | 是主从吗 |
 |---|---|---|---|
@@ -212,8 +241,17 @@ redis.conf:1408        appendonly no
 > ⚠️ **文件名有误导性**：`redismaster.conf` 叫「master」，但它**没有任何从节点指向它**
 > —— 它就是一台普通的独立 Redis。6389 同理。
 >
-> ⇒ **生产上 6379 和 6389 是两台互不相干的单机 Redis**，各自存各自的数据。
-> ⇒ **集群化是一次重构（要迁数据），不是一次配置切换。**
+> ⚠️ **两个实例在同一台机器上**（不是一台一台）：
+> 安装包 `1start_env.sh` 在**同一个目录**里起这两个进程：
+> ```
+> cd /opt/software/redis-8.0.2/bin/
+> ./redis-server /opt/software/redis-8.0.2/config/redis.conf        # 6389
+> ./redis-server /opt/software/redis-8.0.2/config/redismaster.conf   # 6379
+> ```
+> （实测：容器 `hd-node1` 上**两个** redis 进程，`hd-node2` 上**零个**。）
+>
+> ⇒ **生产上 6379 和 6389 是同一台机器上两台互不相干的单机 Redis**，各自存各自的数据。
+> ⇒ **集群化是一次重构（要迁数据 + 加机器），不是一次配置切换。**
 
 ### 2.2 `cluster.conf` 怎么写（华盾版）
 
@@ -253,6 +291,31 @@ ssh_port = 22
 ports    = 6382,6383,6384
 ```
 
+#### 2.2.1 ⭐ 扩容时的端口规划（**先定这个再动手**）
+
+现状是**同一台 node1 上占了 6379 和 6389 两个端口**（§2.1）⇒ 扩容前必须先决定它们怎么办。
+
+| 项 | 现状 | 目标 | 怎么处置 |
+|---|---|---|---|
+| node1 的 **6379** | 一个独立单机，**有数据** | 集群的 **master #1** | **停掉 → 清空数据目录 → 重新以集群节点身份起**（数据在 §2.3 的迁移步骤里进集群） |
+| node1 的 **6389** | 一个独立单机，**有数据** | **不再使用** | **停掉 → 它的数据并进集群 → 退役**（见下面的 ⚠️） |
+| node1 的 **6380 / 6381** | 空闲 | 集群的 master #2 / #3 | 新建 |
+| node2 的 **6382-6384** | 空闲（node2 还没有 Redis） | 集群的 **3 个 replica** | 新建 |
+
+⚠️ **6389 退役前必须先把它的数据并进集群** —— 它上面可能有独立于 6379 的 key。
+
+> 📌 **为什么 6389 不直接进集群当第 4 个节点**：
+> 目标拓扑是「**3 master + 3 replica**」，6 个实例正好对应 6379-6384。
+> 把 6389 也用上就得变成 4 master + 3 replica（或 7 实例），
+> **两台机器的容错边界会变得更糟**（§2.5）。
+> ⇒ **6389 的正确归宿是「数据迁移后退役」**，不是「变成集群节点」。
+
+⚠️ **端口复用有坑**：`cluster-config.sh` 会往节点自己的 `redis.conf` 里写
+`cluster-enabled yes` 与 `cluster-config-file`，**但不会清理旧的 `nodes.conf`**。
+⇒ 旧的 `/opt/software/redis-8.10.0/logs/6379/`（数据目录）里若残留
+`nodes.conf`，新节点会带着**旧集群的身份**启动 ⇒ 表现为「节点认不出自己」。
+⇒ **重建前务必把数据目录清空**（§2.3 第 1 步）。
+
 **解析器规则**（写错会**直接报错**，不会静默吞掉）：
 
 | 规则 | 说明 |
@@ -278,7 +341,34 @@ master  <node1>:6380   <- replica <node2>:6384
 
 > ⚠️ **参数详解在 `docs/OPERATIONS.md` §2**，本节只讲华盾特有的部分。
 
-### 2.3 三步执行
+### 2.3 四步执行
+
+#### 第 0 步：⛔ 先停掉现有实例（**华盾特有，且不可跳过**）
+
+生产的 6379 / 6389 **正跑在 node1 上**（同一个目录起的）⇒ 不停掉就装不了集群。
+
+```bash
+# 在 node1 上
+redis-cli -p 6379 -a <Redis口令> SHUTDOWN NOSAVE
+redis-cli -p 6389 -a <Redis口令> SHUTDOWN NOSAVE
+```
+
+**判据**：
+
+```bash
+ps -ef | grep '[r]edis-server'    # 应该没有输出
+ss -lnt | grep -E ':(6379|6389)\b' # 应该没有输出
+```
+
+> ⚠️ **还有一件事：`1start_env.sh` 会在下次重启机器时把这两个实例再拉起来。**
+> ⇒ 集群化完成后**必须把 `1start_env.sh` 里起 Redis 的那两行注释掉**，
+> 否则机器一重启，**旧的单机实例会抢走 6379 端口**，集群节点起不来
+> ⇒ 现象是「集群节点反复起不来，但 preflight 说端口没被占」。
+>
+> 📌 顺带：`1start_env.sh` 里的 Redis 路径写的是 **`redis-8.0.2`**，
+> 而实际装的是 **`redis-8.10.0`** ⇒ 这两个脚本本来就对不上，
+> 说明**生产上很可能是手工起 Redis 的，不是靠这个脚本** ⇒ 停的时候要确认清楚
+> 「到底是谁起的」，别只改脚本。
 
 #### 第 1 步：前置条件逐项核对
 
@@ -292,16 +382,17 @@ master  <node1>:6380   <- replica <node2>:6384
 | 文件描述符 | `ulimit -n` | ≥ 10001 | 组集群时连接失败 |
 | **端口放行** | 在**对端**机器上 `nc -z <本机IP> 6379` | 通 | 握手失败 |
 | **总线端口** | 在**对端**机器上 `nc -z <本机IP> 16379` | 通 | **组不成集群** |
+| **旧数据目录** | `ls /opt/software/redis-8.10.0/logs/6379/` | ⛔ **必须为空** | 残留 `nodes.conf` ⇒ 节点带旧身份启动（§2.2.1） |
 
 > ⚠️ **集群总线端口（业务端口 + 10000）最容易漏。**
 > 只放行 6379-6384 的话，节点能启动但**组不成集群**，
 > 报错是 `Cluster join failed: Cannot find master to join` 或
 > `Unable to connect to any of the peers`。
 > 映射关系：6379→16379、6380→16380、6381→16381、6382→16382、6383→16383、6384→16384。
-
-> ⛔ **华盾特有**：生产的 6379 / 6389 **已经被现有的 `1start_env.sh` 占用了**。
-> 集群化前必须先**停掉现有实例**，否则端口冲突。
-> `cluster-config.sh` 会检测端口占用并报出，但**数据迁移要你自己做**（见 §2.3 最后一条）。
+>
+> ⚠️ **node2 上还没有 Redis** —— 它连 Redis 都没装。
+> ⇒ 扩容的**第 0 步之外**，node2 还要先装 Redis 二进制 + 建 `redis` 用户
+> （`cluster-config.sh` 会**校验**这两项，缺了就指名报错）。
 
 #### 第 2 步：给 SSH 密码
 
@@ -337,21 +428,26 @@ redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER INFO
 redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER NODES
 ```
 
-#### ⛔ 数据迁移（华盾特有，生产集群化不是「装一下」）
+#### ⛔ 数据迁移（华盾特有，扩容不是「装一下」）
 
-生产上 6379 和 6389 是**两个各自有数据的独立单机**。集群化之后：
+生产上**同一台 node1** 上跑着 6379 和 6389 **两个各自有数据的独立单机**。
+集群化之后它们的内容要**合并进同一个集群**：
 
 | 原数据 | 去哪 | 怎么去 |
 |---|---|---|
 | 6379 的数据 | 集群（key 会按 slot 落到任意 master） | `redis-cli --rdb` / `MIGRATE` / 业务侧停机窗口重灌 |
-| 6389 的数据 | 集群 | 同上 |
+| 6389 的数据 | 集群（**它整台退役**） | 同上 |
 
-> ⚠️ **这是整个集群化里唯一有数据风险的一步。**
+> ⚠️ **这是整个扩容里唯一有数据风险的一步。**
 > 建议做法：**选一个业务停机窗口，先把两个实例的数据合并导出，再灌进集群**，
 > 期间四个应用全部停掉（避免边迁边写）。
 >
 > ⚠️ **键冲突**：两个独立单机**可能有同名 key**（比如都是 `model:objecttypes:names:X`）
 > —— 合并时会**后者覆盖前者**。迁移前先各自 `KEYS` 一遍做差集比对。
+>
+> ⚠️ **6389 上的数据很容易被漏掉** —— 它是个「看起来像从节点」的东西，
+> 实施人员很容易以为它是 6379 的副本、数据在 6379 上就有 ⇒ **其实它有独立的数据**。
+> ⇒ **迁移前先 `DBSIZE` 对比两个实例**，数量不一样就说明 6389 上有独有数据。
 
 ### 2.4 幂等重跑 / 回滚
 
@@ -361,6 +457,8 @@ redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER NODES
 | 想撤销 | `bash uninstall.sh`（会停单元、删目录）—— ⚠️ **不会还原成两个独立单机**，数据要自己备份 |
 
 ### 2.5 ⚠️ 两台机器的容错硬边界
+
+扩容后是 **3 master + 3 replica 跨 2 台机器**（`cluster-config.sh` 推导出的布局）：
 
 | 布局 | 机器故障后的结果 |
 |---|---|
@@ -421,7 +519,7 @@ oms:
 > 它现在**只靠源码里的 `bootstrap.yml` 存活**（那是它**唯一**生效的地方），
 > Nacos 的 `icms-commitDataIncreProducer.yaml` 里没有这个块。
 > ⇒ **集群化时必须给这个 dataId 补上 `oms:`**，
-> 否则这个应用**继续连单机**，而单机已经被停掉 ⇒ **它会起不来**。
+> 否则这个应用**继续连单机**，而单机**已经被停掉**（§2.3 第 0 步）⇒ **它会起不来**。
 
 ### 2.7 改完怎么验证生效
 
@@ -454,6 +552,63 @@ grep -a 'Using Redis Standalone at' /opt/hd/logs/<app>.log   # 应该**没有**�
 > **已在 Docker E2E 环境验证过，但没有在真机上验证过**。
 > ⇒ 给的是**配置模板 + 逐条判据**，不是「上生产就能用」的现成方案。
 > 每一步都带判据，请照着核对。
+
+### 3.0 ⭐ 先看这个：安装包**自带**两节点集群的安装脚本
+
+> **扩成两台机器这件事，安装包已经预留了机制** —— 不用从零手写配置。
+
+**ZooKeeper**（`/pkg/env/zookeeper/install_zk.sh`，实测）：
+
+```bash
+# 安装机器hosts(或ip)，多台机器以空格分隔
+#CLUSTER_HOSTS_ARRAY=(node01 node02 node03)   ← 注释掉的多台写法
+CLUSTER_HOSTS_ARRAY=(node01)                  ← 当前：单台
+MACHINE_ID=$1                                  ← 第几个入参，myid 就是它
+```
+
+脚本会**按数组长度自动生成 `server.N=` 行**：
+
+```bash
+for (( i = 1; i <= "${#CLUSTER_HOSTS_ARRAY[@]}"; i++ ))
+do
+    echo server.$i="${CLUSTER_HOSTS_ARRAY[$(($i-1))]}:2888:3888" >> $zk_conf
+done
+echo $MACHINE_ID > $zk_data/myid
+```
+
+**Kafka**（`/pkg/env/kafka/install_kafka.sh`，实测）：结构完全一样 ——
+`CLUSTER_HOSTS_ARRAY=(node01)`、`MACHINE_ID=$1`、按数组生成 `zookeeper.connect`。
+
+**扩成两台的做法**：
+
+```bash
+# 两台机器上分别执行，入参分别是 1 和 2
+cd /pkg/env/zookeeper
+vim install_zk.sh          # CLUSTER_HOSTS_ARRAY=(node01 node02)
+bash install_zk.sh 1 /home/cps     # ← 在 node1 上
+bash install_zk.sh 2 /home/cps     # ← 在 node2 上
+```
+
+> ⛔ **但 `install_kafka.sh` 里有两处是硬编码 `node1` 的**，扩两台时**必须改**：
+>
+> ```bash
+> # 第 124 行：advertised.listeners 被写死成 node1
+> sed -i 's|#advertised.listeners=PLAINTEXT://your.host.name:9092|advertised.listeners=PLAINTEXT://node1:9092|g' $kafka_conf
+>
+> # 第 141 行：zookeeper.connect 被写死成 node1
+> sed -i 's|zookeeper.connect=localhost:2181|zookeeper.connect=node1:2181|g' $kafka_conf
+> ```
+>
+> 这两行**在脚本里是生效的**（前面那几行用数组下标的 `sed` 都被 `#` 注释掉了）⇒
+> **两台跑同一个脚本会得到两个 `advertised.listeners=node1` 的 broker**
+> ⇒ **两个 broker 抢同一个 advertised 地址** ⇒ 客户端拿到的元数据是错的。
+>
+> **修法**：把它们改成用 `${CLUSTER_HOSTS_ARRAY[$(($MACHINE_ID-1))]}` 取本机地址，
+> 并让 `zookeeper.connect` 用**整个数组**（脚本里已经算好了 `cluster_info`，
+> 但那行 `sed` 也被注释掉了 ⇒ 同样要放开）。
+>
+> 📌 这正是 §3.2.3 那份模板要做的事 —— **手改配置比跑脚本更可控**，
+> 但要**知道脚本里有这个坑**。
 
 ### 3.1 生产现状：单节点 ZK + 单 broker + 5 个 RF=1 的 topic
 
@@ -720,9 +875,12 @@ Topic: INCDATA	Partition: 1	Leader: 756	Replicas: 756,755	Isr: 756,755
 
 ### 3.4 切换流程（6 步）+ 逐条判据
 
-> 这是**从「单节点」切到「两节点集群」**的顺序。生产当前是单节点（§3.1），直接照这个顺序切。
+> 这是**从「单节点」切到「两节点集群」**的顺序。生产当前是单台机器（§3.1），直接照这个顺序切。
+>
+> 📌 **扩成两台意味着 node2 上要装一整套 ZK + Kafka** ——
+> §3.0 的安装脚本就是干这个的（两台各跑一次，入参 1 和 2）。
 
-#### 1. 停掉单节点 Kafka + ZK（**只在 node1 上做**）
+#### 1. 停掉单节点 Kafka + ZK（**只在现有那台机器上做**）
 
 ```bash
 # 在原来那台机器上
@@ -736,9 +894,12 @@ zkServer.sh stop
 ss -lnt | grep -E ':(9092|2181)\b'   # 应该没有输出
 ```
 
-#### 2. 两台都改配置
+> ⚠️ **别忘了 Redis 也要停**（§2.3 第 0 步）—— 而且 Redis 的停机**在 ZK/Kafka 之前**，
+> 因为应用要先全部停下，不能只停中间件让应用继续往单机里写。
 
-按 §3.2 改 `zoo.cfg` / `server.properties`，写对 `myid`。
+#### 2. node2 上装 ZK + Kafka（**新机器**）
+
+按 §3.0 用安装脚本，或按 §3.2 手写配置。**node2 上做 `MACHINE_ID=2` 那一份**。
 
 **判据**：
 
@@ -1613,38 +1774,53 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 
 ### 8.1 端口表
 
+**扩容后**（两台机器）：
+
 | 端口 | 组件 | 协议 | 备注 |
 |---|---|---|---|
-| 5432 | PostgreSQL | PG | 业务库 `napstar` / 平台库 `cpspg` |
+| 5432 | PostgreSQL | PG | 业务库 `napstar` / 平台库 `cpspg`（**只在 node1**） |
 | 6379 | Redis | RESP | **集群 master #1**（node1） |
 | 6380 | Redis | RESP | **集群 master #2**（node1） |
 | 6381 | Redis | RESP | **集群 master #3**（node1） |
 | 6382 | Redis | RESP | **集群 replica**（node2） |
 | 6383 | Redis | RESP | **集群 replica**（node2） |
 | 6384 | Redis | RESP | **集群 replica**（node2） |
-| 6379 / 6389 | Redis | RESP | ⚠️ **改造前**是两个独立单机（`redismaster.conf` / `redis.conf`） |
 | **16379-16384** | Redis | RESP | ⚠️ **集群总线端口 = 业务端口 + 10000**，**最容易漏放行** |
-| 2181 | ZooKeeper | 客户端 | |
-| 2888 | ZooKeeper | 选举 | |
-| 3888 | ZooKeeper | 同步 | |
-| 9092 | Kafka | PLAINTEXT | |
-| 18848 | Nacos | HTTP | |
+| 2181 | ZooKeeper | 客户端 | 两台都有 |
+| 2888 | ZooKeeper | 选举 | 两台都有 |
+| 3888 | ZooKeeper | 同步 | 两台都有 |
+| 9092 | Kafka | PLAINTEXT | 两台都有（两个 broker） |
+| 18848 | Nacos | HTTP | **只在 node1** |
 | 19848 | Nacos | gRPC | ⚠️ **应用启动前 Nacos 必须 gRPC 也通** |
 | 8090 | model-controller | HTTP | |
 | 8091 | commitDataIncreProducer | HTTP | |
 | 8092 | rtdata-consumer | HTTP | |
 | 8099 | web-controller | HTTP | |
 
+**扩容前**（现状，**一台机器**）：
+
+| 端口 | 组件 | 在哪 | 备注 |
+|---|---|---|---|
+| 6379 | Redis | **node1** | 独立单机（`redismaster.conf`） |
+| **6389** | Redis | **node1** | 独立单机（`redis.conf`）—— ⚠️ **扩容后退役**（§2.2.1） |
+| 2181 | ZooKeeper | node1 | 单节点 |
+| 9092 | Kafka | node1 | 单 broker |
+| 18848 / 19848 | Nacos | node1 | |
+| 5432 | PostgreSQL | node1 | |
+
+> ⚠️ **6389 是现状才有的端口** —— 它**不在**扩容后的 6379-6384 规划里。
+> 实施时看到 6389 别以为是漏配了。
+
 ### 8.2 文件布局
 
-**生产机**：
+**生产机（node1）**：
 
 ```
 /opt/software/
   redis-8.10.0/
     bin/{redis-server,redis-cli}
-    config/{redismaster.conf,redis.conf}     ← 改造前：两个独立单机
-    logs/{6379,6389}/
+    config/{redismaster.conf,redis.conf}     ← 现状：两个独立单机（同一台机器）
+    logs/{6379,6389}/                        ← ⚠️ 扩容前要清空（残留 nodes.conf）
   apache-zookeeper-3.9.0-bin/
     conf/zoo.cfg
     data/myid                                ← 必须与 server.N 对应
@@ -1668,10 +1844,11 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 /opt/cpsweb_install/
   bin/{1start_env.sh,2start_kafka.sh,3start_nacos.sh,4stop_env.sh}
   env/
-    redis/{redismaster.conf,redis.conf}
-    zookeeper/zoo.cfg
-    kafka/server.properties
+    redis/{redismaster.conf,redis.conf,redis-full.conf}   ← redis-full = include + Stack 模块
+    zookeeper/{zoo.cfg,install_zk.sh}       ← ⭐ 自带两节点安装脚本
+    kafka/{server.properties,install_kafka.sh}  ← ⭐ 同上（但有两处硬编码 node1，§3.0）
     nacos/nacos_config_export_*.zip         ← ⭐ 配置真值在这里
+  install.sh                                 ← ⭐ 写 hosts：node1 / node2（现两处都是 127.0.0.1）
 ```
 
 **源码树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code\`）：
@@ -1695,20 +1872,23 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 | # | 容易记错 | 实际 |
 |---|---|---|
 | 1 | `redismaster.conf` 是「主」 | 它**没有任何从节点指向它** —— 就是一台独立单机 |
-| 2 | 生产 Redis 已经是集群 | 是**两个独立单机**（6379 + 6389），`cluster-enabled` 全是注释 |
-| 3 | `2start_kafka.sh` 建了 6 个 topic | 只建 **5 个**；`COMMITDATAINCRE` 是 **auto-create** 来的（RF=1） |
-| 4 | ZK 和 Kafka 用同一个别名 | ZK 用 `node01` + **网卡 A 的 IP**，Kafka 用 `node1` + **网卡 B 的 IP** —— **两套别名，同一台机器** |
-| 5 | 集群总线端口就是业务端口 | 是 **业务端口 + 10000**（`6379` → `16379`） |
-| 6 | `cluster_require_full_coverage` 保持默认 | 两机部署必须 `no`，否则任一 master 挂 = 全集群停写 |
-| 7 | 两台机器能对称容错 | **不能**。主数多的那台挂 = 停写。要两头都活至少 **3 台** |
-| 8 | 源码里的 `application.yml` 改了会生效 | **大段是注释**，不生效。真值在 **Nacos 导出包**里 |
-| 9 | 改 Nacos 就要重编 jar | **不用** —— 华盾交付树的 jar 里 `oms:` 是注释的 ⇒ Nacos 赢 |
-| 10 | `oms:` 和 `spring.redis:` 是一回事 | **两套契约**。集群化时**两个都要改** |
-| 11 | `redisMode: CLUSTER` 也行 | **大小写敏感**，必须小写 `cluster` |
-| 12 | `commitDataIncreProducer` 的 `oms:` 在 Nacos 里 | **不在** —— 只在它的 `bootstrap.yml` 里 |
-| 13 | 2 voter 的 ZK 能容忍 1 个故障 | **不能** —— 2 节点要 2 个都活才有 quorum |
-| 14 | Kafka 的数据在 `/tmp/kafka-logs` 也没事 | `/tmp` 会被清空 ⇒ **重启后消息全丢** |
-| 15 | `spring.kafka.consumer.group-id` 就是消费组名 | ⚠️ **不一定** —— `@KafkaListener(id = "...")` **会覆盖它**（见下） |
+| 2 | 生产 Redis 已经是集群 | 是**同一台机器上两个独立单机**（6379 + 6389），`cluster-enabled` 全是注释 |
+| 3 | 6379 在一台机器、6389 在另一台 | ⛔ **两个都在同一台机器上**（`1start_env.sh` 同一目录起两个进程） |
+| 4 | 生产已经是两台机器 | ⛔ **现在是单台**。`install.sh:6-13` 把两个 IP 都设成 `127.0.0.1` ⇒ **扩两台是这次要做的事** |
+| 5 | `2start_kafka.sh` 建了 6 个 topic | 只建 **5 个**；`COMMITDATAINCRE` 是 **auto-create** 来的（RF=1） |
+| 6 | ZK 和 Kafka 用同一个别名 | ZK 用 `node01` + **网卡 A 的 IP**，Kafka 用 `node1` + **网卡 B 的 IP** —— **两套别名，同一台机器** |
+| 7 | 集群总线端口就是业务端口 | 是 **业务端口 + 10000**（`6379` → `16379`） |
+| 8 | `cluster_require_full_coverage` 保持默认 | 两机部署必须 `no`，否则任一 master 挂 = 全集群停写 |
+| 9 | 两台机器能对称容错 | **不能**。主数多的那台挂 = 停写。要两头都活至少 **3 台** |
+| 10 | 源码里的 `application.yml` 改了会生效 | **大段是注释**，不生效。真值在 **Nacos 导出包**里 |
+| 11 | 改 Nacos 就要重编 jar | **不用** —— 华盾交付树的 jar 里 `oms:` 是注释的 ⇒ Nacos 赢 |
+| 12 | `oms:` 和 `spring.redis:` 是一回事 | **两套契约**。集群化时**两个都要改** |
+| 13 | `redisMode: CLUSTER` 也行 | **大小写敏感**，必须小写 `cluster` |
+| 14 | `commitDataIncreProducer` 的 `oms:` 在 Nacos 里 | **不在** —— 只在它的 `bootstrap.yml` 里 |
+| 15 | 2 voter 的 ZK 能容忍 1 个故障 | **不能** —— 2 节点要 2 个都活才有 quorum |
+| 16 | Kafka 的数据在 `/tmp/kafka-logs` 也没事 | `/tmp` 会被清空 ⇒ **重启后消息全丢** |
+| 17 | `spring.kafka.consumer.group-id` 就是消费组名 | ⚠️ **不一定** —— `@KafkaListener(id = "...")` **会覆盖它**（见下） |
+| 18 | 安装包没有多机支持 | ⚠️ **有** —— `install_zk.sh` / `install_kafka.sh` 的 `CLUSTER_HOSTS_ARRAY` 就是多机入口 |
 
 ### 8.3.1 消费组名：配置里的 `group-id` 不一定是真正的组名
 
@@ -1753,23 +1933,34 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 ## 9. 一页速查
 
 ```
+【现状 → 目标】
+  现在：一台机器（node1）。Redis 6379+6389 两个独立单机、ZK 单节点、Kafka 单 broker
+  目标：两台机器。Redis 3master+3replica、ZK 2 voter、Kafka 2 broker
+
 【配置在哪生效】
   命令行 > jar 内 application.yml > Nacos dataId
   ⚠️ 华盾交付树的 jar 里 oms: 是注释的 ⇒ Nacos 赢 ⇒ 只改 Nacos，不重编 jar
   ⚠️ 源码里的 application.yml 大段是注释 ⇒ 不是真值
   真值 = 安装包 nacos_config_export_*.zip 里的 dataId
 
-【Redis 集群化】
-  1. 现状：两个独立单机（6379/6389），不是集群 ⇒ 集群化 = 重构 + 迁数据
-  2. cluster.conf：cluster_require_full_coverage = no（必须）
-  3. 放行业务端口 6379-6384 + 总线端口 16379-16384（最容易漏）
-  4. Nacos 4 个 dataId 各填 oms:（redisMode: cluster 小写 + clusters: 6 个节点）
+【Redis 扩容成集群】
+  1. ⛔ 先停掉 node1 上现有的 6379 / 6389（两个都在同一台机器上）
+     并注释掉 1start_env.sh 里起 Redis 的两行（否则重启会抢端口）
+  2. 端口规划：node1 = 6379/6380/6381（master），node2 = 6382/6383/6384（replica）
+     6389 退役（数据并进集群，不当集群节点）
+  3. node2 还要先装 Redis 二进制 + 建 redis 用户
+  4. 清空旧数据目录（残留 nodes.conf ⇒ 节点带旧身份启动）
+  5. cluster.conf：cluster_require_full_coverage = no（必须）
+  6. 放行业务端口 6379-6384 + 总线端口 16379-16384（最容易漏）
+  7. Nacos 4 个 dataId 各填 oms:（redisMode: cluster 小写 + clusters: 6 个节点）
      + commitDataIncreProducer 的 dataId 要「补」oms: 块
-  5. 每个应用也要改 spring.redis:（cluster.nodes 写法，与 oms: 不同）
-  6. 判据：启动日志 "*** Using Redis Cluster with nodes: ..." 且没有 Standalone 行
+  8. 每个应用也要改 spring.redis:（cluster.nodes 写法，与 oms: 不同）
+  9. 判据：启动日志 "*** Using Redis Cluster with nodes: ..." 且没有 Standalone 行
 
-【ZK + Kafka 集群化】
-  1. 现状：单节点 ZK（server.1）+ 单 broker（broker.id=755）
+【ZK + Kafka 扩容成集群】
+  1. 安装包自带脚本：install_zk.sh / install_kafka.sh 的 CLUSTER_HOSTS_ARRAY
+     改成 (node01 node02)，两台各跑一次，入参 1 / 2
+     ⚠️ 但 install_kafka.sh 有两处硬编码 node1（advertised.listeners / zookeeper.connect）
   2. zoo.cfg 加 server.2；两台 myid 分别 1 / 2
   3. server.properties：broker.id 755/756、advertised.listeners 各不同、
      zookeeper.connect 两个都写、log.dirs 改持久化路径、
