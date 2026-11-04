@@ -155,14 +155,13 @@ NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml
 ⇒ **4 个 dataId 有 `oms:`，而且**全部是单机形态**
 （`hostname` + `port`，**没有 `redisMode`、没有 `clusters:`**）。
 
-> ⚠️ **不同的数据库导出包内容不同** ——
-> **kingbase（单机版，生产）11 个**；
-> DM 版（容器验证环境里那份）**12 个**，多出 `napstarweb-controller1.yaml` 和 `scheviewer.yaml`。
-> ⇒ **以生产机上的那个 zip 为准**，别照抄任何一份清单。
+> ⭐ **本文以「当前这份」为准** —— 即上面那份 kingbase 导出包（11 个 dataId、4 个有 `oms:`）。
+> 这就是改造时**要照着改的那一份**。
 >
-> 📌 **注意 `napstarweb-controller1.yaml` 只在 DM 那份里有** ——
-> 而它与 `napstarweb-controller.yaml` 用**同一个 `group-id: svg`**（§8.3.1），
-> 如果生产用的是 kingbase 那份，**就没有这个重复问题**。
+> ⚠️ **别拿容器里那份 DM 导出包当生产真值** —— 它有 **12** 个 dataId
+> （多出 `napstarweb-controller1.yaml` 和 `scheviewer.yaml`），
+> 且 `napstarweb-controller1.yaml` 与 `napstarweb-controller.yaml` 用**同一个 `group-id: svg`**
+> ⇒ 那份里存在的「两套 dataId 抢同一组名」的问题，**生产（kingbase）没有**（§8.3.1）。
 
 ### 0.5 本文与「两节点 ZK/Kafka」的边界说明
 
@@ -505,6 +504,10 @@ redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER NODES
 
 #### ⛔ 数据迁移（华盾特有，扩容不是「装一下」）
 
+> 📌 **这一步是人工操作，本手册不提供脚本。**
+> 原因是数据的**业务语义只有实施方知道**（哪些 key 可以覆盖、哪些必须保留、
+> 停机窗口有多长）—— 通用脚本反而会把这些判断藏起来。
+
 生产上**同一台 node1** 上跑着 6379 和 6389 **两个各自有数据的独立单机**。
 集群化之后它们的内容要**合并进同一个集群**：
 
@@ -523,6 +526,19 @@ redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER NODES
 > ⚠️ **6389 上的数据很容易被漏掉** —— 它是个「看起来像从节点」的东西，
 > 实施人员很容易以为它是 6379 的副本、数据在 6379 上就有 ⇒ **其实它有独立的数据**。
 > ⇒ **迁移前先 `DBSIZE` 对比两个实例**，数量不一样就说明 6389 上有独有数据。
+>
+> 📌 **迁完之后必须核对**（不能只看「应用起来了」）：
+>
+> ```bash
+> # 迁之前的基线（现在就记下来）
+> redis-cli -p 6379 -a <Redis口令> DBSIZE
+> redis-cli -p 6389 -a <Redis口令> DBSIZE
+>
+> # 迁之后：集群的总数应等于两个实例之和（减去重复 key）
+> redis-cli -c -h <node1> -p 6379 -a <集群密码> DBSIZE
+> ```
+>
+> ⇒ **总数对不上就不要启应用**，先查清差在哪。
 
 ### 2.4 幂等重跑 / 失败回退
 
