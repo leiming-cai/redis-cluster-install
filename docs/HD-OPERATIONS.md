@@ -57,6 +57,20 @@
 > ⚠️ **本文件里带「已实测」标记的内容，是在 Docker 验证环境（`hd-node1`）上真跑出来的。**
 > **带「未在真机验证」标记的，是模板 + 判据，不是「上生产就能用」的现成方案。**
 > 两种标记的边界**每处都标出来了** —— 不要把前者当后者用。
+>
+> 📌 **本文引用的「生产真值」来自单机版安装包**：
+>
+> ```
+> D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\nacos\
+>   ├─ nacos_config_export_kingbase.zip          ← ⭐ 本文引用的就是这份（11 个 dataId）
+>   ├─ nacos_config_export_hisdataproducer_exp.zip
+>   └─ nacos_config_export_kingbase_patch_1118.zip
+> ```
+>
+> ⚠️ **别拿容器里那份 DM 导出包当生产真值** —— 它有 **12** 个 dataId
+> （多出 `napstarweb-controller1.yaml` 与 `scheviewer.yaml`），
+> **生产（kingbase）那份只有 11 个**。
+> ⇒ **两份的内容不一致，本文的清单以 kingbase 那份为准。**
 
 ### 0.3 术语
 
@@ -103,33 +117,56 @@ Nacos 的 oms:                输
 ```bash
 # 在生产机上（安装包根目录）
 cd /opt/cpsweb_install/env/nacos
-unzip -o 'nacos_config_export_dm - 2.0.zip' -d /tmp/nacos-export
+ls -la *.zip                    # 先看有哪些导出包
+unzip -o nacos_config_export_kingbase.zip -d /tmp/nacos-export
 find /tmp/nacos-export -name '*.yaml' | sort
 ```
 
-华盾交付的导出包里有 **12 个 dataId**（实测，DM 版）：
+#### 生产真值：**单机版**安装包（`单机(华盾)/web_install/env/nacos/nacos_config_export_kingbase.zip`，实测 11 个 dataId）
 
 ```
 DEFAULT_GROUP/jk.yaml
 DEFAULT_GROUP/napstarmappingconfig.yaml
 MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml
 MODELSERVER_GROUP/icms-controller.yaml
+MODELSERVER_GROUP/icms-hisDataProducer.yaml
 MODELSERVER_GROUP/icms-real-controller.yaml
 MODELSERVER_GROUP/icms-rtdataconsumer.yaml
 NAPSTARWEB_GROUP/kafkabus.yaml
 NAPSTARWEB_GROUP/napstarweb-controller.yaml
-NAPSTARWEB_GROUP/napstarweb-controller1.yaml
 NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml
 NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml
-NAPSTARWEB_GROUP/scheviewer.yaml
 ```
 
-> ⚠️ **不同的数据库（DM / PG / 达梦 / 金仓 …）导出包内容略有不同** ——
-> 以**生产机上的那个 zip** 为准，别照抄本文档列的清单。
+**哪些 dataId 里有 `oms:` 块**（**逐个扫过全部 11 个**）：
+
+| dataId | 应用 | 有 `oms:`？ | 现在的值 |
+|---|---|---|---|
+| `MODELSERVER_GROUP/icms-controller.yaml` | model-controller | ✅ | `hostname: node1` / `port: 6379` |
+| `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | rtdata-consumer | ✅ | 同上 |
+| `MODELSERVER_GROUP/icms-real-controller.yaml` | realserver | ✅ | 同上 |
+| `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | web-controller | ✅ | 同上 |
+| **`MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml`** | commitDataIncreProducer | ⛔ **没有** | —— |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ⛔ 没有 | —— |
+| `MODELSERVER_GROUP/icms-hisDataProducer.yaml` | hisDataProducer | ⛔ 没有 | —— |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml` | realalarmproducer | ⛔ 没有 | —— |
+| 其余 3 个（`jk` / `napstarmappingconfig` / `kafkabus`） | —— | ⛔ 没有 | —— |
+
+⇒ **4 个 dataId 有 `oms:`，而且**全部是单机形态**
+（`hostname` + `port`，**没有 `redisMode`、没有 `clusters:`**）。
+
+> ⚠️ **不同的数据库导出包内容不同** ——
+> **kingbase（单机版，生产）11 个**；
+> DM 版（容器验证环境里那份）**12 个**，多出 `napstarweb-controller1.yaml` 和 `scheviewer.yaml`。
+> ⇒ **以生产机上的那个 zip 为准**，别照抄任何一份清单。
+>
+> 📌 **注意 `napstarweb-controller1.yaml` 只在 DM 那份里有** ——
+> 而它与 `napstarweb-controller.yaml` 用**同一个 `group-id: svg`**（§8.3.1），
+> 如果生产用的是 kingbase 那份，**就没有这个重复问题**。
 
 ### 0.5 本文与「两节点 ZK/Kafka」的边界说明
 
-本文 §3 给的是**从单节点切到两节点集群**的完整配置与流程。
+本文 §3 给的是**从单机切到两节点集群**的完整配置与流程。
 它的模板来自本仓库 `scripts/e2e-kafka-cluster.sh`（**已在 Docker E2E 环境验证过**），
 但**没有在真机上验证过** —— 请严格按 §3.4 的步骤逐条核对，**每步都有判据**。
 
@@ -1131,6 +1168,28 @@ jinfo -sysprops <kafka 的 pid> 2>/dev/null | grep MaxHeapSize
 > ⚠️ **另外三个的 `bootstrap.yml` 里 `oms:` 是注释掉的**
 > （`model-controller:92` / `rtdata-consumer:43`）⇒ 它们靠 Nacos。
 
+#### 生产包里另外两个 dataId（**本次改造不涉及，但要知道它们存在**）
+
+| dataId | 应用 | 有 `oms:`？ | 用的是哪套 Redis 配置 | 说明 |
+|---|---|---|---|---|
+| `MODELSERVER_GROUP/icms-real-controller.yaml` | **realserver** | ✅ 有 | `oms:` + `spring.redis:` | ⚠️ **realserver 用户说明它不用、不跑**（§5.2）⇒ **不在本次改造范围**。但它的 `oms:` 也是单机形态，**将来若启用它，集群化时也要改** |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ❌ **没有** | **只有 `spring.redis:`** | 在批次 1 里跑（§5.2）⇒ **它不走 `oms:` 那条路** |
+
+> ⭐ **`realalarmconsumer` 的 Redis 配置来源与其它三个不同**（**实测**）：
+>
+> | | `oms:` | `spring.redis:` | 源码里用 `RedisUtil`/`RedisTemplate`/`@Cacheable`？ |
+> |---|---|---|---|
+> | web-controller / rtdata-consumer / model-controller | ✅ | ✅ | ✅ |
+> | **realalarmconsumer** | ⛔ **没有**（`bootstrap.yml` 里**也没有**） | ✅ 有 | ⛔ **零命中**（全模块扫过） |
+>
+> ⇒ **它不通过本项目的 `oms:` 契约连 Redis**，只靠 Spring Boot 的 `spring.redis:`。
+> ⇒ **集群化时它要改的是 `spring.redis:`**（§4.6 那套 `cluster.nodes` 写法），
+> **不要**给它加 `oms:` —— 加了也不生效（它没有那套代码路径）。
+>
+> ⚠️ **但要先确认它到底需不需要集群** —— 它的源码里**没有任何 Redis 调用**，
+> `spring.redis:` 只是自动装配出来的连接工厂（可能只是为了满足某个框架的依赖）。
+> ⇒ **改之前先查清楚**，别凭猜改配置。
+
 ### 4.3 web-controller
 
 **位置**：`application/backend/napstarweb/web-controller/`
@@ -1274,6 +1333,11 @@ oms:                      # ← ⭐ 只在这里
 commit:
   templatecfgpath: /opt/software/modelFile
 ```
+
+> 📌 **`orm.database` 的值随数据库变** ——
+> 生产真值（kingbase 版）是 `orm: database: kingbase`，
+> DM 版是 `dm`，PG 版是 `pg` ⇒ **照抄对应导出包的那一份**。
+> ⇒ **改 Redis 配置时**别顺手把 `orm` 也改了。
 
 **Nacos dataId 里的 Kafka 段**：
 
@@ -1510,16 +1574,24 @@ spring:
 
 ### 4.7 ⭐ 汇总表：每个键填在哪、填什么
 
-**Redis 集群化 —— 要改的地方一览**：
+**Redis 集群化 —— 要改的地方一览**（**基于生产真值**：`单机(华盾)/…/nacos_config_export_kingbase.zip`）：
 
 | 应用 | dataId | 改 `oms:`？ | 改 `spring.redis:`？ | 改 `spring.kafka.bootstrap-servers`？ | 还要改源码？ |
 |---|---|---|---|---|---|
 | **web-controller** | `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | ✅ | ✅ | ✅ | ❌ |
 | **commitDataIncreProducer** | `MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml` | ⚠️ **要补这个块**（现在没有） | ✅ | ✅ | ⚠️ **要么改 `bootstrap.yml` 重编 jar，要么把 `oms:` 挪到 Nacos** |
-| **rtdata-consumer** | `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | ✅ | ➖（本来就没有） | ✅ | ❌ |
-| **model-controller** | `MODELSERVER_GROUP/icms-controller.yaml` | ✅ | ✅ | ➖（本来就没有） | ❌ |
+| **rtdata-consumer** | `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | ✅ | ➖（本来就没有 `spring.redis:`） | ✅ | ❌ |
+| **model-controller** | `MODELSERVER_GROUP/icms-controller.yaml` | ✅ | ✅ | ➖（本来就没有 `spring.kafka`） | ❌ |
+| **realalarmconsumer** | `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | ➖ **没有这个块，也不需要** | ✅ | ✅ | ❌ |
+| **realserver** | `MODELSERVER_GROUP/icms-real-controller.yaml` | ⛔ **不在本次改造范围**（不跑这个应用） | ⛔ | ⛔ | — |
 
-**每个 dataId 的 `oms:` 集群模板**（四处**逐字相同**）：
+> 📌 **`rtdata-consumer` 的 dataId 里确实没有 `spring.redis:`** —— 实测它的顶层键是
+> `server` / `spring` / `logging` / `commitdata` / `oms`，`spring:` 下只有 `cloud` 与 `kafka`。
+> ⇒ 它**只通过 `oms:` 连 Redis**。
+>
+> 📌 **`model-controller` 的 dataId 里确实没有 `spring.kafka`** —— 它不消费 Kafka。
+
+**每个 dataId 的 `oms:` 集群模板**（三处**逐字相同**）：
 
 ```yaml
 oms:
@@ -1905,6 +1977,8 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
     zookeeper/{zoo.cfg,install_zk.sh}       ← ⭐ 自带两节点安装脚本
     kafka/{server.properties,install_kafka.sh}  ← ⭐ 同上（但有两处硬编码 node1，§3.0）
     nacos/nacos_config_export_*.zip         ← ⭐ 配置真值在这里
+        └ 单机版（生产）：nacos_config_export_kingbase.zip   ← ⭐ 11 个 dataId
+        └ DM 版 / PG 版 / …：内容不同，以生产机上的那个为准
   install.sh                                 ← ⭐ 写 hosts：node1 / node2（现两处都是 127.0.0.1）
 ```
 
@@ -1963,15 +2037,15 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 > ⚠️ **「改 group-id 让两个应用不抢消息」这个做法在有 `id` 的应用上没用** ——
 > 它们的组名是**写在注解里**的，改 Nacos 不影响。
 >
-> 📌 **Nacos 里各 dataId 的 `group-id` 实测值**：
+> 📌 **生产真值（kingbase 导出包）里各 dataId 的 `group-id`**：
 > `icms-rtdataconsumer` = `sac` ·
 > `icms-commitDataIncreProducer` = `test-xy7` ·
 > `napstarweb-controller` = `svg` ·
 > `napstarweb-realalarm-consumer` = `test-xy8`。
 >
-> ⛔ **注意 `napstarweb-controller.yaml` 与 `napstarweb-controller1.yaml` 用的是同一个
-> `group-id: svg`** —— 它们是**同一个应用的两套 dataId**，
-> 改成集群配置时**两个都要改**，否则**两套配置的消费者会互相抢消息**。
+> ⛔ **`napstarweb-controller1.yaml` 只在 DM 那份导出包里，生产（kingbase）没有它** ——
+> 所以**生产不存在「两套 dataId 抢同一个组名」的问题**。
+> （那个问题只在 DM 环境下出现，§0.4 有说明。）
 
 ### 8.4 相关文档
 
