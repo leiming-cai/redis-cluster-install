@@ -10,6 +10,10 @@
 > - 本轮设计：`docs/superpowers/specs/2026-11-03-hd-operations-manual-design.md`
 > - **本会话的树图**：`docs/superpowers/sessions/2026-11-03-tree-map.md`
 > - 缺陷清单：`docker/hd-napstar/DEFECTS.md`（本轮**没有新缺陷**）
+>
+> 📌 **下一份存档（最新）**：`docs/superpowers/sessions/2026-11-04-hd-production-truth-upgrade.md`
+> （生产真值补全轮 —— **§三·五 那份 11/4 的清单要按升级版补成 14/7**；
+> 两个包是**升级前后**、配置沿用）
 
 ---
 

@@ -52,7 +52,8 @@
 | `docs/OPERATIONS.md` | **主线产品**（基线树）的两机组网、ZK/Kafka 两节点、YAML | 参数详解在那边，本文件**只写华盾特有的部分**，并链接过去 |
 | `docs/USAGE.md` | `cluster-config.sh` 等脚本的**逐参数**参考 | 参数层面查那边 |
 | `docker/hd-napstar/DEFECTS.md` | 华盾部署过程中**实测发现的缺陷清单** | 改配置前先扫一眼有没有已知坑 |
-| `docs/superpowers/sessions/2026-11-03-*.md` | 各轮会话存档（**结论的来源**） | 想知道「为什么」查那里 |
+| `docs/superpowers/sessions/2026-11-0*.md` | 各轮会话存档（**结论的来源**） | 想知道「为什么」查那里 |
+| **`docs/superpowers/sessions/2026-11-04-hd-production-truth-upgrade.md`** | **本文「生产真值」的来源与逐字 diff 证据** | ⭐ **本文 §0.2/§0.4 的每个数字都在这份存档里** |
 
 > ⚠️ **本文件里带「已实测」标记的内容，是在 Docker 验证环境（`hd-node1`）上真跑出来的。**
 > **带「未在真机验证」标记的，是模板 + 判据，不是「上生产就能用」的现成方案。**
