@@ -26,7 +26,7 @@
 
 | | 现状 | 改成 |
 |---|---|---|
-| Redis | **一台机器**上两个独立单机（6379 + 6389） | 两台机器，3 master + 3 replica |
+| Redis | **一台机器**上**一个**独立单机（6379） | 两台机器，3 master + 3 replica |
 | ZooKeeper | 单节点 | 2 voter ensemble |
 | Kafka | 单 broker | 2 broker |
 | 四个后台程序 | 连单机（`oms: hostname: node1`） | 连集群（`oms: redisMode: cluster`） |
@@ -35,10 +35,12 @@
 > 而两次都是**同一个类型的错误**：**把「我看到的那个环境」当成了「生产」**。
 > 详见 §三。
 >
-> 📌 **【续会补记】** 同一类错误在续会里又出现了一次（**框架判断错**：
-> 把「升级前」那版配置当成了「另一个产品线的真相」）。
-> ⇒ **这一类错误的完整清单与更正见 §三·五。**
-> **下一轮的第一条：先问「版本关系」，再决定要不要改清单。**
+> 📌 **【续会补记】** 同一类错误在续会里又出现了两次
+> （**框架判断错**：把「升级前」那版配置当成了「另一个产品线的真相」；
+> **把「升级后」当成了「现状」**：拿升级版包里的布局去推生产现状）。
+> ⇒ **这一类错误的完整清单与更正见 §三·五** 与
+> **`docs/superpowers/sessions/2026-11-04-hd-production-truth-upgrade.md` §六·五**。
+> **下一轮的第一条：先问「版本关系」和「现场跑几个实例」，再决定要不要改清单。**
 
 ---
 
@@ -62,13 +64,19 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 
 ### 3.1 假设一：「生产 Redis 的 6379 和 6389 在两台机器上」
 
-**错。它们在同一台机器上。**
+**错。而且比这更错 —— 现状根本没有 6389。**
 
 | 我原来写的 | 实际 | 怎么推翻的 |
 |---|---|---|
-| 6379 在 node1、6389 在 node2 | ⛔ **两个都在同一台机器上** | ① 安装包 `1start_env.sh:15-17` 在**同一个目录**里起这两个进程；② 实测容器 `hd-node1` **2 个** redis 进程、`hd-node2` **0 个** |
+| 6379 在 node1、6389 在 node2 | ⛔ **现状只有 6379 一个实例** | ① 安装包 `web_install\env\redis\` 下**只有 `redis.conf` 一份**（port 6379）；② `1start_env.sh` **只起一个** Redis；③ 整份 Nacos 导出包里 **`6389` 出现 0 次** |
 
-**根因**：我画拓扑图时**想当然地以为「两个实例 = 两台机器」**，没去数进程。
+**根因**：我画拓扑图时**想当然地以为「两个实例 = 两台机器」**，没去数进程 ——
+**更根本的是，我用的是升级版包（`/pkg`），拿它的布局去推现状**。
+
+> 🔴 **【续会再更正】** 这条假设的**推翻方式本身就错了**：
+> 当时是「实测容器 `hd-node1` **2 个** redis 进程」——
+> 但**容器跑的是升级版包** ⇒ **那个「2 个」是升级后的状态，不是现状**。
+> ⇒ 详见 `2026-11-04-hd-production-truth-upgrade.md` §六·五。
 
 ### 3.2 假设二：「生产已经是两台机器」
 
@@ -104,8 +112,22 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 > **它当时是对的** —— 升级版是它的延续，**Redis 配置逐字沿用**。
 > 但**升级版有增补**（§3.5.1）⇒ **清单要按升级版补全（14/7）**。
 > ⇒ **这条教训要改成：「版本关系要先问清楚」**，不是「升级前那份不能用」。
+>
+> 🔴🔴 **【再更正，见下一份存档 §六·五】上面这句「清单要按升级版补全（14/7）」本身也是错的** ——
+> **现状只有一个 Redis 实例、11 个 dataId / 4 个 `oms:`（全指 6379）**，
+> **14/7 与两个实例都是「升级之后」才有的**。
+> ⇒ **本手册最终按「现状」写**（11/4、一个实例、只迁一份数据）；
+> **升级后的差异单列 `docs/HD-OPERATIONS.md` §0.4.2** 做对照。
+>
+> ⇒ **这条教训最终版是三条**：
+> **① 版本关系要先问清楚**（别自己推）·
+> **② 包里有几个 conf ≠ 现场跑几个实例**（现场的东西必须现场查）·
+> **③ 数字必须能被独立复算**（不能靠「我数过了」）。
 
 ### 3.4 顺带纠正的一处「漏查」
+
+> ⚠️ **【续会再更正】** 本节说的是**升级版包**（`/pkg` = `web_napstar2.0`）。
+> **现状的 `web_install` 包下只有 `redis.conf` 一份** —— 见上一份存档 §六·五。
 
 `/pkg/env/redis/` 下有**三份** conf（`redis.conf` / `redismaster.conf` / `redis-full.conf`），
 我一开始只查了两份 —— 第三份 `redis-full.conf` 是 `include redis.conf` + Redis Stack 模块，
@@ -113,13 +135,22 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 
 ---
 
-## 三·五、🔴🔴 【2026-11-04 续】生产真值要**按升级版补全** —— 已更正
+## 三·五、🔴🔴 【2026-11-04 续】`web_napstar2.0` 是 `web_install` 的**升级版** —— 已更正
 
-> **这一节是给下一轮看的第一条。**
-> §四 描述的清单（11 个 dataId / 4 个 `oms:`）是**升级前**那版配置的实测产出 ——
-> **它当时是对的**（那就是当时拿到的配置）。
-> 但 **napstar2.0 是 `web_install` 的升级版**，升级版**在旧配置上做了增补** ⇒
-> **清单要按升级版补全**（14 个 dataId / 7 个 `oms:`）。**别照着 §四 的 11/4 行事。**
+> ⚠️ **⚠️⚠️ 本节已被再更正 —— 下面的「清单要按升级版补全（14/7）」是错的。**
+> **以 `docs/superpowers/sessions/2026-11-04-hd-production-truth-upgrade.md` §六·五 为准。**
+>
+> **真相**：**现状是**一个** Redis 实例、**11** 个 dataId / **4** 个 `oms:`（全指 6379）**。
+> **14/7、两个实例、指向 6389 的那三个 dataId —— 全都是「升级之后」才有的。**
+> ⇒ **手册最终按「现状」写**，升级后的差异单列 `docs/HD-OPERATIONS.md` §0.4.2。
+>
+> **本节仍然有效的部分**（且是这一轮最有价值的产出）：
+> **① `web_napstar2.0` 与 `web_install` 是同一个包的升级前后，配置沿用**
+> （逐字 diff 实测：11 个共有 dataId 里 10 个 `oms:` 逐字相同）
+> —— **上一轮拿到的 `web_install` 那份配置本身有效，不是「选错了包」。**
+>
+> **② 升级版相对旧版的增量**（下面 §3.5.2 / §3.5.3 列的那些）
+> —— **这些是「升级后」才有的，实施时先数实例数**。
 
 ### 3.5.1 关键前提：`web_napstar2.0` 是 `web_install` 的**升级版**，配置**沿用**
 
@@ -136,7 +167,7 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 | 5 个带 `spring.redis:` 的 dataId | **4 个 host/port/database 完全相同**（只有 `icms-hisDataProducer.yaml` 不同） |
 | 整体文件 | 4 个相同 · **7 个不同**（差异集中在 datasource / `helper-dialect` / `alarmParam` / `kafkabus` 的 `aname` / `svg` 符号表 —— **都跟 Redis 无关**） |
 
-⇒ **Redis 配置是沿用的。** 升级版相对旧版，**Redis 相关的变化只有三处**：
+⇒ **Redis 配置是沿用的。** 升级版相对旧版，**Redis 相关的变化只有三处**（**都是「升级后」才有**）：
 
 | # | 变化 | 说明 |
 |---|---|---|
@@ -144,7 +175,12 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 | 2 | **`icms-hisDataProducer.yaml` 的 Redis 从 6379 改成 6389** | 旧版**没有** `oms:` 块、`spring.redis:` 是 `node1:6379`；新版**新增** `oms:` 块且**两个都是 6389** |
 | 3 | **Redis 实例从 1 个变 2 个** | 新版才有 6389（`redis.conf`）与 `redismaster.conf`（6379）并存 |
 
-### 3.5.2 补全后的真值（**14 个 dataId / 7 个有 `oms:`**）
+### 3.5.2 ⚠️ **升级后**的清单（**14 个 dataId / 7 个有 `oms:`**）—— **不是现状**
+
+> 🔴 **这一节是「升级到 `web_napstar2.0` 之后」才成立的清单。**
+> **现状是 §四 的 11 个 / 4 个 `oms:`（全指 6379），只有一个 Redis 实例。**
+> ⇒ **实施时先数实例数**（`ps -ef | grep redis-server`）：
+> **1 个 = 用 §四** · **2 个 = 用本节**。
 
 | dataId | 应用 | 有 `oms:`？ | 值 | 相对旧版 |
 |---|---|---|---|---|
@@ -170,7 +206,10 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 ⇒ **7 个有 `oms:`，全部是单机形态**（无 `redisMode`、无 `clusters:`），
 且 **7 个的 `oms.database` 全是 `0`**（实测 7/7）。
 
-### 3.5.3 三个由此翻出来的坑
+### 3.5.3 升级后才会有的三个坑
+
+> ⚠️ **下面三条**都是「**升级到 `web_napstar2.0` 之后**」才存在的。
+> **现状没有 6389** ⇒ 这三条**现状都不适用**。
 
 | # | 坑 | 后果 |
 |---|---|---|
@@ -178,14 +217,20 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 | 2 | **`icms-hisDataSend` 没有 `.yaml` 扩展名** | 用 `find -name '*.yaml'` 扫会漏 ⇒ 7 变 6。**数 dataId 要用 `find -type f`** |
 | 3 | **`scheviewer.yaml` 是升级版新增的**（带 `oms:`） | 它带 `oms:` ⇒ 集群化必须一起改；且它有 **15 处裸 `executePipelined`** ⇒ 切集群前必须先修 |
 
-### 3.5.4 §8.3.1 的「生产没有组名撞车」**要补一句**
+### 3.5.4 §8.3.1 的「生产没有组名撞车」—— **升级后才会撞**
 
 `scheviewer.yaml`（升级版新增）与 `napstarweb-controller.yaml` **都是 `group-id: svg`**
 ⇒ 升级版**确实**撞名。
 不过 **sche-viewer-server 零 `@KafkaListener`、零 `KafkaTemplate`** ⇒ **实际不消费 Kafka ⇒ 不会真抢消息**。
 ⇒ **配置上撞名，实际不抢**；但**它的 `oms:` 仍然要改**。
+⚠️ **现状（未升级）没有 `scheviewer.yaml` ⇒ 根本不撞**。
 
 ### 3.5.5 还有第三层：`updateconfig\` 覆盖包（原来完全没提）
+
+> ⚠️ **这是「升级到 `web_napstar2.0`」之后的层次**（`updateconfig\` 是升级包旁边的目录）。
+> **现状（`web_install`）的层次在 §四 之后** —— 同样是三层，但后两层是
+> `nacos_config_export_hisdataproducer_exp.zip`（补 1 个）与
+> `nacos_config_export_kingbase_patch_1118.zip`（覆盖 1 个）。
 
 `单机(华盾)\updateconfig\` 下有 3 个 `-napstar2.0-update.zip`
 （kingbase 2026-04-07 / dm 2026-04-07 / postgresql 2026-10-31），
@@ -200,29 +245,49 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 
 ### 3.5.6 手册已改的地方
 
+> ⚠️ **本轮中途被再更正过一次**（把「升级后」当成了「现状」）⇒
+> **下面这份清单是「中途那版」，已被下一份存档 §六·五 推翻**。
+> **手册最终状态见 `docs/HD-OPERATIONS.md` 与下一份存档。**
+
 `§0.2`（指向 + **升级前/升级后**对照 + 「配置沿用」实测 + MD5 判据）·
 `§0.4`（14/7 清单 + **「相对旧版」列**）· `§0.4.1`（**新增** update 层）·
 `§2.1`（6389 有真实数据）· `§4.2`（补 3 个 dataId）· `§4.7`（汇总表 9 行）·
 `§4.8`（验证循环加 3 个 app）· `§6.1`（2 行新症状）· `§7.4`（巡检第 10 条）·
 `§8.3`（易错点 19~23）· `§8.3.1`（组名撞车补充）· `§8`（文件布局）· `§9`（一页速查）
 
-> 📌 **本轮的两条教训**：
+> 📌 **本轮的三条教训**：
 >
 > | # | 教训 | 级别 |
 > |---|---|---|
 > | 1 | **框架判断错了**：我一度把 `web_install` 当成「另一个产品线的真相」⇒ 手册里写成「两个包，别拿错」。**实际是同一个包的升级前后，配置沿用。** ⇒ **升级关系要先问清楚，再决定要不要改清单** —— 不清楚就**先问**，别自己推 | ⭐⭐ |
 > | 2 | **数字算错了**：第一次写 §0.4 时用了 `find -name '*.yaml'`，漏掉 `icms-hisDataSend` ⇒ 把 **7 个写成 6 个**。**是「用脚本独立复算每个数字」把它抓出来的** | ⭐ |
+> | 3 | **把「升级后」当成了「现状」**：拿升级版包（容器 `/pkg`）的布局去推生产现状 ⇒ 手册写成两个实例 / 14/7 / 6389 有数据。**实际现状是一个实例 / 11/4** | ⭐⭐⭐ |
 >
-> ⇒ **两条合起来**：**结论（14/7）是对的，但得出它的框架一开始是错的。**
+> ⇒ **三条合起来**：**结论（14/7）一度是对的，但框架和数字都错；最后连结论也翻了（11/4）。**
 > **「对」不代表「过程对」** —— 下一轮别把「结论正确」当成「方法正确」的证据。
+> **最终版教训见下一份存档 §十一（四个问题）。**
 
 ---
 
 ## 四、⭐ 生产配置真值清单（本轮的实测产出）
 
-> ⚠️ **⚠️ 本节是「升级前」那版配置的实测产出 —— 11 个 dataId / 4 个 `oms:`。**
-> **它当时是对的**（那就是当时手上拿到的配置，且 Redis 部分与升级版**逐字沿用**）。
-> **但要按升级版补全**：14 个 dataId / 7 个 `oms:` ⇒ **真相见 §3.5.2。**
+> ✅ **这一节是「现状」** —— **11 个 dataId / 4 个 `oms:`，全部指向 6379，
+> 现状只有一个 Redis 实例**（6379）。
+>
+> 📌 加上同目录另两个 zip（**实测**）：
+> `nacos_config_export_hisdataproducer_exp.zip` **补** `DEFAULT_GROUP/hisdataproducer-ext.yaml`（1 个）·
+> `nacos_config_export_kingbase_patch_1118.zip` **覆盖** `icms-commitDataIncreProducer.yaml`（1 个，
+> **只多一段** `orm: database: kingbase`）
+> ⇒ **三层合起来 = 12 个 dataId，4 个带 `oms:`。**
+> ⇒ **后两层都不碰 `oms:`** ⇒ 改 Redis 时不必区分层次。
+>
+> ⚠️ **「升级到 `web_napstar2.0` 之后」的清单在 §三·五**（14/7、两个实例）——
+> **那不是现状。**
+
+> ✅ **这一节是「现状」** —— **11 个 dataId / 4 个 `oms:`，全部指向 6379**。
+> **现状只有一个 Redis 实例（6379）** —— 没有 6389，没有第二个实例。
+>
+> ⚠️ **「升级到 `web_napstar2.0` 之后」才是 14 个 / 7 个** ⇒ 见 §三·五。
 
 来源：`D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\nacos\nacos_config_export_kingbase.zip`
 （**11 个 dataId**，逐个扫过全部）：
@@ -239,7 +304,8 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 | `NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml` | realalarmproducer | ⛔ 没有 | —— |
 | `jk.yaml` / `napstarmappingconfig.yaml` / `kafkabus.yaml` | —— | ⛔ 没有 | —— |
 
-⇒ **4 个有 `oms:`，全部是单机形态**（无 `redisMode`、无 `clusters:`）。
+⇒ **4 个有 `oms:`，全部是单机形态**（无 `redisMode`、无 `clusters:`），
+且 **整份导出包里 `6389` 出现 0 次** ⇒ **全部指向 6379 这一个实例**。
 
 ### 4.1 两个应用的 Redis 配置来源**与其它三个不同**（实测）
 
@@ -252,12 +318,16 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 ⇒ **`realalarmconsumer` 不走本项目的 `oms:` 契约** ⇒ 集群化时**只改 `spring.redis:`**，
 **不要**给它加 `oms:`（加了也不生效）。
 
-### 4.2 一个「看起来像从节点、其实有独立数据」的坑
+### 4.2 ⚠️ 一个「以为有第二个实例、其实没有」的坑
 
-生产的 6379（`redismaster.conf`）与 6389（`redis.conf`）**没有任何 `replicaof`** ——
-它们是**两台互不相干的独立单机**，**各自有数据**。
-⇒ 迁移时**6389 的数据很容易被漏掉**（它长得像从节点，实施人员容易以为数据在 6379 上就有）。
-⇒ 手册里加了一条：**迁前先 `DBSIZE` 对比两个实例**。
+> 🔴 **【续会再更正】** 本节原写的是「生产的 6379 与 6389 是两台互不相干的独立单机，
+> **6389 的数据很容易被漏掉**」——
+> **那是「升级版」的状态。现状只有一个实例（6379），没有第二份数据要迁。**
+>
+> **现状真正的坑是反过来**：**实施人员看到升级版包里有 `redis.conf`（6389）与
+> `redismaster.conf`（6379）两份 conf，会以为现场有两个实例** ⇒
+> **迁移时多迁一份不存在的、或漏迁真正要迁的那份**。
+> ⇒ **动手前先 `ps -ef | grep redis-server` 数一遍**（手册 §2.1 给了命令）。
 
 ---
 
@@ -329,7 +399,7 @@ sed -i 's|zookeeper.connect=localhost:2181|zookeeper.connect=node1:2181|g' $kafk
          0.5 两节点 ZK/Kafka 的边界说明
 第 1 章  全链路总览（现状 → 目标双栏拓扑 · 组件对照 · 8 步扩容顺序）
 第 2 章  【Redis】从单机改成集群
-         2.1 现状（同一台机器两个独立单机）· 2.2 cluster.conf + ⭐2.2.1 端口规划
+         2.1 现状（**一台机器一个独立单机 6379**）· 2.2 cluster.conf + ⭐2.2.1 端口规划
          2.3 四步执行（第 0 步停实例）+ ⛔人工数据迁移
          2.4 幂等 + ⛔失败回退 · 2.5 容错硬边界 · 2.6 四个 oms: · 2.7 验证
 第 3 章  【ZK + Kafka】从单机改成两节点集群
@@ -365,9 +435,10 @@ sed -i 's|zookeeper.connect=localhost:2181|zookeeper.connect=node1:2181|g' $kafk
 
 | 项 | 状态 |
 |---|---|
-| 仓库 | 工作区**干净**，HEAD = `a0a9295`（续会提交），**已推送**（`rev-list --left-right --count` = `0 0`） |
-| 手册 | `docs/HD-OPERATIONS.md` **见续会后的行数 / 10 章** |
-| 真值指向 | **升级版 `web_napstar2.0`**（14 dataId / 7 `oms:`）+ `updateconfig` 覆盖层（§3.5） |
+| 仓库 | 工作区**干净**，**已推送** |
+| 手册 | `docs/HD-OPERATIONS.md` **10 章** |
+| 真值指向 | 🔴 **已再更正** —— **现状**：`web_install` 的 kingbase 导出包（**11** dataId / **4** 个 `oms:`，全指 6379）+ 同目录 exp / patch 两层。**升级版（14/7、两个实例）是「升级之后」的状态** ⇒ 见下一份存档 §六·五 |
+| 现状 Redis | **一个实例**（6379）—— 迁移只需处理**一份**数据 |
 | 脱敏 | 真实内网 IP / 口令 **0 处残留**（按 `OPERATIONS.md` 的惯例脱敏） |
 | `tests/check_syntax.sh` | `TOTAL=46 FAIL=0` |
 | `tests/validate_libs.sh` | `PASS=54 FAIL=0` |
@@ -379,14 +450,14 @@ sed -i 's|zookeeper.connect=localhost:2181|zookeeper.connect=node1:2181|g' $kafk
 
 | # | 事 | 严重度 | 说明 |
 |---|---|---|---|
-| **1** | **实施时抽查生产 Nacos 的实时值** | 🟡 | 手册以 **升级版 `web_napstar2.0` 的 kingbase-napstar2.0 导出包**为准（+ `updateconfig` 覆盖层）。若运维后来手工改过 `oms:`，**以控制台为准**，并同步回手册 |
-| **1b** | **确认生产上装的是升级前还是升级后的包** | 🟡 | `web_napstar2.0` 是 `web_install` 的**升级版**，**配置沿用**（§3.5.1）⇒ 现场核对 Redis 实例数即可：**起 2 个**（6379+6389）= 升级版；**起 1 个** = 升级前。**两者 Redis 配置除 `icms-hisDataProducer` 外逐字相同** ⇒ 清单以升级版（14/7）为准，两种情况都能覆盖 |
+| **1** | **实施时抽查生产 Nacos 的实时值** | 🟡 | 手册以**现状**（`web_install` 的 kingbase 导出包 + 同目录的 exp / patch 两层）为准。若运维后来手工改过 `oms:`，**以控制台为准**，并同步回手册 |
+| **1b** | **现场数一遍 Redis 实例数** | 🟡 | **1 个 = 现状**（按 11/4 改）· **2 个 = 已升级**（换 14/7 清单）。**动手前必做** |
 | **2** | **真机上跑一遍 §3** | 🟡 | 跑通后可把「未在真机验证」的标记改成「已实测」 |
 | **3** | **`monitor` 另外 5 处集群分支的运行时覆盖** | 🟡 | D11 仍未变（C/D/E/F 需 SVG 文件或订阅，`RTListener` 需一条 Kafka 消息） |
 | **4** | **交付方确认交付流程** | 🔴 | 「先编 platform 再 `mvn install`」吗？若是 ⇒ 在此之前**禁止 install 树 A 的 platform**、**禁止把区间切到 `[3.0.0,4.0.0)`**（D9） |
 | **5** | **`sac`/`cmt`/`hds` 建表脚本找第三方要** | 🔴 | 本项目**只读**，不建表 |
 | **6** | **门户线要切集群** | 🟡 | 门户树**一个集群标记都没有** ⇒ 得从基线把整套补丁搬过去 |
-| **7** | **`sche-viewer-server` 的 15 处裸 `executePipelined`** | 🔴 **升级** | 本轮查明：**它的 `scheviewer.yaml` 在生产 kingbase 里就有，且带 `oms:`** ⇒ 它**在本次改造范围内**（不再是「将来再说」）⇒ **切集群前必须先修** |
+| **7** | **`sche-viewer-server` 的 15 处裸 `executePipelined`** | 🟡 | ⛔ **现状不在范围内**（`scheviewer.yaml` 是**升级版**才有的 dataId）⇒ **只在「先升级再切集群」时**才必须先修 |
 
 ---
 
@@ -398,3 +469,8 @@ sed -i 's|zookeeper.connect=localhost:2181|zookeeper.connect=node1:2181|g' $kafk
 > ③ 我下的结论**是不是基于推断**？（本轮栽在这：「两个实例」⇒「两台机器」）
 >
 > **第三条最隐蔽** —— 前两条查一下就知道，第三条**自己不会暴露**。
+>
+> 🔴 **【续会补充】续会又栽了两次**，最终版是**四个问题**
+> （见 `2026-11-04-hd-production-truth-upgrade.md` §十一）：
+> **② 那个文件是哪个版本的** · **③ 包里有几个 conf ≠ 现场跑几个实例** ·
+> **④ 每个数字都要能被脚本独立复算**。
