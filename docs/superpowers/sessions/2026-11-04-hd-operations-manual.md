@@ -94,7 +94,89 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 
 ---
 
+## 三·五、🔴🔴 【2026-11-04 续】本手册的「生产真值」指向了**错的安装包** —— 已更正
+
+> **这一节是给下一轮看的第一条。**
+> 下面 §三 / §四 描述的「生产真值 = `web_install` 的 11 个 dataId、4 个有 `oms:`」**是错的**，
+> 手册已在本轮续会里改正。**别照着 §四 行事。**
+
+### 3.5.1 根因：`单机(华盾)\` 下有**两个**安装包，手册选了错的那个
+
+| | **`web_napstar2.0\`** ← 真相 | `web_install\` ← 手册原来指的 |
+|---|---|---|
+| Nacos 导出包 | `…-napstar2.0.zip` | `nacos_config_export_kingbase.zip` |
+| dataId 数 | **14** | 11 |
+| 带 `oms:` 的 | **7** | 4 |
+| Redis 实例 | **2 个**（`redismaster.conf` 6379 + `redis.conf` 6389 + `redis-full.conf`） | **1 个**（`redis.conf` 6379，redis 6.0.6） |
+| `1start_env.sh` 起几个 Redis | **2 个** | 1 个 |
+
+**判据（实测 MD5）**：容器 `hd-node1` 的 `/pkg` 里 7 个文件
+（`install_redis.sh` / `redis.conf` / `redismaster.conf` / `redis-full.conf` /
+`1start_env.sh` / `2start_kafka.sh` / `3start_nacos.sh`）
+**与 `web_napstar2.0` 逐字节相同**，与 `web_install` 都不同
+⇒ **容器复现的是 `web_napstar2.0`** ⇒ **napstar2.0 的真值取 `web_napstar2.0`**。
+
+### 3.5.2 更正后的真值（**14 个 dataId / 7 个有 `oms:`**）
+
+| dataId | 应用 | 有 `oms:`？ | 值 |
+|---|---|---|---|
+| `MODELSERVER_GROUP/icms-controller.yaml` | model-controller | ✅ | `node1` / `6379` |
+| `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | rtdata-consumer | ✅ | 同上 |
+| `MODELSERVER_GROUP/icms-real-controller.yaml` | realserver | ✅ | 同上 |
+| `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | web-controller | ✅ | 同上 |
+| **`MODELSERVER_GROUP/icms-hisDataProducer.yaml`** | hisDataProducer | ✅ | ⭐ **`port: 6389`** |
+| **`MODELSERVER_GROUP/icms-hisDataSend`** | hisDataSend | ✅ | ⭐ **`port: 6389`**（**dataId 无扩展名**） |
+| **`NAPSTARWEB_GROUP/scheviewer.yaml`** | sche-viewer-server | ✅ | `node1` / `6379` |
+| `MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml` | commitDataIncreProducer | ⛔ 没有 | —— |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ⛔ 没有 | —— |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml` | realalarmproducer | ⛔ 没有 | —— |
+| `DEFAULT_GROUP/hisdataproducer-ext.yaml` / `jk.yaml` / `napstarmappingconfig.yaml` / `NAPSTARWEB_GROUP/kafkabus.yaml` | —— | ⛔ 没有 | —— |
+
+⇒ **7 个有 `oms:`，全部是单机形态**（无 `redisMode`、无 `clusters:`），
+且 **7 个的 `oms.database` 全是 `0`**（实测 7/7）。
+
+### 3.5.3 三个由此翻出来的坑
+
+| # | 坑 | 后果 |
+|---|---|---|
+| 1 | **`hisDataProducer` / `hisDataSend` 的 `oms:` 指向 `6389`** | 它们连的是**第二个实例** ⇒ 只改 6379 那批 ⇒ 这俩留在单机；且 **6389 的数据必须一并迁** |
+| 2 | **`icms-hisDataSend` 没有 `.yaml` 扩展名** | 用 `find -name '*.yaml'` 扫会漏 ⇒ 7 变 6。**数 dataId 要用 `find -type f`** |
+| 3 | **`scheviewer.yaml` 在生产 kingbase 里就有**（不是只有 DM 才有） | 它带 `oms:` ⇒ 集群化必须一起改；且它有 **15 处裸 `executePipelined`** ⇒ 切集群前必须先修 |
+
+### 3.5.4 §8.3.1 的「生产没有组名撞车」**也是错的**
+
+`scheviewer.yaml` 与 `napstarweb-controller.yaml` **都是 `group-id: svg`** ⇒ 生产**确实**撞名。
+不过 **sche-viewer-server 零 `@KafkaListener`、零 `KafkaTemplate`** ⇒ **实际不消费 Kafka ⇒ 不会真抢消息**。
+⇒ **配置上撞名，实际不抢**；但**它的 `oms:` 仍然要改**。
+
+### 3.5.5 还有第三层：`updateconfig\` 覆盖包（原来完全没提）
+
+`单机(华盾)\updateconfig\` 下有 3 个 `-napstar2.0-update.zip`
+（kingbase 2026-04-07 / dm 2026-04-07 / postgresql 2026-10-31），
+仓库里的 docx 写明「**配置统一使用 nacos 的导入包：…-update.zip 里的内容**」。
+它只含 **3~4 个**被改过的 dataId，**盖在基础导出包上面**（DB URL `node2`→`node1`、
+去掉 `/rtwebsocket/**` 的 anon 权限）。
+⇒ **真值 = 基础包 + update 包（后者在后）**。
+💡 **好消息：update 层不碰 `oms:`**（实测 update 包的 `oms:` 与基础包逐字相同）。
+
+### 3.5.6 手册已改的地方
+
+`§0.2`（指向 + 两包对照表 + MD5 判据）· `§0.4`（14/7 清单）· `§0.4.1`（**新增** update 层）·
+`§2.1`（6389 有真实数据）· `§4.2`（补 3 个 dataId）· `§4.7`（汇总表 9 行）·
+`§4.8`（验证循环加 3 个 app）· `§6.1`（2 行新症状）· `§7.4`（巡检第 10 条）·
+`§8.3`（易错点 19~22）· `§8.3.1`（组名撞车更正）· `§8`（文件布局）· `§9`（一页速查）
+
+> ⚠️ **本轮我自己也犯了同一个错**：第一次写 §0.4 时用了 `find -name '*.yaml'`，
+> 漏掉 `icms-hisDataSend` ⇒ 把 **7 个写成 6 个**。
+> **是「逐条重新数一遍 + 用脚本独立复算」把它抓出来的。**
+> ⇒ **这条教训与 §十一 同级：数字必须能被独立复算，不能靠「我数过了」。**
+
+---
+
 ## 四、⭐ 生产配置真值清单（本轮的实测产出）
+
+> ⚠️ **⚠️ 本节已被 §三·五 更正 —— 下面的清单是 `web_install` 那份（11 个 / 4 个 `oms:`），
+> **不是** napstar2.0 的真相。真相见 §3.5.2。**
 
 来源：`D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\nacos\nacos_config_export_kingbase.zip`
 （**11 个 dataId**，逐个扫过全部）：
@@ -250,13 +332,14 @@ sed -i 's|zookeeper.connect=localhost:2181|zookeeper.connect=node1:2181|g' $kafk
 
 | # | 事 | 严重度 | 说明 |
 |---|---|---|---|
-| **1** | **实施时抽查生产 Nacos 的实时值** | 🟡 | 手册以 **kingbase 导出包（2026-06-16 快照）**为准。若运维后来手工改过 `oms:`，**以控制台为准**，并同步回手册 |
+| **1** | **实施时抽查生产 Nacos 的实时值** | 🟡 | 手册以 **`web_napstar2.0` 的 kingbase-napstar2.0 导出包**为准（+ `updateconfig` 覆盖层）。若运维后来手工改过 `oms:`，**以控制台为准**，并同步回手册 |
+| **1b** | **确认生产上跑的到底是哪个包** | 🔴 | `单机(华盾)\` 下有**两个**（§3.5.1）⇒ 上生产前**先核对现场**是 `web_napstar2.0` 还是 `web_install`（Redis 实例数一眼可辨：1 个还是 2 个） |
 | **2** | **真机上跑一遍 §3** | 🟡 | 跑通后可把「未在真机验证」的标记改成「已实测」 |
 | **3** | **`monitor` 另外 5 处集群分支的运行时覆盖** | 🟡 | D11 仍未变（C/D/E/F 需 SVG 文件或订阅，`RTListener` 需一条 Kafka 消息） |
 | **4** | **交付方确认交付流程** | 🔴 | 「先编 platform 再 `mvn install`」吗？若是 ⇒ 在此之前**禁止 install 树 A 的 platform**、**禁止把区间切到 `[3.0.0,4.0.0)`**（D9） |
 | **5** | **`sac`/`cmt`/`hds` 建表脚本找第三方要** | 🔴 | 本项目**只读**，不建表 |
 | **6** | **门户线要切集群** | 🟡 | 门户树**一个集群标记都没有** ⇒ 得从基线把整套补丁搬过去 |
-| **7** | **`sche-viewer-server` 的 15 处裸 `executePipelined`** | 🟡 | 当前 standalone、不参与构建 ⇒ 暂时安全；**将来切集群前必须一并处理** |
+| **7** | **`sche-viewer-server` 的 15 处裸 `executePipelined`** | 🔴 **升级** | 本轮查明：**它的 `scheviewer.yaml` 在生产 kingbase 里就有，且带 `oms:`** ⇒ 它**在本次改造范围内**（不再是「将来再说」）⇒ **切集群前必须先修** |
 
 ---
 
