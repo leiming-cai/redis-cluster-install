@@ -14,8 +14,8 @@
 > 本 README 是**速查**，手册是**照着做的那一份**。
 >
 > 📖 **[`docs/HD-OPERATIONS.md`](docs/HD-OPERATIONS.md) — 华盾 napstar2.0 操作手册**：
-> **另一条产品线**（交付树 `华盾-napstar2.0`）的 Redis / ZooKeeper / Kafka
-> 集群化与四个后台程序的 YAML 配置。
+> **另一条产品线**（交付树 `华盾-napstar2.0`）的**单机改集群**作业指导书 ——
+> Redis / ZooKeeper / Kafka 集群化 + 四个后台程序的 YAML 配置。
 > ⚠️ **它有一条不同的关键规则**：华盾交付树源码里的 `application.yml`
 > **大段是注释**，**不是真值** —— 真值在安装包的 Nacos 导出包里。
 

@@ -4,6 +4,9 @@
 > 打开它 == 拿到本会话的**全部产出**：环境体检、集群全链路回归的**逐条数字**、
 > 一个**执行顺序**的坑（批次 1 与 1b 不能串）、一个**脚本不在仓库里**的缺口。
 >
+> > 📌 **下一份存档（最新）**：`docs/superpowers/sessions/2026-11-04-hd-operations-manual.md`
+> > （写「单机改集群」的运维手册 —— 手册本体 + **两个被推翻的拓扑假设**）
+>
 > - 上一份存档：`docs/superpowers/sessions/2026-11-03-hd-monitor-runtime-coverage.md`
 >   （树名更正 + `monitor` 运行时覆盖轮）
 > - **本会话的树图**：`docs/superpowers/sessions/2026-11-03-tree-map.md`
