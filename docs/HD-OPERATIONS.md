@@ -9,7 +9,7 @@
 >
 > | | 现状 | 改成 |
 > |---|---|---|
-> | Redis | 一台机器上两个独立单机（6379 + 6389） | 两台机器，3 master + 3 replica |
+> | Redis | 一台机器上**一个**单机（6379） | 两台机器，3 master + 3 replica |
 > | ZooKeeper | 单节点 | 2 voter ensemble |
 > | Kafka | 单 broker | 2 broker |
 > | 四个后台程序 | 连单机（`oms: hostname: node1`） | 连集群（`oms: redisMode: cluster`） |
@@ -19,8 +19,8 @@
 > 📌 **先读 §0.4** —— 那里有一条规则，**照着源码里的 yaml 改 = 不生效**。
 > 这一条能省掉实施人员一整天。
 >
-> 📌 **§1.1 是全局前提** —— 现状是**一台**机器，不是两台。
-> 把 6379 和 6389 想成「在两台机器上」是本章最常见的误读。
+> 📌 **§1.1 是全局前提** —— 现状是**一台**机器、**一个** Redis 实例。
+> 把「两台机器 / 两个 Redis」当成现状是本章最常见的误读。
 
 ---
 
@@ -59,60 +59,39 @@
 > **带「未在真机验证」标记的，是模板 + 判据，不是「上生产就能用」的现成方案。**
 > 两种标记的边界**每处都标出来了** —— 不要把前者当后者用。
 >
-> 📌 **本文引用的「生产真值」来自 napstar2.0 安装包**：
+> 📌 **本文引用的「生产真值」来自单机版安装包**：
 >
 > ```
-> D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_napstar2.0\
->   ├─ env/nacos\
->   │   ├─ nacos_config_export_kingbase-napstar2.0.zip   ← ⭐ 本文引用的就是这份（14 个 dataId）
->   │   ├─ nacos_config_export_dm-napstar2.0.zip
->   │   ├─ nacos_config_export_postgresql-napstar2.0.zip
->   │   └─ startup.sh
->   ├─ env/redis\{redis.conf(6389), redismaster.conf(6379), redis-full.conf}
+> D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\
+>   ├─ env\nacos\
+>   │   ├─ nacos_config_export_kingbase.zip          ← ⭐ 本文引用的就是这份（11 个 dataId）
+>   │   ├─ nacos_config_export_hisdataproducer_exp.zip ← 补 1 个 dataId（见 §0.4.1）
+>   │   └─ nacos_config_export_kingbase_patch_1118.zip← 覆盖 1 个 dataId（见 §0.4.1）
+>   ├─ env\redis\{redis.conf(6379)}                  ← ⭐ 只有**一个**实例
 >   └─ bin\{1start_env.sh, 2start_kafka.sh, 3start_nacos.sh, 4stop_env.sh}
->
-> updateconfig\                                      ← ⭐ 第三层，见 §0.4.1
->   ├─ nacos_config_export_kingbase-napstar2.0-update.zip
->   ├─ nacos_config_export_dm-napstar2.0-update.zip
->   └─ nacos_config_export_postgresql-napstar2.0-update.zip
 > ```
 >
-> 📌 **`单机(华盾)\` 下是同一个包的**两个版本** —— `web_napstar2.0\` 是 `web_install\` 的**升级版**：
+> ⭐ **现状：Redis 是**一个**实例（6379）**，不是两个。**
+> 实测 `web_install\env\redis\` 下**只有 `redis.conf` 一份**（port 6379、redis 6.0.6），
+> `bin\1start_env.sh` 也**只起一个** Redis。
+> ⇒ **Nacos 配置里 `6389` 出现 0 次**（实测全包 0 命中）——
+> **不存在「第二个实例」，也不存在「6389 上的数据要一起迁」这回事。**
 >
-> | | `web_install\`（升级前） | **`web_napstar2.0\`**（升级后）← 本文引用 |
-> |---|---|---|
-> | Nacos 导出包 | `nacos_config_export_kingbase.zip` | `…-napstar2.0.zip` |
-> | dataId 数 | 11 | **14** |
-> | 带 `oms:` 的 | 4 | **7** |
-> | Redis 实例 | 1 个（`redis.conf` 6379，redis 6.0.6） | **2 个**（`redismaster.conf` 6379 + `redis.conf` 6389 + `redis-full.conf`） |
-> | `1start_env.sh` 起几个 Redis | 1 个 | **2 个** |
+> 📌 **`单机(华盾)\` 下还有 `web_napstar2.0\`**（`web_install\` 的**升级版**）——
+> 它的包里有**两个** Redis（`redismaster.conf` 6379 + `redis.conf` 6389 + `redis-full.conf`），
+> Nacos 配置也是 14 个 dataId / 7 个 `oms:`（其中 3 个指向 6389）。
+> ⇒ **那是「升级之后」的状态，不是现在。**
+> **本文按现状（一个实例）写**；升级到 napstar2.0 后要改的地方见 §0.4.2。
 >
-> ⭐ **配置是沿用的**（实测逐字 diff）——
-> **11 个共有 dataId 里，10 个的 `oms:` 块逐字相同**；
-> **5 个带 `spring.redis:` 的里，4 个的 host/port/database 完全相同。**
-> ⇒ **升级版的 Redis 配置 = 升级前的 + 一点增量**，**照旧配置改就行**。
->
-> **升级版相对升级前，只有这些 Redis 相关变化**：
->
-> | # | 变化 | 说明 |
-> |---|---|---|
-> | 1 | **新增 3 个 dataId** | `NAPSTARWEB_GROUP/scheviewer.yaml`（带 `oms:`）· `MODELSERVER_GROUP/icms-hisDataSend`（带 `oms:`，**无扩展名**）· `DEFAULT_GROUP/hisdataproducer-ext.yaml`（不带 `oms:`） |
-> | 2 | **`icms-hisDataProducer.yaml` 的 Redis 从 6379 改成 6389** | 升级前**没有** `oms:` 块、`spring.redis:` 是 `node1:6379`；升级后**新增** `oms:` 块且**两个都是 6389** |
-> | 3 | **Redis 实例从 1 个变 2 个** | 升级版才有 6389（`redis.conf`）与 `redismaster.conf`（6379）并存 |
->
-> ⛔ **这三点是「照旧配置改」会漏掉的部分** —— 详见 §0.4 的「三个最容易踩的点」。
->
-> 📌 **判据（实测 MD5，容器 `hd-node1` 的 `/pkg`）**：
-> `/pkg/env/redis/install_redis.sh`、`/pkg/env/redis/redis.conf`、
-> `/pkg/env/redis/redismaster.conf`、`/pkg/env/redis/redis-full.conf`、
-> `/pkg/bin/1start_env.sh`、`/pkg/bin/2start_kafka.sh`、`/pkg/bin/3start_nacos.sh`
-> —— **7 个文件全部与 `web_napstar2.0` 逐字节相同**（`f91df93c…` / `b9d392b3…` /
-> `c0ac44b9…` / `facf8bc6…` / `983fe4e7…` / `d15bc539…` / `d747a9f2…`）。
-> ⇒ **验证环境复现的是升级版。**
+> 📌 **判据（现场一眼可辨）**：
+> | 现场 | 说明 |
+> |---|---|
+> | `1start_env.sh` 起 **1 个** Redis | **本文的现状**（一个实例，6379） |
+> | `1start_env.sh` 起 **2 个** Redis | 已是 **napstar2.0 升级版** ⇒ 额外看 §0.4.2 |
 >
 > ⚠️ **别拿容器里 `x86` 那套 `cpsweb_install` 的 DM 导出包当生产真值** ——
 > 它有 `PORTAL_GROUP` / `oauth-gateway` 等**另一条产品线**的 dataId。
-> ⇒ **本文的清单以 `web_napstar2.0` 的 `-napstar2.0.zip` 为准。**
+> ⇒ **本文的清单以 `web_install` 的 `nacos_config_export_kingbase.zip` 为准。**
 
 ### 0.3 术语
 
@@ -159,118 +138,118 @@ Nacos 的 oms:                输
 ```bash
 # 在生产机上（napstar2.0 安装包根目录）
 cd /opt/cpsweb_install/env/nacos
-ls -la *.zip                    # 先看有哪些导出包（找 *-napstar2.0.zip）
-unzip -o nacos_config_export_kingbase-napstar2.0.zip -d /tmp/nacos-export
-find /tmp/nacos-export -type f | sort      # ⛔ 别加 -name '*.yaml'：会漏掉 icms-hisDataSend
+ls -la *.zip                    # 先看有哪些导出包
+unzip -o nacos_config_export_kingbase.zip -d /tmp/nacos-export
+find /tmp/nacos-export -type f | sort
 ```
 
-> ⚠️ **再叠加 `updateconfig\` 那一层**（§0.4.1）——
-> 生产机上它是**单独的一个目录**，不在 `env/nacos/` 里：
+> ⚠️ **还要叠加另外两个包**（§0.4.1）—— 它们在**同一个目录** `env/nacos/` 里：
 > ```bash
-> ls -la /opt/cpsweb_install/../updateconfig/     # 路径以现场为准
-> unzip -o nacos_config_export_kingbase-napstar2.0-update.zip -d /tmp/nacos-update
+> unzip -o nacos_config_export_hisdataproducer_exp.zip -d /tmp/nacos-exp     # 补 1 个 dataId
+> unzip -o nacos_config_export_kingbase_patch_1118.zip -d /tmp/nacos-patch  # 覆盖 1 个 dataId
 > ```
-> ⇒ **真值 = 基础包 + update 包（后者覆盖前者）。**
+> ⇒ **真值 = 基础包 + exp 包 + patch 包（后两层在后）。**
 
-#### 生产真值：**napstar2.0** 安装包（`单机(华盾)/web_napstar2.0/env/nacos/nacos_config_export_kingbase-napstar2.0.zip`，实测 **14** 个 dataId）
+#### 生产真值：单机版安装包（`单机(华盾)/web_install/env/nacos/nacos_config_export_kingbase.zip`，实测 **11** 个 dataId）
 
 ```
-DEFAULT_GROUP/hisdataproducer-ext.yaml
 DEFAULT_GROUP/jk.yaml
 DEFAULT_GROUP/napstarmappingconfig.yaml
 MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml
 MODELSERVER_GROUP/icms-controller.yaml
 MODELSERVER_GROUP/icms-hisDataProducer.yaml
-MODELSERVER_GROUP/icms-hisDataSend          ← ⛔ 注意：dataId **没有扩展名**
 MODELSERVER_GROUP/icms-real-controller.yaml
 MODELSERVER_GROUP/icms-rtdataconsumer.yaml
 NAPSTARWEB_GROUP/kafkabus.yaml
 NAPSTARWEB_GROUP/napstarweb-controller.yaml
 NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml
 NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml
-NAPSTARWEB_GROUP/scheviewer.yaml            ← ⭐ 升级版新增
 ```
 
-> 📌 **`icms-hisDataSend` 没有 `.yaml` 扩展名** —— 找 dataId 时
-> `find … -name '*.yaml'` **会漏掉它**（实测：`import-hd-nacos-configs.sh`
-> 里就是靠**单独 post 一次**补上去的）。
-> ⇒ **数 dataId 时用 `find … -type f`（不带 `-name`），别只数 `.yaml`。**
+**哪些 dataId 里有 `oms:` 块**（**逐个扫过全部 11 个**）：
 
-**哪些 dataId 里有 `oms:` 块**（**逐个扫过全部 14 个**）：
+| dataId | 应用 | 有 `oms:`？ | 现在的值 |
+|---|---|---|---|
+| `MODELSERVER_GROUP/icms-controller.yaml` | model-controller | ✅ | `hostname: node1` / `port: 6379` |
+| `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | rtdata-consumer | ✅ | 同上 |
+| `MODELSERVER_GROUP/icms-real-controller.yaml` | realserver | ✅ | 同上 |
+| `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | web-controller | ✅ | 同上 |
+| **`MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml`** | commitDataIncreProducer | ⛔ **没有** | —— |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ⛔ 没有 | —— |
+| `MODELSERVER_GROUP/icms-hisDataProducer.yaml` | hisDataProducer | ⛔ 没有 | —— |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml` | realalarmproducer | ⛔ 没有 | —— |
+| 其余 3 个（`jk` / `napstarmappingconfig` / `kafkabus`） | —— | ⛔ 没有 | —— |
 
-| dataId | 应用 | 有 `oms:`？ | 现在的值 | 相对升级前 |
-|---|---|---|---|---|
-| `MODELSERVER_GROUP/icms-controller.yaml` | model-controller | ✅ | `hostname: node1` / `port: 6379` | 沿用 |
-| `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | rtdata-consumer | ✅ | 同上 | 沿用 |
-| `MODELSERVER_GROUP/icms-real-controller.yaml` | realserver | ✅ | 同上 | 沿用 |
-| `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | web-controller | ✅ | 同上 | 沿用 |
-| **`MODELSERVER_GROUP/icms-hisDataProducer.yaml`** | **hisDataProducer** | ✅ | ⭐ **`port: 6389`**（不是 6379！） | ⚠️ **改了** —— 升级前无 `oms:`、`spring.redis:` 是 6379 |
-| **`MODELSERVER_GROUP/icms-hisDataSend`** | **hisDataSend** | ✅ | ⭐ **`port: 6389`** | ⭐ **新增** dataId |
-| **`NAPSTARWEB_GROUP/scheviewer.yaml`** | **sche-viewer-server** | ✅ | `port: 6379` | ⭐ **新增** dataId |
-| **`MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml`** | commitDataIncreProducer | ⛔ **没有** | —— | 沿用（仍无 `oms:`） |
-| `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ⛔ 没有 | —— | 沿用 |
-| `NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml` | realalarmproducer | ⛔ 没有 | —— | 沿用 |
-| 其余 4 个（`hisdataproducer-ext` / `jk` / `napstarmappingconfig` / `kafkabus`） | —— | ⛔ 没有 | —— | 3 个沿用 + 1 个新增（`hisdataproducer-ext`） |
-
-⇒ **7 个 dataId 有 `oms:`，而且**全部是单机形态**
+⇒ **4 个 dataId 有 `oms:`，而且**全部是单机形态**
 （`hostname` + `port`，**没有 `redisMode`、没有 `clusters:`**）。
 
-> ⭐ **本文以「当前这份」为准** —— 即上面那份 kingbase-napstar2.0 导出包
-> （**14** 个 dataId、**7** 个有 `oms:`）。这就是改造时**要照着改的那一份**。
+> ⭐ **本文以「当前这份」为准** —— 即上面那份 kingbase 导出包
+> （**11** 个 dataId、**4** 个有 `oms:`）。这就是改造时**要照着改的那一份**。
 >
-> 💡 **好消息：绝大多数配置是沿用的** —— 升级前那份（11 个 dataId / 4 个 `oms:`）
-> **本来是对的**，只是**少了升级版新增的这几项**。逐字 diff 实测：
-> **11 个共有 dataId 里，10 个的 `oms:` 块完全相同**。
-> ⇒ **照旧配置改就行，只需额外处理下面这三条。**
+> ✅ **全部指向 `6379`** —— 实测整份导出包里 **`6389` 出现 0 次**。
+> **现状只有一个 Redis 实例（6379），没有第二个实例要迁。**
 >
-> 🔴 **三个最容易踩的点**（都是升级版相对旧版的增量）：
+> 🔴 **一个最容易踩的点**：
 >
 > | # | 点 | 后果 |
 > |---|---|---|
-> | 1 | **`icms-hisDataProducer.yaml` 与 `icms-hisDataSend` 的 `oms:` 指向 `port: 6389`** | 它们的 `spring.redis:` **也**是 6389 ⇒ **两个 6389 应用**都连第二个实例。只改 6379 那批 ⇒ **这俩继续连旧单机** |
-> | 2 | **`scheviewer.yaml` 是升级版新增的**（带 `oms:`） | 集群化时**必须一起改**，否则 `sche-viewer-server` 留在单机 |
-> | 3 | **`icms-hisDataSend` 这个 dataId 没有扩展名** | 用 `find -name '*.yaml'` 扫会**漏掉它** ⇒ 漏改它 ⇒ **7 变成 6** |
+> | 1 | **以为现场有两个 Redis 实例（6379 + 6389），把 6389 的数据也一起迁** | ⛔ **现状没有 6389** ⇒ **没有第二份数据要迁** ⇒ 迁移只需处理 6379 一份。**先在现场 `ps -ef \| grep redis` 数一遍实例数** |
 >
-> ⚠️ **`scheviewer.yaml` 与 `napstarweb-controller.yaml` 用同一个 `group-id: svg`**
-> ⇒ **生产确实存在「两套 dataId 抢同一组名」**（§8.3.1 有详述）。
-> （`web_install` 那份里没有 `scheviewer.yaml`，所以那边看着没这个问题。）
+> 📌 **另有 3 个 dataId 指向 6389** —— 但那是**升级到 `web_napstar2.0` 之后**才有的
+> （`scheviewer.yaml` / `icms-hisDataSend` / `icms-hisDataProducer.yaml` 改指 6389）。
+> ⇒ **升级后要改的地方见 §0.4.2。**
 
-#### 0.4.1 ⭐ 第三层：`updateconfig\` 覆盖包（**改配置前必看**）
+#### 0.4.1 ⭐ 另外两个导出包（**改配置前必看**）
 
-napstar2.0 的真值**不是一层，是三层**。除了基础导出包，还有一层**补丁**：
+`web_install\env\nacos\` 下**不止一个 zip** —— 基础包之外还有两个：
 
 ```
-D:\work\info\web\installpackage\napstar_install\单机(华盾)\updateconfig\
-  ├─ nacos_config_export_kingbase-napstar2.0-update.zip     （2026-04-07）
-  ├─ nacos_config_export_dm-napstar2.0-update.zip            （2026-04-07）
-  └─ nacos_config_export_postgresql-napstar2.0-update.zip   （2026-10-31，最新）
+D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\nacos\
+  ├─ nacos_config_export_kingbase.zip              ← 基础包（11 个 dataId，4 个带 oms:）
+  ├─ nacos_config_export_hisdataproducer_exp.zip   ← 补 1 个 dataId
+  └─ nacos_config_export_kingbase_patch_1118.zip  ← 覆盖 1 个 dataId
 ```
 
-**它盖在基础导出包上面**（只含被改过的 dataId，不是全量）：
-
-| update 包 | 含哪些 dataId |
-|---|---|
-| kingbase | `icms-commitDataIncreProducer.yaml` / `icms-controller.yaml` / `napstarweb-controller.yaml` |
-| dm | 同上 **+** `DEFAULT_GROUP/napstarmappingconfig.yaml` |
-| postgresql | 同上 **+** `DEFAULT_GROUP/napstarmappingconfig.yaml` |
-
-**它改了什么**（实测 base vs update 逐行 diff）：
-
-| # | 改动 | 说明 |
+| 包 | 含什么 | 作用 |
 |---|---|---|
-| 1 | 数据库 URL `node2` → `node1` | 三个 dataId 里各 2~3 处 `jdbc:` 都指向 `node2` ⇒ update 改成 `node1` |
-| 2 | 去掉 `- url: /rtwebsocket/**` 的 `permission: anon` | 只在 `napstarweb-controller.yaml` |
+| `kingbase.zip` | 11 个 dataId | **主体** —— 本文 §0.4 那张表就是它 |
+| `hisdataproducer_exp.zip` | `DEFAULT_GROUP/hisdataproducer-ext.yaml`（**1 个**） | **补**一个 dataId（`hisDataProducer` 的 `extension-configs` 引用它）⇒ 实际总数 **12** |
+| `kingbase_patch_1118.zip` | `MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml`（**1 个**） | **覆盖**基础包里那一个，**只多一段** `orm:` |
 
-> 📌 **仓库里那份 docx**（`updateconfig\配置web-napstar2.0使用说明.docx`）写得很直接：
-> **「配置统一使用 nacos 的导入包：`nacos_config_export_dm-napstar2.0-update.zip` 里的内容」**
-> ⇒ **以 update 包为准**。
+**patch 包改了什么**（实测 base vs patch 逐行 diff）：
+
+```
+=> orm:
+=>   database: kingbase
+```
+
+⇒ 只是给 `icms-commitDataIncreProducer.yaml` 补上 `orm.database`（**数据库方言**），
+**Redis 相关的键一个字没动**。
+
+> ⇒ **三层合起来的实际状态 = 12 个 dataId，其中 4 个带 `oms:`（全指 6379）。**
 >
-> ⚠️ **但 update 包只覆盖 3~4 个 dataId** ——
-> **其余 10 个仍取基础导出包**。⇒ **导入时要「基础包 + update 包」两层都导**，
-> **顺序是 update 包在后**（否则 update 被基础包覆盖）。
+> 💡 **好消息：另外两个包都不碰 `oms:`** ——
+> 实测 `hisdataproducer-ext.yaml` 根本没有 `oms:`，
+> `patch` 包的 `oms:` 块与基础包**逐字相同**
+> ⇒ **本文 §2.6 的 `oms:` 模板对三层都适用**，改 Redis 时不必区分层次。
 >
-> 💡 **好消息：update 层不碰 `oms:`** —— 实测 update 包的 `oms:` 块与基础包**逐字相同**
-> ⇒ **本文 §2.6 的 `oms:` 模板对两层都适用**，改 Redis 时不必区分层次。
+> ⚠️ **导入顺序**：exp 包 → 基础包 → patch 包（**patch 在最后**，否则被覆盖）。
+
+#### 0.4.2 升级到 `web_napstar2.0` 之后会变什么（**本文按现状写，升级后再看**）
+
+> 📌 **本文的清单是「现状」** —— 一个 Redis 实例、11~12 个 dataId、4 个 `oms:` 全指 6379。
+> **如果现场先升级到 `web_napstar2.0`，再改集群**，那清单要换成下面这套：
+
+| | 现状（本文） | 升级到 `web_napstar2.0` 之后 |
+|---|---|---|
+| Redis 实例 | **1 个**（6379） | **2 个**（`redismaster.conf` 6379 + `redis.conf` 6389） |
+| dataId 数 | 11（+exp = 12） | **14** |
+| 带 `oms:` 的 | **4 个**（全指 6379） | **7 个**（其中 3 个指 6389） |
+| 新增的 dataId | —— | `scheviewer.yaml`（带 `oms:`）· `icms-hisDataSend`（带 `oms:`，**无扩展名**）· `hisdataproducer-ext.yaml` |
+| `icms-hisDataProducer.yaml` | **无** `oms:`，`spring.redis:` 指 6379 | **新增** `oms:`，两个都指 **6389** |
+
+⚠️ **升级后多出来的 3 个指向 6389 的 dataId 是「第二个实例」带来的** ——
+**如果没有升级，就没有 6389，也就没有这三条。**
 
 ### 0.5 本文与「两节点 ZK/Kafka」的边界说明
 
@@ -297,15 +276,15 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\updateconfig\
    ┌──────▼─────────────────────────┐      ┌──────────▼──────────┐
    │            node1（一台）         │      │       node1         │
    │  ┌───────────────────────────┐  │      │ Redis 6379  master │
-   │  │ Redis 6379  ┐             │  │      │ Redis 6380  master │
-   │  │ Redis 6389  ┘ 两个独立单机 │  │      │ Redis 6381  master │
-   │  │ ZK    2181  单节点         │  │      │ ZK    2181  voter#1 │
-   │  │ Kafka 9092  单 broker      │  │      │ Kafka 9092  broker#1│
-   │  │ PG    5432                 │  │      └──────────┬──────────┘
-   │  └───────────────────────────┘  │                 │
-   └────────────────────────────────┘      ┌──────────▼──────────┐
+   │  │ Redis 6379  一个独立单机   │  │      │ Redis 6380  master │
+   │  │ ZK    2181  单节点         │  │      │ Redis 6381  master │
+   │  │ Kafka 9092  单 broker      │  │      │ ZK    2181  voter#1 │
+   │  │ PG    5432                 │  │      │ Kafka 9092  broker#1│
+   │  └───────────────────────────┘  │      └──────────┬──────────┘
+   └────────────────────────────────┘                 │
+                                          ┌──────────▼──────────┐
                                           │       node2         │
-   ⛔ Redis：同一台机器上两个**独立单机**    │ Redis 6382  replica │
+   ⛔ Redis：一个**独立单机**（6379）       │ Redis 6382  replica │
    ⛔ ZK   ：单节点                       │ Redis 6383  replica │
    ⛔ Kafka：单 broker                    │ Redis 6384  replica │
                                           │ ZK    2181  voter#2 │
@@ -317,7 +296,7 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\updateconfig\
 
 | # | 容易以为 | 实际 |
 |---|---|---|
-| 1 | 6379 在 node1、6389 在 node2 | ⛔ **两个都在同一台机器上**。安装包 `1start_env.sh` 在**同一个目录**里起这两个实例；容器 `hd-node2` 里**零个** redis 进程，`hd-node1` 里**两个**都有 |
+| 1 | 现状有两个 Redis（6379 + 6389），在两台机器上 | ⛔ **现状只有**一个**（6379）**，在一台机器上。安装包 `env/redis/` 下**只有 `redis.conf` 一份**，`1start_env.sh` 也**只起一个**。**Nacos 配置里 `6389` 出现 0 次**（§0.4 / §2.1） |
 | 2 | 生产已经是两台机器 | ⛔ **现在是单台**。安装包 `install.sh:6-13` 把 `ip_webserver_address` 和 `ip_napstar_address` **都设成 `127.0.0.1`**（两台合一），并写 `node1` / `node2` 两条 hosts。**扩成两台是这次要做的事** |
 
 > 📌 **安装包自带两节点集群的安装脚本** —— 不用手写配置：
@@ -336,7 +315,7 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\updateconfig\
 
 | 组件 | 装在哪 | 配置文件 | 谁拉起它 |
 |---|---|---|---|
-| **Redis** | `/opt/software/redis-8.10.0/` | `config/redismaster.conf`（6379）、`config/redis.conf`（6389） | 安装包 `bin/1start_env.sh` |
+| **Redis** | `/opt/software/redis-6.0.6/` | `config/redis.conf`（**6379**，只有一个） | 安装包 `bin/1start_env.sh` |
 | **ZooKeeper** | `/opt/software/apache-zookeeper-3.9.0-bin/` | `conf/zoo.cfg` | 同上 |
 | **Kafka** | `/opt/software/kafka_2.13-2.8.0/` | `config/server.properties` | 安装包 `bin/2start_kafka.sh` |
 | **Nacos** | `/opt/software/nacos/` | `conf/application.properties` | 安装包 `bin/3start_nacos.sh` |
@@ -347,23 +326,22 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\updateconfig\
 
 | 文件 | 内容 |
 |---|---|
-| `/pkg/env/redis/redismaster.conf` | 6379 的完整 Redis 配置（**cluster-enabled 是注释的**） |
-| `/pkg/env/redis/redis.conf` | 6389 的完整 Redis 配置（同上） |
-| `/pkg/env/zookeeper/zoo.cfg` | 单节点 ZK |
-| `/pkg/env/kafka/server.properties` | 单 broker Kafka |
-| `/pkg/bin/1start_env.sh` | 起 PG + 2 个 Redis + ZK |
-| `/pkg/bin/2start_kafka.sh` | 起 Kafka + **建 5 个 topic** |
-| `/pkg/bin/3start_nacos.sh` | 起 Nacos |
+| `env/redis/redis.conf` | **6379 的完整 Redis 配置**（**cluster-enabled 是注释的**）—— ⚠️ **只有这一份** |
+| `env/zookeeper/zoo.cfg` | 单节点 ZK |
+| `env/kafka/server.properties` | 单 broker Kafka |
+| `bin/1start_env.sh` | 起 PG + **1 个** Redis + ZK |
+| `bin/2start_kafka.sh` | 起 Kafka + **建 5 个 topic** |
+| `bin/3start_nacos.sh` | 起 Nacos |
 
 ### 1.3 一次完整扩容的顺序
 
 ```
-[0] 备份两个 Redis 的数据目录 + Nacos 配置导出 + 现有 ZK/Kafka 配置
-[1] ⛔ 停应用（全部四个）→ 停 Redis（6379/6389）→ 停 ZK/Kafka
+[0] 备份 Redis 数据目录 + Nacos 配置导出 + 现有 ZK/Kafka 配置
+[1] ⛔ 停应用（全部四个）→ 停 Redis（6379）→ 停 ZK/Kafka
 [2] 装 Redis 集群（扩到两台）  → §2
 [3] 装 ZK + Kafka 集群（扩到两台）→ §3
 [4] 改 Nacos 的 oms: 块 + spring.kafka.*  → §4.7
-[5] 迁数据（6379 + 6389 → 集群） → §2.3 末
+[5] 迁数据（6379 → 集群）       → §2.3 末
 [6] 构建 / 启动应用              → §5
 [7] 验证                        → §5.3
 ```
@@ -381,7 +359,7 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\updateconfig\
 
 ## 2. 【中间件】Redis：从单机改成集群
 
-### 2.1 ⭐ 生产现状：同一台机器上跑着**两个独立单机**
+### 2.1 ⭐ 生产现状：一台机器上跑着**一个**单机 Redis
 
 这是本文最重要的一条前提事实。**照着「改个配置」的想法做 Redis 集群化会失败。**
 **为什么不能只改配置**：
@@ -389,64 +367,53 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\updateconfig\
 | | 现状 | 集群 | 差在哪 |
 |---|---|---|---|
 | 机器数 | **1 台** | **2 台** | 要**加机器**、装 Redis、建用户、放行端口 |
-| 实例数 | 2 个（6379 / 6389） | **6 个**（6379-6384） | 要新建 4 个实例 |
-| 关系 | **两个互不相干**（没有 `replicaof`） | 3 master + 3 replica | 要重新分配主从 |
-| 数据 | 各自有一份 | 合并成一个 keyspace | ⚠️ **要迁数据**（§2.3 末） |
+| 实例数 | **1 个**（6379） | **6 个**（6379-6384） | 要新建 5 个实例 |
+| 关系 | 单机（`cluster-enabled` 注释） | 3 master + 3 replica | 要建集群、分配主从 |
+| 数据 | **一份** | 合并成一个 keyspace | ⚠️ **要迁数据**（§2.3 末） |
 
 ⇒ **四个维度全变了**，没有一个是改配置能覆盖的。
 
-**实测证据**（安装包 `/pkg/env/redis/`，**这份就是 `web_napstar2.0` 的 `env/redis/`** —— MD5 逐字节相同，见 §0.2）：
+**实测证据**（安装包 `web_install\env\redis\redis.conf`，**只有这一份**）：
 
 ```
-redismaster.conf:139   port 6379
-redismaster.conf:1070  requirepass <Redis口令>
-redismaster.conf:1408  appendonly no
-redis.conf:139         port 6389
-redis.conf:1070        requirepass <Redis口令>
-redis.conf:1408        appendonly no
+redis.conf:92    port 6379
+redis.conf:257   logfile "/opt/software/redis-6.0.6/logs/redis.log"
+redis.conf:786   requirepass <Redis口令>
+redis.conf:1059  appendonly no
 ```
 
-**三份 conf 全是单机**（`/pkg/env/redis/` 下还有第三份 `redis-full.conf`，
-它是 `include redis.conf` + Redis Stack 模块，不是集群配置）：
+**它是单机**：
 
-| 项 | 6379 | 6389 | 是主从吗 |
-|---|---|---|---|
-| `cluster-enabled` | 注释 | 注释 | ⛔ 都不是集群 |
-| `replicaof` / `slaveof` | 无 | 无 | ⛔ **不是主从** |
-| `port` | 6379 | 6389 | 两个**完全独立**的实例 |
-| `requirepass` | `<Redis口令>` | `<Redis口令>` | 同一口令 |
+| 项 | 值 | 是集群吗 |
+|---|---|---|
+| `cluster-enabled` | **注释** | ⛔ 不是集群 |
+| `replicaof` / `slaveof` | **无** | ⛔ 不是主从 |
+| `port` | **6379** | **一个实例** |
+| `requirepass` | `<Redis口令>` | —— |
+| `appendonly` | `no` | —— |
 
-> ⚠️ **文件名有误导性**：`redismaster.conf` 叫「master」，但它**没有任何从节点指向它**
-> —— 它就是一台普通的独立 Redis。6389 同理。
->
-> ⚠️ **两个实例在同一台机器上**（不是一台一台）：
-> 安装包 `1start_env.sh` 在**同一个目录**里起这两个进程：
+> ⭐ **现状只有**一个** Redis 实例（6379）。**
+> 安装包 `web_install\bin\1start_env.sh` 也**只起一个**：
 > ```
-> cd /opt/software/redis-8.0.2/bin/
-> ./redis-server /opt/software/redis-8.0.2/config/redis.conf        # 6389
-> ./redis-server /opt/software/redis-8.0.2/config/redismaster.conf   # 6379
+> cd /opt/software/redis-6.0.6/bin/
+> ./redis-server /opt/software/redis-6.0.6/config/redis.conf      # 6379
 > ```
-> （实测：容器 `hd-node1` 上**两个** redis 进程，`hd-node2` 上**零个**。）
+> ⇒ **Nacos 配置里 `6389` 出现 0 次**（实测整份导出包 0 命中）——
+> **没有第二个实例，也没有第二份数据要迁。**
 >
-> ⇒ **生产上 6379 和 6389 是同一台机器上两台互不相干的单机 Redis**，各自存各自的数据。
 > ⇒ **集群化是一次重构（要迁数据 + 加机器），不是一次配置切换。**
 >
-> 🔴 **⚠️ 而且 6389 不是「闲置的第二个实例」—— 它上面有真实数据。**
-> napstar2.0 升级版的生产 Nacos 里**两个应用连的是 6389**（§0.4）：
+> ⚠️ **别把「升级版」的布局当成现状** ——
+> `web_napstar2.0` 包里有**两个** Redis（6379 + 6389），Nacos 配置也是 14 个 dataId / 7 个 `oms:`。
+> **那是升级之后才有的状态**（§0.4.2）。**现场先数一遍实例数**：
+> ```bash
+> ps -ef | grep redis-server | grep -v grep    # 现状：只有 1 行
+> ss -lntp | grep -E '6379|6389'              # 现状：只有 6379 在听
+> ```
+> ⇒ **迁移只需处理 6379 这一份数据。**
 >
-> | 应用 | dataId | `oms:` 端口 | `spring.redis:` 端口 |
-> |---|---|---|---|
-> | **hisDataProducer** | `MODELSERVER_GROUP/icms-hisDataProducer.yaml` | **6389** | **6389** |
-> | **hisDataSend** | `MODELSERVER_GROUP/icms-hisDataSend` | **6389** | **6389** |
->
-> ⇒ **6389 的数据必须一并迁**，否则这两个应用集群化后**读不到自己的数据**。
-> ⇒ **迁前先 `DBSIZE` 对比 6379 与 6389**（两个都要对比，别只对 6379）。
-> ⚠️ **别因为「6389 长得像从节点」就以为它的数据在 6379 上已经有了** ——
-> 它是**另一份独立数据**。
->
-> 📌 **`icms-hisDataSend` 的 `spring.redis:` 在 DM 版里是 `database: 1`**（kingbase 版是 `0`）
-> ⇒ **`oms:` 的 `database` 与 `spring.redis:` 的 `database` 可能不一致**，
-> **照抄对应导出包的那一份**，别跨版本抄（§4.7）。
+> 📌 **`oms:` 的 `database` 与 `spring.redis:` 的 `database` 可能不一致**
+> ⇒ **照抄对应导出包的那一份**，别跨版本抄（§4.7）。
 
 ### 2.2 `cluster.conf` 怎么写（华盾版）
 
@@ -466,12 +433,14 @@ vim cluster.conf
 
 ```ini
 # Redis 安装根目录。必须与生产机上完全一致
-redis_prefix = /opt/software/redis-8.10.0
+# ⚠️ ��装包写的是 redis-6.0.6，但现场版本可能不同（容器里是 8.10.0）⇒ 先查：
+#     ls -d /opt/software/redis-*
+redis_prefix = <现场实际的 redis 安装目录>
 
 # 集群密码。必填。
 # ⚠️ 必须与 Nacos 里 oms.password 完全一致（见 §4.7）
 # ⚠️ 华盾现有的 Redis 口令与安装包里的一致（见 §2.1）——
-#    集群化后建议换一个新口令，并同步改 7 个 dataId 的 oms.password（见 §4.7）
+#    集群化后建议换一个新口令，并同步改 4 个 dataId 的 oms.password（见 §4.7）
 cluster_password = <集群密码>
 
 # redis.conf 的 bind 地址
@@ -493,28 +462,22 @@ ports    = 6382,6383,6384
 
 #### 2.2.1 ⭐ 扩容时的端口规划（**先定这个再动手**）
 
-现状是**同一台 node1 上占了 6379 和 6389 两个端口**（§2.1）⇒ 扩容前必须先决定它们怎么办。
+现状是**同一台 node1 上只有一个 Redis，占了 6379**（§2.1）⇒ 扩容前必须先定端口怎么分。
 
 | 项 | 现状 | 目标 | 怎么处置 |
 |---|---|---|---|
 | node1 的 **6379** | 一个独立单机，**有数据** | 集群的 **master #1** | **停掉 → 清空数据目录 → 重新以集群节点身份起**（数据在 §2.3 的迁移步骤里进集群） |
-| node1 的 **6389** | 一个独立单机，**有数据** | **不再使用** | **停掉 → 它的数据并进集群 → 退役**（见下面的 ⚠️） |
 | node1 的 **6380 / 6381** | 空闲 | 集群的 master #2 / #3 | 新建 |
 | node2 的 **6382-6384** | 空闲（node2 还没有 Redis） | 集群的 **3 个 replica** | 新建 |
 
-⚠️ **6389 退役前必须先把它的数据并进集群** —— 它上面可能有独立于 6379 的 key。
-
-> 📌 **为什么 6389 不直接进集群当第 4 个节点**：
-> 目标拓扑是「**3 master + 3 replica**」，6 个实例正好对应 6379-6384。
-> 把 6389 也用上就得变成 4 master + 3 replica（或 7 实例），
-> **两台机器的容错边界会变得更糟**（§2.5）。
-> ⇒ **6389 的正确归宿是「数据迁移后退役」**，不是「变成集群节点」。
-
-⚠️ **端口复用有坑**：`cluster-config.sh` 会往节点自己的 `redis.conf` 里写
-`cluster-enabled yes` 与 `cluster-config-file`，**但不会清理旧的 `nodes.conf`**。
-⇒ 旧的 `/opt/software/redis-8.10.0/logs/6379/`（数据目录）里若残留
-`nodes.conf`，新节点会带着**旧集群的身份**启动 ⇒ 表现为「节点认不出自己」。
-⇒ **重建前务必把数据目录清空**（§2.3 第 1 步）。
+> 📌 **目标拓扑是「3 master + 3 replica」，6 个实例正好对应 6379-6384。**
+> ⇒ **现状那个 6379 就是 master #1**（端口复用），不需要「退役」任何实例。
+>
+> ⚠️ **端口复用有坑**：`cluster-config.sh` 会往节点自己的 `redis.conf` 里写
+> `cluster-enabled yes` 与 `cluster-config-file`，**但不会清理旧的 `nodes.conf`**。
+> ⇒ 旧的 `/opt/software/redis-6.0.6/logs/`（数据目录）里若残留
+> `nodes.conf`，新节点会带着**旧集群的身份**启动 ⇒ 表现为「节点认不出自己」。
+> ⇒ **重建前务必把数据目录清空**（§2.3 第 1 步）。
 
 **解析器规则**（写错会**直接报错**，不会静默吞掉）：
 
@@ -545,28 +508,27 @@ master  <node1>:6380   <- replica <node2>:6384
 
 #### 第 0 步：⛔ 先停掉现有实例（**华盾特有，且不可跳过**）
 
-生产的 6379 / 6389 **正跑在 node1 上**（同一个目录起的）⇒ 不停掉就装不了集群。
+生产的 6379 **正跑在 node1 上** ⇒ 不停掉就装不了集群。
 
 ```bash
 # 在 node1 上
 redis-cli -p 6379 -a <Redis口令> SHUTDOWN NOSAVE
-redis-cli -p 6389 -a <Redis口令> SHUTDOWN NOSAVE
 ```
 
 **判据**：
 
 ```bash
 ps -ef | grep '[r]edis-server'    # 应该没有输出
-ss -lnt | grep -E ':(6379|6389)\b' # 应该没有输出
+ss -lnt | grep -E ':6379\b'        # 应该没有输出
 ```
 
-> ⚠️ **还有一件事：`1start_env.sh` 会在下次重启机器时把这两个实例再拉起来。**
-> ⇒ 集群化完成后**必须把 `1start_env.sh` 里起 Redis 的那两行注释掉**，
+> ⚠️ **还有一件事：`1start_env.sh` 会在下次重启机器时把这个实例再拉起来。**
+> ⇒ 集群化完成后**必须把 `1start_env.sh` 里起 Redis 的那行注释掉**，
 > 否则机器一重启，**旧的单机实例会抢走 6379 端口**，集群节点起不来
 > ⇒ 现象是「集群节点反复起不来，但 preflight 说端口没被占」。
 >
-> 📌 顺带：`1start_env.sh` 里的 Redis 路径写的是 **`redis-8.0.2`**，
-> 而实际装的是 **`redis-8.10.0`** ⇒ 这两个脚本本来就对不上，
+> 📌 顺带：`1start_env.sh` 里的 Redis 路径写的是 **`redis-6.0.6`**，
+> 而现场可能装着别的版本（容器里是 `redis-8.10.0`）⇒ 这两个脚本本来就可能对不上，
 > 说明**生产上很可能是手工起 Redis 的，不是靠这个脚本** ⇒ 停的时候要确认清楚
 > 「到底是谁起的」，别只改脚本。
 
@@ -576,13 +538,13 @@ ss -lnt | grep -E ':(6379|6389)\b' # 应该没有输出
 
 | 项 | 检查命令 | 期望 | 缺了会怎样 |
 |---|---|---|---|
-| Redis 二进制 | `ls /opt/software/redis-8.10.0/bin/redis-server` | 存在且可执行 | preflight 报缺项并退出 |
+| Redis 二进制 | `ls /opt/software/redis-*/bin/redis-server` | 存在且可执行 | preflight 报缺项并退出 |
 | `redis` 用户 | `id redis` | 有输出 | preflight 报缺项并退出 |
 | systemd | `systemctl --version` | 有版本号 | 单元装不上 |
 | 文件描述符 | `ulimit -n` | ≥ 10001 | 组集群时连接失败 |
 | **端口放行** | 在**对端**机器上 `nc -z <本机IP> 6379` | 通 | 握手失败 |
 | **总线端口** | 在**对端**机器上 `nc -z <本机IP> 16379` | 通 | **组不成集群** |
-| **旧数据目录** | `ls /opt/software/redis-8.10.0/logs/6379/` | ⛔ **必须为空** | 残留 `nodes.conf` ⇒ 节点带旧身份启动（§2.2.1） |
+| **旧数据目录** | `ls /opt/software/redis-*/logs/` | ⛔ **必须为空** | 残留 `nodes.conf` ⇒ 节点带旧身份启动（§2.2.1） |
 
 > ⚠️ **集群总线端口（业务端口 + 10000）最容易漏。**
 > 只放行 6379-6384 的话，节点能启动但**组不成集群**，
@@ -634,42 +596,34 @@ redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER NODES
 > 原因是数据的**业务语义只有实施方知道**（哪些 key 可以覆盖、哪些必须保留、
 > 停机窗口有多长）—— 通用脚本反而会把这些判断藏起来。
 
-生产上**同一台 node1** 上跑着 6379 和 6389 **两个各自有数据的独立单机**。
-集群化之后它们的内容要**合并进同一个集群**：
+生产上**同一台 node1** 上跑着 **6379 一个有数据的独立单机**。
+集群化之后它的内容要**进集群**：
 
 | 原数据 | 去哪 | 怎么去 |
 |---|---|---|
 | 6379 的数据 | 集群（key 会按 slot 落到任意 master） | `redis-cli --rdb` / `MIGRATE` / 业务侧停机窗口重灌 |
-| 6389 的数据 | 集群（**它整台退役**） | 同上 |
 
 > ⚠️ **这是整个扩容里唯一有数据风险的一步。**
-> 建议做法：**选一个业务停机窗口，先把两个实例的数据合并导出，再灌进集群**，
+> 建议做法：**选一个业务停机窗口，先把实例的数据导出，再灌进集群**，
 > 期间四个应用全部停掉（避免边迁边写）。
 >
-> ⚠️ **键冲突**：两个独立单机**可能有同名 key**（比如都是 `model:objecttypes:names:X`）
-> —— 合并时会**后者覆盖前者**。迁移前先各自 `KEYS` 一遍做差集比对。
->
-> ⚠️ **6389 上的数据很容易被漏掉** —— 它是个「看起来像从节点」的东西，
-> 实施人员很容易以为它是 6379 的副本、数据在 6379 上就有 ⇒ **其实它有独立的数据**。
-> ⇒ **迁移前先 `DBSIZE` 对比两个实例**，数量不一样就说明 6389 上有独有数据。
->
-> 🔴 **而且 6389 不是「没人用的第二个实例」** —— napstar2.0 的生产 Nacos 里
-> **`hisDataProducer` 与 `hisDataSend` 的 `oms:` / `spring.redis:` 都指向 6389**（§0.4）。
-> ⇒ **这两个应用的数据就在 6389 上** ⇒ 漏迁 6389 ⇒ **它们启动后读不到自己的数据**
-> （而且这类故障**不报错**，只是数据「不见了」—— §6.2）。
->
-> 📌 **迁完之后必须核对**（不能只看「应用起来了」）：
+> 📌 **迁之前必须记下基线**（现在就把这个数记下来，迁完要核对）：
 >
 > ```bash
-> # 迁之前的基线（现在就记下来）
+> # 迁之前的基线
 > redis-cli -p 6379 -a <Redis口令> DBSIZE
-> redis-cli -p 6389 -a <Redis口令> DBSIZE
 >
-> # 迁之后：集群的总数应等于两个实例之和（减去重复 key）
+> # 迁之后：集群的总数应与基线一致
 > redis-cli -c -h <node1> -p 6379 -a <集群密码> DBSIZE
 > ```
 >
 > ⇒ **总数对不上就不要启应用**，先查清差在哪。
+>
+> ⚠️ **如果现场是**两个**实例**（6379 + 6389）**——**
+> 那说明已经升级到 `web_napstar2.0`（§0.4.2）⇒ **两个实例的数据都要迁**，
+> 且 **key 冲突**要处理（两个独立单机**可能有同名 key**，比如都是
+> `model:objecttypes:names:X` —— 合并时会**后者覆盖前者**）⇒ 迁移前各自 `KEYS` 一遍做差集比对。
+> ⇒ **动手前先数一遍实例数**（§2.1 的两条命令）。
 
 ### 2.4 幂等重跑 / 失败回退
 
@@ -688,10 +642,9 @@ redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER NODES
 | # | 要退回去，先确认 | 怎么做 |
 |---|---|---|
 | 1 | ⛔ **旧单机还能起来吗？** | 集群化时**必须保留** 6379 的**原始数据目录**（备份到别处，**不要删**）—— 它是唯一的退路 |
-| 2 | 旧 Redis 实例能起 | 把备份的数据目录放回 `logs/6379/`，**恢复 `redismaster.conf` 的原配置**（去掉 `cluster-enabled` 等行）⇒ `redis-server redismaster.conf` |
-| 3 | 6389 的数据还在 | 同上，`redis.conf` 原封不动 |
-| 4 | Nacos 的 `oms:` 改回去了 | 把 7 个 dataId 的 `oms:` **改回单机形态**（`hostname: node1` / `port: 6379`；**hisDataProducer / hisDataSend 改回 `port: 6389`**）—— ⚠️ **只改 `oms:` 的话，`spring.redis:` 的 `cluster.nodes` 也要改回 `host`/`port`** |
-| 5 | ZK/Kafka 要退回去吗 | **通常不用退** —— ZK/Kafka 的集群化**不依赖** Redis，退了反而多一次停机。⚠️ 但如果 `zookeeper.connect` 改成了两个地址而只有一个节点活着，Kafka 会连不上 |
+| 2 | 旧 Redis 实例能起 | 把备份的数据目录放回 `logs/`，**恢复 `redis.conf` 的原配置**（去掉 `cluster-enabled` 等行）⇒ `redis-server redis.conf` |
+| 3 | Nacos 的 `oms:` 改回去了 | 把 4 个 dataId 的 `oms:` **改回单机形态**（`hostname: node1` / `port: 6379`）—— ⚠️ **只改 `oms:` 的话，`spring.redis:` 的 `cluster.nodes` 也要改回 `host`/`port`** |
+| 4 | ZK/Kafka 要退回去吗 | **通常不用退** —— ZK/Kafka 的集群化**不依赖** Redis，退了反而多一次停机。⚠️ 但如果 `zookeeper.connect` 改成了两个地址而只有一个节点活着，Kafka 会连不上 |
 
 > ⚠️ **最省事的退路：把停机窗口拉长，把所有「不确定」在停机窗口内解决。**
 > ⇒ 停机窗口开始前，**node2 上的 ZK/Kafka 应该已经装好并验证过了**（§3.1 末），
@@ -1341,27 +1294,23 @@ jinfo -sysprops <kafka 的 pid> 2>/dev/null | grep MaxHeapSize
 #### 生产包里另外的 dataId（**本次改造不涉及，但要知道它们存在**）
 
 > ⚠️ **这里的「另外」是相对 §4.2 上表那 4 个应用而言** ——
-> 生产真值共 **14** 个 dataId，上表只覆盖 4 个应用。
+> 生产真值共 **11** 个 dataId（+exp 包 1 个 = 12），上表只覆盖 4 个应用。
 > **下面每一个都要单独判断「它在不在这次改造范围」。**
 >
-> 📌 **其中 3 个是升级版新增的**（升级前那 11 个 dataId 里没有）：
-> `scheviewer.yaml` · `icms-hisDataSend` · `hisdataproducer-ext.yaml`。
-> ⇒ **照升级前的清单改会漏掉它们。**
+> 📌 **如果现场已经升级到 `web_napstar2.0`**，这张表会变（14 个 dataId / 7 个 `oms:`，
+> 多出 `scheviewer.yaml` / `icms-hisDataSend` / `icms-hisDataProducer` 改指 6389）
+> ⇒ **见 §0.4.2**。
 
 | dataId | 应用 | 有 `oms:`？ | 用的是哪套 Redis 配置 | 说明 |
 |---|---|---|---|---|
 | `MODELSERVER_GROUP/icms-real-controller.yaml` | **realserver** | ✅ 有（6379） | `oms:` + `spring.redis:` | ⚠️ **realserver 用户说明它不用、不跑**（§5.2）⇒ **不在本次改造范围**。但它的 `oms:` 也是单机形态，**将来若启用它，集群化时也要改** |
 | `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ❌ **没有** | **只有 `spring.redis:`**（6379） | 在批次 1 里跑（§5.2）⇒ **它不走 `oms:` 那条路**（详见下方） |
-| **`MODELSERVER_GROUP/icms-hisDataProducer.yaml`** | **hisDataProducer** | ✅ **有** | **`oms:` 6389 + `spring.redis:` 6389** | 🔴 **连的是 6389，不是 6379** ⇒ 集群化要改**这个 dataId 的 `oms:`**，且**它对 6389 的数据有依赖**（§2.1） |
-| **`MODELSERVER_GROUP/icms-hisDataSend`** | **hisDataSend** | ✅ **有** | **`oms:` 6389 + `spring.redis:` 6389** | 🔴 同上。⚠️ **dataId 没有扩展名** —— 找的时候容易漏（§0.4） |
-| **`NAPSTARWEB_GROUP/scheviewer.yaml`** | **sche-viewer-server** | ✅ **有**（6379） | `oms:` + `spring.redis:` | ⚠️ **生产 kingbase 里就有这个 dataId**（不是只有 DM 才有）⇒ 集群化时**它的 `oms:` 也要改**。⚠️ 它有 **15 处裸 `executePipelined`**（集群下必抛 `UnsupportedOperationException`，见 §6）⇒ **切集群前必须先修** |
+| `MODELSERVER_GROUP/icms-hisDataProducer.yaml` | hisDataProducer | ❌ **没有** | **只有 `spring.redis:`**（6379） | ⛔ **不在本次改造范围**（它的 `oms:` 在 `bootstrap.yml` 里，§4.4 那种情况）—— ⚠️ 但**它照样连 Redis**，所以 `spring.redis:` 也要改 |
 
-> 🔴 **「有 `oms:` 的 7 个」和「本次要改的 4 个应用」不是一回事** ——
-> 7 个里 **hisDataProducer / hisDataSend / scheviewer** 三个**也在连 Redis**。
-> ⇒ **只改 §4.7 汇总表里那 4 个 ⇒ 剩下 3 个继续连旧单机 ⇒ 集群化做了一半。**
->
-> 📌 **判断口径**：**先按 `oms:` 有没有 → 再按应用在不在批次里跑** →
-> 两个条件都满足才在本次范围内（§4.7 汇总表已按这个口径列全）。
+> 📌 **「有 `oms:` 的 4 个」和「本次要改的 4 个应用」不是完全重合** ——
+> `realalarmconsumer` **没有** `oms:` 却**照样要改**（改 `spring.redis:`）。
+> ⇒ **判断口径**：**先看应用在不在批次里跑 → 再看它用哪套 Redis 配置** →
+> 两边都要处理（§4.7 汇总表已按这个口径列全）。
 
 > ⭐ **`realalarmconsumer` 的 Redis 配置来源与其它几个不同**（**实测**）：
 >
@@ -1767,7 +1716,7 @@ spring:
 
 ### 4.7 ⭐ 汇总表：每个键填在哪、填什么
 
-**Redis 集群化 —— 要改的地方一览**（**基于生产真值**：`单机(华盾)/web_napstar2.0/…/nacos_config_export_kingbase-napstar2.0.zip`，14 个 dataId）：
+**Redis 集群化 —— 要改的地方一览**（**基于生产真值**：`单机(华盾)/web_install/…/nacos_config_export_kingbase.zip`，11 个 dataId）：
 
 | 应用 | dataId | 改 `oms:`？ | 改 `spring.redis:`？ | 改 `spring.kafka.bootstrap-servers`？ | 还要改源码？ |
 |---|---|---|---|---|---|
@@ -1776,9 +1725,6 @@ spring:
 | **rtdata-consumer** | `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | ✅ | ➖（本来就没有 `spring.redis:`） | ✅ | ❌ |
 | **model-controller** | `MODELSERVER_GROUP/icms-controller.yaml` | ✅ | ✅ | ➖（本来就没有 `spring.kafka`） | ❌ |
 | **realalarmconsumer** | `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | ➖ **没有这个块，也不需要** | ✅ | ✅ | ❌ |
-| **hisDataProducer** | `MODELSERVER_GROUP/icms-hisDataProducer.yaml` | ✅（**原值 6389**） | ✅（**原值 6389**） | ➖ | ❌ |
-| **hisDataSend** | `MODELSERVER_GROUP/icms-hisDataSend`（**无扩展名**） | ✅（**原值 6389**） | ✅（**原值 6389**） | ➖ | ❌ |
-| **sche-viewer-server** | `NAPSTARWEB_GROUP/scheviewer.yaml` | ✅（原值 6379） | ✅（原值 6379） | ➖ | 🔴 **要** —— 15 处裸 `executePipelined`（§6） |
 | **realserver** | `MODELSERVER_GROUP/icms-real-controller.yaml` | ⛔ **不在本次改造范围**（不跑这个应用） | ⛔ | ⛔ | — |
 
 > 📌 **`rtdata-consumer` 的 dataId 里确实没有 `spring.redis:`** —— 实测它的顶层键是
@@ -1787,15 +1733,14 @@ spring:
 >
 > 📌 **`model-controller` 的 dataId 里确实没有 `spring.kafka`** —— 它不消费 Kafka。
 >
-> 🔴 **表里 9 行，不是 4 行** —— 生产真值里带 `oms:` 的是 **7 个** dataId，
-> 其中 **hisDataProducer / hisDataSend / scheviewer** 三个**也在连 Redis**，
-> 漏改就等于**集群化只做了一半**（那三个继续连已停掉的旧单机 ⇒ 起不来）。
+> 📌 **表里 6 行 = 4 个要改 + 2 个不在范围** —— 生产真值里带 `oms:` 的是 **4 个** dataId
+> （`icms-controller` / `icms-rtdataconsumer` / `icms-real-controller` / `napstarweb-controller`），
+> **加上 `commitDataIncreProducer` 要补的那一个** ⇒ **要改 4 处 `oms:`**。
 >
-> ⚠️ **两个「原值是 6389」的（hisDataProducer / hisDataSend）** ——
-> 它们现在连的是**第二个实例**，不是 6379。改的时候**别把 6389 抄进去**
-> （集群化后 6389 是**集群节点之一**，地址由 `clusters:` 列表决定，不是「6389 这个实例」）。
+> ⚠️ **如果现场已升级到 `web_napstar2.0`** —— 表会变（14 个 dataId / 7 个 `oms:`，
+> 多 3 行，其中 3 个 `oms:` 原值是 **6389**）⇒ **见 §0.4.2**。
 
-**每个 dataId 的 `oms:` 集群模板**（**七处逐字相同** —— 7 个带 `oms:` 的 dataId 全用这份）：
+**每个 dataId 的 `oms:` 集群模板**（**四处逐字相同** —— 4 个带 `oms:` 的 dataId 全用这份）：
 
 ```yaml
 oms:
@@ -1812,11 +1757,10 @@ oms:
   timeout: 5000
 ```
 
-> 📌 **`database:` 保持 `0`** —— 现有 7 个 `oms:` 块**全是 `database: 0`**
-> （实测 7/7）⇒ 照抄 `0`，**不要**改成 `1`。
+> 📌 **`database:` 保持 `0`** —— 现有 4 个 `oms:` 块**全是 `database: 0`**
+> （实测 4/4）⇒ 照抄 `0`，**不要**改成 `1`。
 > ⚠️ **但 `spring.redis:` 的 `database` 另算** —— 它可能与 `oms:` 的**不一致**
-> （例：`icms-hisDataSend` 在 **DM 版**里 `spring.redis: database: 1`、`oms: database: 0`；
-> kingbase 版两者都是 `0`）⇒ **照抄对应导出包的那一份**（§4.6）。
+> ⇒ **照抄对应导出包的那一份**（§4.6）。
 > ⇒ **`oms:` 的 `database` 与 `spring.redis:` 的 `database` 是两回事，别一起改。**
 
 **每个 dataId 的 Kafka 模板**（**四处** —— 只给**确实在消费 Kafka 且在本次范围内**的应用改）：
@@ -1827,23 +1771,22 @@ spring:
     bootstrap-servers: <node1IP>:9092,<node2IP>:9092
 ```
 
-> 📌 **别给所有 dataId 都加这一段** —— 实测生产真值里**有 `bootstrap-servers:` 的有 8 个**
-> （`icms-commitDataIncreProducer` / `icms-hisDataProducer` / `icms-hisDataSend` /
-> `icms-rtdataconsumer` / `napstarweb-controller` / `napstarweb-realalarm-consumer` /
-> `napstarweb-realalarm-producer` / `scheviewer`），
+> 📌 **别给所有 dataId 都加这一段** —— 实测生产真值里**有 `bootstrap-servers:` 的有 6 个**
+> （`icms-commitDataIncreProducer` / `icms-hisDataProducer` / `icms-rtdataconsumer` /
+> `napstarweb-controller` / `napstarweb-realalarm-consumer` / `napstarweb-realalarm-producer`），
 > 但**其中只有 4 个在本次改造范围里**（§4.7 表中「改 `spring.kafka.bootstrap-servers`？」列为 ✅ 的）。
 > ⇒ **`model-controller` 与 `icms-real-controller` 本来就没有 `spring.kafka`**（别加）。
-> ⇒ **`scheviewer.yaml` 有 `bootstrap-servers`，但 sche-viewer-server 不消费 Kafka**
-> （实测 0 处 `@KafkaListener`）⇒ **改不改都行，不改也不影响消费**。
+> ⇒ **同理，`spring.redis:` 有 5 个**（`icms-commitDataIncreProducer` / `icms-controller` /
+> `icms-hisDataProducer` / `napstarweb-controller` / `napstarweb-realalarm-consumer`）——
+> **`icms-rtdataconsumer` 与 `icms-real-controller` 没有**（§4.7 表已标）。
 
 ### 4.8 改完之后：逐个确认生效
 
 ```bash
 # 1) 重启应用
 # 2) 看 Redis 生效值（双向断言）
-#    ⭐ 6 个带 oms: 的 dataId 对应的应用都要查（不止三个）
-for n in web-controller rtdata-consumer model-controller \
-         hisDataProducer hisDataSend sche-viewer-server; do
+#    ⭐ 批次里跑的每个 app 都要查
+for n in web-controller rtdata-consumer model-controller realalarmconsumer; do
   printf '%-22s ' "$n"
   grep -a -oE '\*\*\* Using Redis (Cluster with nodes: [^)]*|Standalone at [^)]*)' \
     "/opt/hd/logs/$n.log" 2>/dev/null | tail -1
@@ -2057,8 +2000,8 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 | 应用启动成功但**收不到 Kafka 消息** | `auto-offset-reset: latest` ⇒ 新起的消费者从**最新**开始 | 改成 `earliest`（或接受这个语义） |
 | 两个应用互相抢消息 | `consumer.group-id` 撞了 | 各给各的组名（§8.3.1）—— ⚠️ **但 `@KafkaListener(id=…)` 的应用改配置没用** |
 | `BeanDefinitionOverrideException` | 有两份同名 bean（`redisConfigProperties`） | 见 §4.5 的 `allow-bean-definition-overriding` 说明 |
-| **某些 app 起来了，某些没起来**（或反过来） | 你只改了**一部分**带 `oms:` 的 dataId | 生产真值里带 `oms:` 的有 **7 个**（§0.4）⇒ **逐个核对**，别只改批次里那几个 |
-| **`hisDataProducer` / `hisDataSend` 起来但读不到数据** | 它们的 `oms:` 原本指向 **6389** ⇒ 你按 6379 抄了一份 | 它们的 `oms:` 也要改成集群形态（§4.7）；**6389 的数据必须一并迁**（§2.1） |
+| **某些 app 起来了，某些没起来**（或反过来） | 你只改了**一部分**该改的 dataId | 生产真值里带 `oms:` 的有 **4 个**（§0.4）⇒ **逐个核对**，别只改批次里那几个 |
+| **数据不见了，但应用不报错** | 迁的数据**不完整** | 迁前记下 `DBSIZE` 基线，迁后核对（§2.3 末）—— 数量对不上就别启应用 |
 
 ### 6.2 一条最贵的教训
 
@@ -2142,9 +2085,9 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 > **生产上要按业务量调大** —— 不然 Redis 会在写满时**拒绝写入**，
 > 而 `maxmemory-policy` 是 `noeviction`（不淘汰）⇒ **写直接失败**。
 >
-> ⚠️ **第 10 条要看的不止四个 app** —— 生产真值里带 `oms:` 的有 **7 个** dataId
-> （§0.4），⇒ **hisDataProducer / hisDataSend / sche-viewer-server** 的日志也要看。
-> ⚠️ **只看「有 Cluster 行」不够** —— 万一日志里两种行都有，模式就是有歧义的。
+> ⚠️ **第 10 条要看的是批次里跑的那几个 app**（web-controller / rtdata-consumer /
+> model-controller / realalarmconsumer）—— ⚠️ **只看「有 Cluster 行」不够**，
+> 万一日志里两种行都有，模式就是有歧义的。
 >
 > 📌 **第 10 条要在每次重启应用后看** —— 改了 Nacos 的 `oms:` 但没重启 = 没生效。
 
@@ -2197,15 +2140,14 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 
 | 端口 | 组件 | 在哪 | 备注 |
 |---|---|---|---|
-| 6379 | Redis | **node1** | 独立单机（`redismaster.conf`） |
-| **6389** | Redis | **node1** | 独立单机（`redis.conf`）—— ⚠️ **扩容后退役**（§2.2.1） |
+| 6379 | Redis | **node1** | 独立单机（`redis.conf`）—— ⚠️ **扩容后复用为 master #1**（§2.2.1） |
 | 2181 | ZooKeeper | node1 | 单节点 |
 | 9092 | Kafka | node1 | 单 broker |
 | 18848 / 19848 | Nacos | node1 | |
 | 5432 | PostgreSQL | node1 | |
 
-> ⚠️ **6389 是现状才有的端口** —— 它**不在**扩容后的 6379-6384 规划里。
-> 实施时看到 6389 别以为是漏配了。
+> ⚠️ **6389 不是现状的端口** —— 它**只在升级到 `web_napstar2.0` 之后**才出现（§0.4.2）。
+> **现状的端口清单里只有 6379。**
 
 ### 8.2 文件布局
 
@@ -2213,10 +2155,10 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 
 ```
 /opt/software/
-  redis-8.10.0/
+  redis-6.0.6/
     bin/{redis-server,redis-cli}
-    config/{redismaster.conf,redis.conf}     ← 现状：两个独立单机（同一台机器）
-    logs/{6379,6389}/                        ← ⚠️ 扩容前要清空（残留 nodes.conf）
+    config/redis.conf                          ← 现状：一个独立单机（6379）
+    logs/                                      ← ⚠️ 扩容前要清空（残留 nodes.conf）
   apache-zookeeper-3.9.0-bin/
     conf/zoo.cfg
     data/myid                                ← 必须与 server.N 对应
@@ -2240,17 +2182,15 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 /opt/cpsweb_install/
   bin/{1start_env.sh,2start_kafka.sh,3start_nacos.sh,4stop_env.sh}
   env/
-    redis/{redismaster.conf,redis.conf,redis-full.conf}   ← redis-full = include + Stack 模块
+    redis/redis.conf                          ← 现状：**一个**实例（6379）
     zookeeper/{zoo.cfg,install_zk.sh}       ← ⭐ 自带两节点安装脚本
     kafka/{server.properties,install_kafka.sh}  ← ⭐ 同上（但有两处硬编码 node1，§3.0）
-    nacos/nacos_config_export_*-napstar2.0.zip    ← ⭐ 配置真值在这里
-        └ kingbase（生产）：nacos_config_export_kingbase-napstar2.0.zip  ← ⭐ 14 个 dataId
+    nacos/nacos_config_export_*.zip         ← ⭐ 配置真值在这里
+        └ kingbase（生产）：nacos_config_export_kingbase.zip   ← ⭐ 11 个 dataId
+        └ nacos_config_export_hisdataproducer_exp.zip  ← 补 1 个（§0.4.1）
+        └ nacos_config_export_kingbase_patch_1118.zip ← 覆盖 1 个（§0.4.1）
         └ DM 版 / PG 版 / …：内容不同，以生产机上的那个为准
   install.sh                                 ← ⭐ 写 hosts：node1 / node2（现两处都是 127.0.0.1）
-
-updateconfig/                                ← ⭐ 第三层（§0.4.1）
-  nacos_config_export_{kingbase,dm,postgresql}-napstar2.0-update.zip
-        └ 只含被改过的 3~4 个 dataId，覆盖基础导出包
 ```
 
 **源码树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code\`）：
@@ -2273,29 +2213,27 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 
 | # | 容易记错 | 实际 |
 |---|---|---|
-| 1 | `redismaster.conf` 是「主」 | 它**没有任何从节点指向它** —— 就是一台独立单机 |
-| 2 | 生产 Redis 已经是集群 | 是**同一台机器上两个独立单机**（6379 + 6389），`cluster-enabled` 全是注释 |
-| 3 | 6379 在一台机器、6389 在另一台 | ⛔ **两个都在同一台机器上**（`1start_env.sh` 同一目录起两个进程） |
-| 4 | 生产已经是两台机器 | ⛔ **现在是单台**。`install.sh:6-13` 把两个 IP 都设成 `127.0.0.1` ⇒ **扩两台是这次要做的事** |
-| 5 | `2start_kafka.sh` 建了 6 个 topic | 只建 **5 个**；`COMMITDATAINCRE` 是 **auto-create** 来的（RF=1） |
-| 6 | ZK 和 Kafka 用同一个别名 | ZK 用 `node01` + **网卡 A 的 IP**，Kafka 用 `node1` + **网卡 B 的 IP** —— **两套别名，同一台机器** |
-| 7 | 集群总线端口就是业务端口 | 是 **业务端口 + 10000**（`6379` → `16379`） |
-| 8 | `cluster_require_full_coverage` 保持默认 | 两机部署必须 `no`，否则任一 master 挂 = 全集群停写 |
-| 9 | 两台机器能对称容错 | **不能**。主数多的那台挂 = 停写。要两头都活至少 **3 台** |
-| 10 | 源码里的 `application.yml` 改了会生效 | **大段是注释**，不生效。真值在 **Nacos 导出包**里 |
-| 11 | 改 Nacos 就要重编 jar | **不用** —— 华盾交付树的 jar 里 `oms:` 是注释的 ⇒ Nacos 赢 |
-| 12 | `oms:` 和 `spring.redis:` 是一回事 | **两套契约**。集群化时**两个都要改** |
-| 13 | `redisMode: CLUSTER` 也行 | **大小写敏感**，必须小写 `cluster` |
-| 14 | `commitDataIncreProducer` 的 `oms:` 在 Nacos 里 | **不在** —— 只在它的 `bootstrap.yml` 里 |
-| 15 | 2 voter 的 ZK 能容忍 1 个故障 | **不能** —— 2 节点要 2 个都活才有 quorum |
-| 16 | Kafka 的数据在 `/tmp/kafka-logs` 也没事 | `/tmp` 会被清空 ⇒ **重启后消息全丢** |
-| 17 | `spring.kafka.consumer.group-id` 就是消费组名 | ⚠️ **不一定** —— `@KafkaListener(id = "...")` **会覆盖它**（见下） |
-| 18 | 安装包没有多机支持 | ⚠️ **有** —— `install_zk.sh` / `install_kafka.sh` 的 `CLUSTER_HOSTS_ARRAY` 就是多机入口 |
-| 19 | `单机(华盾)\` 下有两个安装包，是两套不同的东西 | ⛔ **是同一个包的升级前后** —— `web_napstar2.0\` 是 `web_install\` 的升级版，**配置沿用**（§0.2） |
-| 20 | 生产 Nacos 有 11 个 dataId | ⛔ **14 个**（7 个带 `oms:`）—— 11 是**升级前**的数字（§0.4） |
-| 21 | 6389 是闲置的第二个实例 | ⛔ **有真实数据** —— `hisDataProducer` / `hisDataSend` 的 `oms:` **就指向 6389**（§2.1） |
-| 22 | `icms-hisDataSend` 这个 dataId 有 `.yaml` 扩展名 | ⛔ **没有扩展名** —— 用 `find -name '*.yaml'` 扫会漏掉它（§0.4） |
-| 23 | 升级前那份配置（11 个 dataId）**完全不能用** | ⛔ **能用** —— **Redis 配置是沿用的**（11 个共有 dataId 里 10 个 `oms:` 逐字相同；5 个带 `spring.redis:` 的里 4 个完全相同），只需补升级版新增的几项（§0.2） |
+| 1 | 生产 Redis 有两个实例（6379 + 6389） | ⛔ **只有一个**（6379）—— `env/redis/` 下**只有 `redis.conf` 一份**，`1start_env.sh` 也只起一个（§2.1） |
+| 2 | 生产 Redis 已经是集群 | 是**一台机器上的一个独立单机**，`cluster-enabled` 是注释的 |
+| 3 | 生产已经是两台机器 | ⛔ **现在是单台**。`install.sh:6-13` 把两个 IP 都设成 `127.0.0.1` ⇒ **扩两台是这次要做的事** |
+| 4 | `2start_kafka.sh` 建了 6 个 topic | 只建 **5 个**；`COMMITDATAINCRE` 是 **auto-create** 来的（RF=1） |
+| 5 | ZK 和 Kafka 用同一个别名 | ZK 用 `node01` + **网卡 A 的 IP**，Kafka 用 `node1` + **网卡 B 的 IP** —— **两套别名，同一台机器** |
+| 6 | 集群总线端口就是业务端口 | 是 **业务端口 + 10000**（`6379` → `16379`） |
+| 7 | `cluster_require_full_coverage` 保持默认 | 两机部署必须 `no`，否则任一 master 挂 = 全集群停写 |
+| 8 | 两台机器能对称容错 | **不能**。主数多的那台挂 = 停写。要两头都活至少 **3 台** |
+| 9 | 源码里的 `application.yml` 改了会生效 | **大段是注释**，不生效。真值在 **Nacos 导出包**里 |
+| 10 | 改 Nacos 就要重编 jar | **不用** —— 华盾交付树的 jar 里 `oms:` 是注释的 ⇒ Nacos 赢 |
+| 11 | `oms:` 和 `spring.redis:` 是一回事 | **两套契约**。集群化时**两个都要改** |
+| 12 | `redisMode: CLUSTER` 也行 | **大小写敏感**，必须小写 `cluster` |
+| 13 | `commitDataIncreProducer` 的 `oms:` 在 Nacos 里 | **不在** —— 只在它的 `bootstrap.yml` 里 |
+| 14 | 2 voter 的 ZK 能容忍 1 个故障 | **不能** —— 2 节点要 2 个都活才有 quorum |
+| 15 | Kafka 的数据在 `/tmp/kafka-logs` 也没事 | `/tmp` 会被清空 ⇒ **重启后消息全丢** |
+| 16 | `spring.kafka.consumer.group-id` 就是消费组名 | ⚠️ **不一定** —— `@KafkaListener(id = "...")` **会覆盖它**（见下） |
+| 17 | 安装包没有多机支持 | ⚠️ **有** —— `install_zk.sh` / `install_kafka.sh` 的 `CLUSTER_HOSTS_ARRAY` 就是多机入口 |
+| 18 | `单机(华盾)\` 下有两个包，是两套不同的东西 | ⛔ **是同一个包的升级前后** —— `web_napstar2.0\` 是 `web_install\` 的升级版（§0.2 / §0.4.2） |
+| 19 | 生产 Nacos 有 14 个 dataId | ⛔ **11 个**（+exp 包 1 个 = 12），**4 个**带 `oms:` —— 14/7 是**升级后**的数字（§0.4） |
+| 20 | 6389 上有数据，迁移要一起迁 | ⛔ **现状没有 6389** ⇒ **只有一份数据要迁**。**动手前先数一遍实例数**（§2.1） |
+| 21 | 升级后（`web_napstar2.0`）的配置才用得上 | ⛔ **现状就用得上这份** —— Redis 配置是**沿用**的，**照这份改**（§0.2 / §0.4.2） |
 
 ### 8.3.1 消费组名：配置里的 `group-id` 不一定是真正的组名
 
@@ -2313,27 +2251,21 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 > ⚠️ **「改 group-id 让两个应用不抢消息」这个做法在有 `id` 的应用上没用** ——
 > 它们的组名是**写在注解里**的，改 Nacos 不影响。
 >
-> 📌 **生产真值（kingbase-napstar2.0 导出包）里各 dataId 的 `group-id`**：
+> 📌 **生产真值（kingbase 导出包）里各 dataId 的 `group-id`**：
 > `icms-rtdataconsumer` = `sac` ·
 > `icms-commitDataIncreProducer` = `test-xy7` ·
 > `napstarweb-controller` = `svg` ·
 > `napstarweb-realalarm-consumer` = `test-xy8` ·
 > `icms-hisDataProducer` = `hisdata-pointconf`。
 >
-> 🔴 **生产确实存在「两套 dataId 抢同一个组名」** ——
-> **`scheviewer.yaml` 与 `napstarweb-controller.yaml` 都是 `group-id: svg`**，
-> 而 **`scheviewer.yaml` 在生产 kingbase 里就有**（不是只有 DM 才有）。
+> ✅ **现状没有「两套 dataId 抢同一个组名」的问题** ——
+> 现状的 11 个 dataId 里，`group-id: svg` **只有 `napstarweb-controller.yaml` 一个**。
 >
-> | dataId | `group-id` | 有 `@KafkaListener` 吗？ | 实际会不会抢 |
-> |---|---|---|---|
-> | `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | `svg` | ✅ `RTListener`（monitor 模块） | — |
-> | `NAPSTARWEB_GROUP/scheviewer.yaml` | `svg` | ⛔ **零个**（sche-viewer-server 全模块扫过：0 处 `@KafkaListener`、0 处 `KafkaTemplate`） | ⛔ **不会** —— 它根本不消费 Kafka |
->
-> ⇒ **配置上撞名，实际不抢消息**（因为 `sche-viewer-server` 不消费 Kafka）。
-> ⚠️ **但别据此把 `scheviewer.yaml` 当成「无关的 dataId」** ——
-> 它带 `oms:`、连着 Redis，**集群化时它的 `oms:` 仍然要改**（§4.7）。
-> ⚠️ **将来若给 `sche-viewer-server` 加 Kafka 消费端，撞名就会变成真问题** ——
-> 那时要把 `scheviewer.yaml` 的 `group-id` 改成别的值。
+> ⚠️ **升级到 `web_napstar2.0` 之后才会有**（§0.4.2）：
+> 新增的 **`scheviewer.yaml` 也是 `group-id: svg`**，与 `napstarweb-controller.yaml` 撞名。
+> 不过 **sche-viewer-server 全模块扫过：0 处 `@KafkaListener`、0 处 `KafkaTemplate`**
+> ⇒ **它根本不消费 Kafka ⇒ 配置上撞名，实际不抢消息**。
+> ⚠️ **但它带 `oms:`、连着 Redis** ⇒ **集群化时它的 `oms:` 仍然要改**（§0.4.2）。
 
 ### 8.4 相关文档
 
@@ -2353,30 +2285,27 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 
 ```
 【现状 → 目标】
-  现在：一台机器（node1）。Redis 6379+6389 两个独立单机、ZK 单节点、Kafka 单 broker
+  现在：一台机器（node1）。Redis 6379 一个独立单机、ZK 单节点、Kafka 单 broker
   目标：两台机器。Redis 3master+3replica、ZK 2 voter、Kafka 2 broker
 
 【配置在哪生效】
   命令行 > jar 内 application.yml > Nacos dataId
   ⚠️ 华盾交付树的 jar 里 oms: 是注释的 ⇒ Nacos 赢 ⇒ 只改 Nacos，不重编 jar
   ⚠️ 源码里的 application.yml 大段是注释 ⇒ 不是真值
-  真值 = 安装包 nacos_config_export_*-napstar2.0.zip 里的 dataId
-        （+ updateconfig\ 的 -update.zip 覆盖层，§0.4.1）
+  真值 = 安装包 nacos_config_export_kingbase.zip 里的 dataId（11 个 / 4 个带 oms:）
+        （+ env/nacos\ 下的 exp 包与 patch 包两层，§0.4.1）
 
 【Redis 扩容成集群】
-  1. ⛔ 先停掉 node1 上现有的 6379 / 6389（两个都在同一台机器上）
-     并注释掉 1start_env.sh 里起 Redis 的两行（否则重启会抢端口）
+  1. ⛔ 先停掉 node1 上现有的 6379（只有一个实例）
+     并注释掉 1start_env.sh 里起 Redis 的那行（否则重启会抢端口）
   2. 端口规划：node1 = 6379/6380/6381（master），node2 = 6382/6383/6384（replica）
-     6389 退役（数据并进集群，不当集群节点）
-     ⚠️ 但 6389 上有数据（hisDataProducer / hisDataSend 连的就是它）⇒ 数据必须一并迁
+     6379 复用为 master #1（清空数据目录后重建）
   3. node2 还要先装 Redis 二进制 + 建 redis 用户
   4. 清空旧数据目录（残留 nodes.conf ⇒ 节点带旧身份启动）
   5. cluster.conf：cluster_require_full_coverage = no（必须）
   6. 放行业务端口 6379-6384 + 总线端口 16379-16384（最容易漏）
-  7. Nacos 里 7 个带 oms: 的 dataId 都要填（redisMode: cluster 小写 + clusters: 6 个节点）
+  7. Nacos 里 4 个带 oms: 的 dataId 都要填（redisMode: cluster 小写 + clusters: 6 个节点）
      + commitDataIncreProducer 的 dataId 要「补」oms: 块
-     ⚠️ hisDataProducer / hisDataSend 的 oms: 原值是 6389，别照抄
-     ⚠️ icms-hisDataSend 没有扩展名，扫 dataId 时别漏
   8. 每个应用也要改 spring.redis:（cluster.nodes 写法，与 oms: 不同）
   9. 判据：启动日志 "*** Using Redis Cluster with nodes: ..." 且没有 Standalone 行
 
@@ -2398,7 +2327,7 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 
 【改造失败怎么退回去】
   ⛔ 前提：旧的 6379 数据目录**必须保留**（那是唯一的退路）
-  退：恢复 redismaster.conf 原配置 + 放回数据目录 → 起单机
+  退：恢复 redis.conf 原配置 + 放回数据目录 → 起单机
   + Nacos 的 oms: 改回 hostname/port（spring.redis: 也要改回）
   + 6389 原封不动起回来
   判据：启动日志出现 "Using Redis Standalone at node1:6379"
