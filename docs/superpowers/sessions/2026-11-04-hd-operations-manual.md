@@ -30,6 +30,11 @@
 > ⚠️ **本轮最重要的产出不是手册本身，而是「我写错了两次」这件事** ——
 > 而两次都是**同一个类型的错误**：**把「我看到的那个环境」当成了「生产」**。
 > 详见 §三。
+>
+> 📌 **【续会补记】** 同一类错误在续会里又出现了一次（**框架判断错**：
+> 把「升级前」那版配置当成了「另一个产品线的真相」）。
+> ⇒ **这一类错误的完整清单与更正见 §三·五。**
+> **下一轮的第一条：先问「版本关系」，再决定要不要改清单。**
 
 ---
 
@@ -75,16 +80,26 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 >
 > - 第一次：我看的是**容器**（`hd-node1`），把它当成了生产；
 > - 第二次：我看的是**容器里那份 DM 导出包**（12 个 dataId、6 个有 `oms:`），
->   把它当成了**生产真值**（实际是 kingbase 那份，**11 个、4 个有**）。
+>   把它当成了**生产真值**（改用了手上 kingbase 那份，**11 个、4 个有**）。
 >
 > ⇒ **「验证环境」与「生产」是两份东西。**
 > ⇒ **写生产文档时，每个数字都要问一句「这是从哪读出来的」。**
 >
+> 📌 **【续会补记】** 这条结论**方向是对的，但「11 个、4 个有」后来被证明是
+> **升级前**那版的数字 ⇒ 真正的生产是 **14 个 / 7 个**（§3.5）。
+> ⇒ **「不是容器那份」是对的；「手上那份就是全部」是错的** ——
+> **还要问「手上那份是哪个版本」。**
+>
 > 📌 **具体到本项目**：
 > - **容器** `hd-node1` = 按安装包重建的**验证环境**（它的 Redis 是 standalone、它的 Nacos 是容器里那份）；
-> - **生产** = 单机版安装包 `D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\`。
+> - **生产** = 安装包 `D:\work\info\web\installpackage\napstar_install\单机(华盾)\` 下的配置。
 > ⇒ **两者的 Nacos 导出包内容不同**（12 vs 11 个 dataId），
 > **不要拿容器那份当生产真值**。
+>
+> ⚠️ **续会补充（§3.5）**：这里的「生产」当时取的是 `web_install\`（**升级前**那版）。
+> **它当时是对的** —— 升级版是它的延续，**Redis 配置逐字沿用**。
+> 但**升级版有增补**（§3.5.1）⇒ **清单要按升级版补全（14/7）**。
+> ⇒ **这条教训要改成：「版本关系要先问清楚」**，不是「升级前那份不能用」。
 
 ### 3.4 顺带纠正的一处「漏查」
 
@@ -94,40 +109,56 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 
 ---
 
-## 三·五、🔴🔴 【2026-11-04 续】本手册的「生产真值」指向了**错的安装包** —— 已更正
+## 三·五、🔴🔴 【2026-11-04 续】生产真值要**按升级版补全** —— 已更正
 
 > **这一节是给下一轮看的第一条。**
-> 下面 §三 / §四 描述的「生产真值 = `web_install` 的 11 个 dataId、4 个有 `oms:`」**是错的**，
-> 手册已在本轮续会里改正。**别照着 §四 行事。**
+> §四 描述的清单（11 个 dataId / 4 个 `oms:`）是**升级前**那版配置的实测产出 ——
+> **它当时是对的**（那就是当时拿到的配置）。
+> 但 **napstar2.0 是 `web_install` 的升级版**，升级版**在旧配置上做了增补** ⇒
+> **清单要按升级版补全**（14 个 dataId / 7 个 `oms:`）。**别照着 §四 的 11/4 行事。**
 
-### 3.5.1 根因：`单机(华盾)\` 下有**两个**安装包，手册选了错的那个
+### 3.5.1 关键前提：`web_napstar2.0` 是 `web_install` 的**升级版**，配置**沿用**
 
-| | **`web_napstar2.0\`** ← 真相 | `web_install\` ← 手册原来指的 |
+> 📌 **用户明确说明**：升级前后是**同一个包的版本升级**，
+> **Nacos 配置在升级版里继续沿用**（不是两套独立配置）。
+> ⇒ **上一轮拿到的 `web_install` 那份配置本身有效，不是「选错了包」。**
+> ⇒ **上一轮没有犯错** —— 只是**没覆盖到升级版新增的部分**。
+
+**实测逐字 diff（`web_install` vs `web_napstar2.0` 的 kingbase 导出包）**：
+
+| 项 | 结果 |
+|---|---|
+| 11 个**共有** dataId 的 `oms:` 块 | **10 个逐字相同**（只有 `icms-hisDataProducer.yaml` 不同） |
+| 5 个带 `spring.redis:` 的 dataId | **4 个 host/port/database 完全相同**（只有 `icms-hisDataProducer.yaml` 不同） |
+| 整体文件 | 4 个相同 · **7 个不同**（差异集中在 datasource / `helper-dialect` / `alarmParam` / `kafkabus` 的 `aname` / `svg` 符号表 —— **都跟 Redis 无关**） |
+
+⇒ **Redis 配置是沿用的。** 升级版相对旧版，**Redis 相关的变化只有三处**：
+
+| # | 变化 | 说明 |
 |---|---|---|
-| Nacos 导出包 | `…-napstar2.0.zip` | `nacos_config_export_kingbase.zip` |
-| dataId 数 | **14** | 11 |
-| 带 `oms:` 的 | **7** | 4 |
-| Redis 实例 | **2 个**（`redismaster.conf` 6379 + `redis.conf` 6389 + `redis-full.conf`） | **1 个**（`redis.conf` 6379，redis 6.0.6） |
-| `1start_env.sh` 起几个 Redis | **2 个** | 1 个 |
+| 1 | **新增 3 个 dataId** | `scheviewer.yaml`（带 `oms:`）· `icms-hisDataSend`（带 `oms:`，**无扩展名**）· `hisdataproducer-ext.yaml`（不带 `oms:`） |
+| 2 | **`icms-hisDataProducer.yaml` 的 Redis 从 6379 改成 6389** | 旧版**没有** `oms:` 块、`spring.redis:` 是 `node1:6379`；新版**新增** `oms:` 块且**两个都是 6389** |
+| 3 | **Redis 实例从 1 个变 2 个** | 新版才有 6389（`redis.conf`）与 `redismaster.conf`（6379）并存 |
 
-**判据（实测 MD5）**：容器 `hd-node1` 的 `/pkg` 里 7 个文件
-（`install_redis.sh` / `redis.conf` / `redismaster.conf` / `redis-full.conf` /
-`1start_env.sh` / `2start_kafka.sh` / `3start_nacos.sh`）
-**与 `web_napstar2.0` 逐字节相同**，与 `web_install` 都不同
-⇒ **容器复现的是 `web_napstar2.0`** ⇒ **napstar2.0 的真值取 `web_napstar2.0`**。
+### 3.5.2 补全后的真值（**14 个 dataId / 7 个有 `oms:`**）
 
-### 3.5.2 更正后的真值（**14 个 dataId / 7 个有 `oms:`**）
+| dataId | 应用 | 有 `oms:`？ | 值 | 相对旧版 |
+|---|---|---|---|---|
+| `MODELSERVER_GROUP/icms-controller.yaml` | model-controller | ✅ | `node1` / `6379` | 沿用 |
+| `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | rtdata-consumer | ✅ | 同上 | 沿用 |
+| `MODELSERVER_GROUP/icms-real-controller.yaml` | realserver | ✅ | 同上 | 沿用 |
+| `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | web-controller | ✅ | 同上 | 沿用 |
+| **`MODELSERVER_GROUP/icms-hisDataProducer.yaml`** | hisDataProducer | ✅ | ⭐ **`port: 6389`** | ⚠️ **改了** |
+| **`MODELSERVER_GROUP/icms-hisDataSend`** | hisDataSend | ✅ | ⭐ **`port: 6389`**（**dataId 无扩展名**） | ⭐ **新增** |
+| **`NAPSTARWEB_GROUP/scheviewer.yaml`** | sche-viewer-server | ✅ | `node1` / `6379` | ⭐ **新增** |
+| `MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml` | commitDataIncreProducer | ⛔ 没有 | —— | 沿用（仍无 `oms:`） |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ⛔ 没有 | —— | 沿用 |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml` | realalarmproducer | ⛔ 没有 | —— | 沿用 |
+| `DEFAULT_GROUP/hisdataproducer-ext.yaml` | —— | ⛔ 没有 | —— | ⭐ **新增** |
+| `DEFAULT_GROUP/jk.yaml` · `napstarmappingconfig.yaml` · `NAPSTARWEB_GROUP/kafkabus.yaml` | —— | ⛔ 没有 | —— | 沿用 |
 
-| dataId | 应用 | 有 `oms:`？ | 值 |
-|---|---|---|---|
-| `MODELSERVER_GROUP/icms-controller.yaml` | model-controller | ✅ | `node1` / `6379` |
-| `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | rtdata-consumer | ✅ | 同上 |
-| `MODELSERVER_GROUP/icms-real-controller.yaml` | realserver | ✅ | 同上 |
-| `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | web-controller | ✅ | 同上 |
-| **`MODELSERVER_GROUP/icms-hisDataProducer.yaml`** | hisDataProducer | ✅ | ⭐ **`port: 6389`** |
-| **`MODELSERVER_GROUP/icms-hisDataSend`** | hisDataSend | ✅ | ⭐ **`port: 6389`**（**dataId 无扩展名**） |
-| **`NAPSTARWEB_GROUP/scheviewer.yaml`** | sche-viewer-server | ✅ | `node1` / `6379` |
-| `MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml` | commitDataIncreProducer | ⛔ 没有 | —— |
+⇒ **7 个有 `oms:`，全部是单机形态**（无 `redisMode`、无 `clusters:`），
+且 **7 个的 `oms.database` 全是 `0`**（实测 7/7）。
 | `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ⛔ 没有 | —— |
 | `NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml` | realalarmproducer | ⛔ 没有 | —— |
 | `DEFAULT_GROUP/hisdataproducer-ext.yaml` / `jk.yaml` / `napstarmappingconfig.yaml` / `NAPSTARWEB_GROUP/kafkabus.yaml` | —— | ⛔ 没有 | —— |
@@ -141,11 +172,12 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 |---|---|---|
 | 1 | **`hisDataProducer` / `hisDataSend` 的 `oms:` 指向 `6389`** | 它们连的是**第二个实例** ⇒ 只改 6379 那批 ⇒ 这俩留在单机；且 **6389 的数据必须一并迁** |
 | 2 | **`icms-hisDataSend` 没有 `.yaml` 扩展名** | 用 `find -name '*.yaml'` 扫会漏 ⇒ 7 变 6。**数 dataId 要用 `find -type f`** |
-| 3 | **`scheviewer.yaml` 在生产 kingbase 里就有**（不是只有 DM 才有） | 它带 `oms:` ⇒ 集群化必须一起改；且它有 **15 处裸 `executePipelined`** ⇒ 切集群前必须先修 |
+| 3 | **`scheviewer.yaml` 是升级版新增的**（带 `oms:`） | 它带 `oms:` ⇒ 集群化必须一起改；且它有 **15 处裸 `executePipelined`** ⇒ 切集群前必须先修 |
 
-### 3.5.4 §8.3.1 的「生产没有组名撞车」**也是错的**
+### 3.5.4 §8.3.1 的「生产没有组名撞车」**要补一句**
 
-`scheviewer.yaml` 与 `napstarweb-controller.yaml` **都是 `group-id: svg`** ⇒ 生产**确实**撞名。
+`scheviewer.yaml`（升级版新增）与 `napstarweb-controller.yaml` **都是 `group-id: svg`**
+⇒ 升级版**确实**撞名。
 不过 **sche-viewer-server 零 `@KafkaListener`、零 `KafkaTemplate`** ⇒ **实际不消费 Kafka ⇒ 不会真抢消息**。
 ⇒ **配置上撞名，实际不抢**；但**它的 `oms:` 仍然要改**。
 
@@ -157,26 +189,36 @@ b6084a2  docs(hd): correct the huarding topology to a single machine that grows 
 它只含 **3~4 个**被改过的 dataId，**盖在基础导出包上面**（DB URL `node2`→`node1`、
 去掉 `/rtwebsocket/**` 的 anon 权限）。
 ⇒ **真值 = 基础包 + update 包（后者在后）**。
+
+**实测：update 包是基于「升级版」基线的补丁**，不是基于旧版：
+与升级版基线差 **4 / 4 / 12** 行，与旧版差 **12 / 27 / 31** 行。
 💡 **好消息：update 层不碰 `oms:`**（实测 update 包的 `oms:` 与基础包逐字相同）。
 
 ### 3.5.6 手册已改的地方
 
-`§0.2`（指向 + 两包对照表 + MD5 判据）· `§0.4`（14/7 清单）· `§0.4.1`（**新增** update 层）·
+`§0.2`（指向 + **升级前/升级后**对照 + 「配置沿用」实测 + MD5 判据）·
+`§0.4`（14/7 清单 + **「相对旧版」列**）· `§0.4.1`（**新增** update 层）·
 `§2.1`（6389 有真实数据）· `§4.2`（补 3 个 dataId）· `§4.7`（汇总表 9 行）·
 `§4.8`（验证循环加 3 个 app）· `§6.1`（2 行新症状）· `§7.4`（巡检第 10 条）·
-`§8.3`（易错点 19~22）· `§8.3.1`（组名撞车更正）· `§8`（文件布局）· `§9`（一页速查）
+`§8.3`（易错点 19~23）· `§8.3.1`（组名撞车补充）· `§8`（文件布局）· `§9`（一页速查）
 
-> ⚠️ **本轮我自己也犯了同一个错**：第一次写 §0.4 时用了 `find -name '*.yaml'`，
-> 漏掉 `icms-hisDataSend` ⇒ 把 **7 个写成 6 个**。
-> **是「逐条重新数一遍 + 用脚本独立复算」把它抓出来的。**
-> ⇒ **这条教训与 §十一 同级：数字必须能被独立复算，不能靠「我数过了」。**
+> 📌 **本轮的两条教训**：
+>
+> | # | 教训 | 级别 |
+> |---|---|---|
+> | 1 | **框架判断错了**：我一度把 `web_install` 当成「另一个产品线的真相」⇒ 手册里写成「两个包，别拿错」。**实际是同一个包的升级前后，配置沿用。** ⇒ **升级关系要先问清楚，再决定要不要改清单** —— 不清楚就**先问**，别自己推 | ⭐⭐ |
+> | 2 | **数字算错了**：第一次写 §0.4 时用了 `find -name '*.yaml'`，漏掉 `icms-hisDataSend` ⇒ 把 **7 个写成 6 个**。**是「用脚本独立复算每个数字」把它抓出来的** | ⭐ |
+>
+> ⇒ **两条合起来**：**结论（14/7）是对的，但得出它的框架一开始是错的。**
+> **「对」不代表「过程对」** —— 下一轮别把「结论正确」当成「方法正确」的证据。
 
 ---
 
 ## 四、⭐ 生产配置真值清单（本轮的实测产出）
 
-> ⚠️ **⚠️ 本节已被 §三·五 更正 —— 下面的清单是 `web_install` 那份（11 个 / 4 个 `oms:`），
-> **不是** napstar2.0 的真相。真相见 §3.5.2。**
+> ⚠️ **⚠️ 本节是「升级前」那版配置的实测产出 —— 11 个 dataId / 4 个 `oms:`。**
+> **它当时是对的**（那就是当时手上拿到的配置，且 Redis 部分与升级版**逐字沿用**）。
+> **但要按升级版补全**：14 个 dataId / 7 个 `oms:` ⇒ **真相见 §3.5.2。**
 
 来源：`D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\nacos\nacos_config_export_kingbase.zip`
 （**11 个 dataId**，逐个扫过全部）：
@@ -319,8 +361,9 @@ sed -i 's|zookeeper.connect=localhost:2181|zookeeper.connect=node1:2181|g' $kafk
 
 | 项 | 状态 |
 |---|---|
-| 仓库 | 工作区**干净**，HEAD = `8a78d14`，**已推送**（`rev-list --left-right --count` = `0 0`） |
-| 手册 | `docs/HD-OPERATIONS.md` **2196 行 / 10 章** |
+| 仓库 | 工作区**干净**，HEAD = `a0a9295`（续会提交），**已推送**（`rev-list --left-right --count` = `0 0`） |
+| 手册 | `docs/HD-OPERATIONS.md` **见续会后的行数 / 10 章** |
+| 真值指向 | **升级版 `web_napstar2.0`**（14 dataId / 7 `oms:`）+ `updateconfig` 覆盖层（§3.5） |
 | 脱敏 | 真实内网 IP / 口令 **0 处残留**（按 `OPERATIONS.md` 的惯例脱敏） |
 | `tests/check_syntax.sh` | `TOTAL=46 FAIL=0` |
 | `tests/validate_libs.sh` | `PASS=54 FAIL=0` |
@@ -332,8 +375,8 @@ sed -i 's|zookeeper.connect=localhost:2181|zookeeper.connect=node1:2181|g' $kafk
 
 | # | 事 | 严重度 | 说明 |
 |---|---|---|---|
-| **1** | **实施时抽查生产 Nacos 的实时值** | 🟡 | 手册以 **`web_napstar2.0` 的 kingbase-napstar2.0 导出包**为准（+ `updateconfig` 覆盖层）。若运维后来手工改过 `oms:`，**以控制台为准**，并同步回手册 |
-| **1b** | **确认生产上跑的到底是哪个包** | 🔴 | `单机(华盾)\` 下有**两个**（§3.5.1）⇒ 上生产前**先核对现场**是 `web_napstar2.0` 还是 `web_install`（Redis 实例数一眼可辨：1 个还是 2 个） |
+| **1** | **实施时抽查生产 Nacos 的实时值** | 🟡 | 手册以 **升级版 `web_napstar2.0` 的 kingbase-napstar2.0 导出包**为准（+ `updateconfig` 覆盖层）。若运维后来手工改过 `oms:`，**以控制台为准**，并同步回手册 |
+| **1b** | **确认生产上装的是升级前还是升级后的包** | 🟡 | `web_napstar2.0` 是 `web_install` 的**升级版**，**配置沿用**（§3.5.1）⇒ 现场核对 Redis 实例数即可：**起 2 个**（6379+6389）= 升级版；**起 1 个** = 升级前。**两者 Redis 配置除 `icms-hisDataProducer` 外逐字相同** ⇒ 清单以升级版（14/7）为准，两种情况都能覆盖 |
 | **2** | **真机上跑一遍 §3** | 🟡 | 跑通后可把「未在真机验证」的标记改成「已实测」 |
 | **3** | **`monitor` 另外 5 处集群分支的运行时覆盖** | 🟡 | D11 仍未变（C/D/E/F 需 SVG 文件或订阅，`RTListener` 需一条 Kafka 消息） |
 | **4** | **交付方确认交付流程** | 🔴 | 「先编 platform 再 `mvn install`」吗？若是 ⇒ 在此之前**禁止 install 树 A 的 platform**、**禁止把区间切到 `[3.0.0,4.0.0)`**（D9） |

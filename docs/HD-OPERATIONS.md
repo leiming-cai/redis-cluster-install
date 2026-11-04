@@ -76,24 +76,38 @@
 >   └─ nacos_config_export_postgresql-napstar2.0-update.zip
 > ```
 >
-> ⛔ **`单机(华盾)\` 下有**两个**安装包，别拿错** ——
+> 📌 **`单机(华盾)\` 下是同一个包的**两个版本** —— `web_napstar2.0\` 是 `web_install\` 的**升级版**：
 >
-> | | **`web_napstar2.0\`** ← 本文引用 | `web_install\` |
+> | | `web_install\`（升级前） | **`web_napstar2.0\`**（升级后）← 本文引用 |
 > |---|---|---|
-> | Nacos 导出包 | `…-napstar2.0.zip` | `nacos_config_export_kingbase.zip` |
-> | dataId 数 | **14** | 11 |
-> | 带 `oms:` 的 | **7** | 4 |
-> | Redis 实例 | **2 个**（`redismaster.conf` 6379 + `redis.conf` 6389 + `redis-full.conf`） | **1 个**（`redis.conf` 6379，redis 6.0.6） |
-> | `1start_env.sh` 起几个 Redis | **2 个** | 1 个 |
+> | Nacos 导出包 | `nacos_config_export_kingbase.zip` | `…-napstar2.0.zip` |
+> | dataId 数 | 11 | **14** |
+> | 带 `oms:` 的 | 4 | **7** |
+> | Redis 实例 | 1 个（`redis.conf` 6379，redis 6.0.6） | **2 个**（`redismaster.conf` 6379 + `redis.conf` 6389 + `redis-full.conf`） |
+> | `1start_env.sh` 起几个 Redis | 1 个 | **2 个** |
 >
-> **判据（实测 MD5，容器 `hd-node1` 的 `/pkg`）**：
+> ⭐ **配置是沿用的**（实测逐字 diff）——
+> **11 个共有 dataId 里，10 个的 `oms:` 块逐字相同**；
+> **5 个带 `spring.redis:` 的里，4 个的 host/port/database 完全相同。**
+> ⇒ **升级版的 Redis 配置 = 升级前的 + 一点增量**，**照旧配置改就行**。
+>
+> **升级版相对升级前，只有这些 Redis 相关变化**：
+>
+> | # | 变化 | 说明 |
+> |---|---|---|
+> | 1 | **新增 3 个 dataId** | `NAPSTARWEB_GROUP/scheviewer.yaml`（带 `oms:`）· `MODELSERVER_GROUP/icms-hisDataSend`（带 `oms:`，**无扩展名**）· `DEFAULT_GROUP/hisdataproducer-ext.yaml`（不带 `oms:`） |
+> | 2 | **`icms-hisDataProducer.yaml` 的 Redis 从 6379 改成 6389** | 升级前**没有** `oms:` 块、`spring.redis:` 是 `node1:6379`；升级后**新增** `oms:` 块且**两个都是 6389** |
+> | 3 | **Redis 实例从 1 个变 2 个** | 升级版才有 6389（`redis.conf`）与 `redismaster.conf`（6379）并存 |
+>
+> ⛔ **这三点是「照旧配置改」会漏掉的部分** —— 详见 §0.4 的「三个最容易踩的点」。
+>
+> 📌 **判据（实测 MD5，容器 `hd-node1` 的 `/pkg`）**：
 > `/pkg/env/redis/install_redis.sh`、`/pkg/env/redis/redis.conf`、
 > `/pkg/env/redis/redismaster.conf`、`/pkg/env/redis/redis-full.conf`、
 > `/pkg/bin/1start_env.sh`、`/pkg/bin/2start_kafka.sh`、`/pkg/bin/3start_nacos.sh`
 > —— **7 个文件全部与 `web_napstar2.0` 逐字节相同**（`f91df93c…` / `b9d392b3…` /
-> `c0ac44b9…` / `facf8bc6…` / `983fe4e7…` / `d15bc539…` / `d747a9f2…`），
-> **与 `web_install` 的都不同**。
-> ⇒ **本文讲的是 napstar2.0，真值取 `web_napstar2.0`。**
+> `c0ac44b9…` / `facf8bc6…` / `983fe4e7…` / `d15bc539…` / `d747a9f2…`）。
+> ⇒ **验证环境复现的是升级版。**
 >
 > ⚠️ **别拿容器里 `x86` 那套 `cpsweb_install` 的 DM 导出包当生产真值** ——
 > 它有 `PORTAL_GROUP` / `oauth-gateway` 等**另一条产品线**的 dataId。
@@ -173,7 +187,7 @@ NAPSTARWEB_GROUP/kafkabus.yaml
 NAPSTARWEB_GROUP/napstarweb-controller.yaml
 NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml
 NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml
-NAPSTARWEB_GROUP/scheviewer.yaml            ← ⭐ web_install 那份里没有
+NAPSTARWEB_GROUP/scheviewer.yaml            ← ⭐ 升级版新增
 ```
 
 > 📌 **`icms-hisDataSend` 没有 `.yaml` 扩展名** —— 找 dataId 时
@@ -183,19 +197,19 @@ NAPSTARWEB_GROUP/scheviewer.yaml            ← ⭐ web_install 那份里没有
 
 **哪些 dataId 里有 `oms:` 块**（**逐个扫过全部 14 个**）：
 
-| dataId | 应用 | 有 `oms:`？ | 现在的值 |
-|---|---|---|---|
-| `MODELSERVER_GROUP/icms-controller.yaml` | model-controller | ✅ | `hostname: node1` / `port: 6379` |
-| `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | rtdata-consumer | ✅ | 同上 |
-| `MODELSERVER_GROUP/icms-real-controller.yaml` | realserver | ✅ | 同上 |
-| `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | web-controller | ✅ | 同上 |
-| **`MODELSERVER_GROUP/icms-hisDataProducer.yaml`** | **hisDataProducer** | ✅ | ⭐ **`port: 6389`**（不是 6379！） |
-| **`MODELSERVER_GROUP/icms-hisDataSend`** | **hisDataSend** | ✅ | ⭐ **`port: 6389`** |
-| **`NAPSTARWEB_GROUP/scheviewer.yaml`** | **sche-viewer-server** | ✅ | `port: 6379` |
-| **`MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml`** | commitDataIncreProducer | ⛔ **没有** | —— |
-| `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ⛔ 没有 | —— |
-| `NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml` | realalarmproducer | ⛔ 没有 | —— |
-| 其余 4 个（`hisdataproducer-ext` / `jk` / `napstarmappingconfig` / `kafkabus`） | —— | ⛔ 没有 | —— |
+| dataId | 应用 | 有 `oms:`？ | 现在的值 | 相对升级前 |
+|---|---|---|---|---|
+| `MODELSERVER_GROUP/icms-controller.yaml` | model-controller | ✅ | `hostname: node1` / `port: 6379` | 沿用 |
+| `MODELSERVER_GROUP/icms-rtdataconsumer.yaml` | rtdata-consumer | ✅ | 同上 | 沿用 |
+| `MODELSERVER_GROUP/icms-real-controller.yaml` | realserver | ✅ | 同上 | 沿用 |
+| `NAPSTARWEB_GROUP/napstarweb-controller.yaml` | web-controller | ✅ | 同上 | 沿用 |
+| **`MODELSERVER_GROUP/icms-hisDataProducer.yaml`** | **hisDataProducer** | ✅ | ⭐ **`port: 6389`**（不是 6379！） | ⚠️ **改了** —— 升级前无 `oms:`、`spring.redis:` 是 6379 |
+| **`MODELSERVER_GROUP/icms-hisDataSend`** | **hisDataSend** | ✅ | ⭐ **`port: 6389`** | ⭐ **新增** dataId |
+| **`NAPSTARWEB_GROUP/scheviewer.yaml`** | **sche-viewer-server** | ✅ | `port: 6379` | ⭐ **新增** dataId |
+| **`MODELSERVER_GROUP/icms-commitDataIncreProducer.yaml`** | commitDataIncreProducer | ⛔ **没有** | —— | 沿用（仍无 `oms:`） |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-consumer.yaml` | realalarmconsumer | ⛔ 没有 | —— | 沿用 |
+| `NAPSTARWEB_GROUP/napstarweb-realalarm-producer.yaml` | realalarmproducer | ⛔ 没有 | —— | 沿用 |
+| 其余 4 个（`hisdataproducer-ext` / `jk` / `napstarmappingconfig` / `kafkabus`） | —— | ⛔ 没有 | —— | 3 个沿用 + 1 个新增（`hisdataproducer-ext`） |
 
 ⇒ **7 个 dataId 有 `oms:`，而且**全部是单机形态**
 （`hostname` + `port`，**没有 `redisMode`、没有 `clusters:`**）。
@@ -203,12 +217,17 @@ NAPSTARWEB_GROUP/scheviewer.yaml            ← ⭐ web_install 那份里没有
 > ⭐ **本文以「当前这份」为准** —— 即上面那份 kingbase-napstar2.0 导出包
 > （**14** 个 dataId、**7** 个有 `oms:`）。这就是改造时**要照着改的那一份**。
 >
-> 🔴 **三个最容易踩的点**（都比「少一个 dataId」严重）：
+> 💡 **好消息：绝大多数配置是沿用的** —— 升级前那份（11 个 dataId / 4 个 `oms:`）
+> **本来是对的**，只是**少了升级版新增的这几项**。逐字 diff 实测：
+> **11 个共有 dataId 里，10 个的 `oms:` 块完全相同**。
+> ⇒ **照旧配置改就行，只需额外处理下面这三条。**
+>
+> 🔴 **三个最容易踩的点**（都是升级版相对旧版的增量）：
 >
 > | # | 点 | 后果 |
 > |---|---|---|
 > | 1 | **`icms-hisDataProducer.yaml` 与 `icms-hisDataSend` 的 `oms:` 指向 `port: 6389`** | 它们的 `spring.redis:` **也**是 6389 ⇒ **两个 6389 应用**都连第二个实例。只改 6379 那批 ⇒ **这俩继续连旧单机** |
-> | 2 | **`scheviewer.yaml` 在生产 kingbase 里就有**（不是只有 DM 才有） | 它带 `oms:` ⇒ 集群化时**必须一起改**，否则 `sche-viewer-server` 留在单机 |
+> | 2 | **`scheviewer.yaml` 是升级版新增的**（带 `oms:`） | 集群化时**必须一起改**，否则 `sche-viewer-server` 留在单机 |
 > | 3 | **`icms-hisDataSend` 这个 dataId 没有扩展名** | 用 `find -name '*.yaml'` 扫会**漏掉它** ⇒ 漏改它 ⇒ **7 变成 6** |
 >
 > ⚠️ **`scheviewer.yaml` 与 `napstarweb-controller.yaml` 用同一个 `group-id: svg`**
@@ -412,7 +431,7 @@ redis.conf:1408        appendonly no
 > ⇒ **集群化是一次重构（要迁数据 + 加机器），不是一次配置切换。**
 >
 > 🔴 **⚠️ 而且 6389 不是「闲置的第二个实例」—— 它上面有真实数据。**
-> napstar2.0 的生产 Nacos 里**两个应用连的是 6389**（§0.4）：
+> napstar2.0 升级版的生产 Nacos 里**两个应用连的是 6389**（§0.4）：
 >
 > | 应用 | dataId | `oms:` 端口 | `spring.redis:` 端口 |
 > |---|---|---|---|
@@ -1323,6 +1342,10 @@ jinfo -sysprops <kafka 的 pid> 2>/dev/null | grep MaxHeapSize
 > ⚠️ **这里的「另外」是相对 §4.2 上表那 4 个应用而言** ——
 > 生产真值共 **14** 个 dataId，上表只覆盖 4 个应用。
 > **下面每一个都要单独判断「它在不在这次改造范围」。**
+>
+> 📌 **其中 3 个是升级版新增的**（升级前那 11 个 dataId 里没有）：
+> `scheviewer.yaml` · `icms-hisDataSend` · `hisdataproducer-ext.yaml`。
+> ⇒ **照升级前的清单改会漏掉它们。**
 
 | dataId | 应用 | 有 `oms:`？ | 用的是哪套 Redis 配置 | 说明 |
 |---|---|---|---|---|
@@ -2267,10 +2290,11 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 | 16 | Kafka 的数据在 `/tmp/kafka-logs` 也没事 | `/tmp` 会被清空 ⇒ **重启后消息全丢** |
 | 17 | `spring.kafka.consumer.group-id` 就是消费组名 | ⚠️ **不一定** —— `@KafkaListener(id = "...")` **会覆盖它**（见下） |
 | 18 | 安装包没有多机支持 | ⚠️ **有** —— `install_zk.sh` / `install_kafka.sh` 的 `CLUSTER_HOSTS_ARRAY` 就是多机入口 |
-| 19 | `单机(华盾)\` 下只有一个安装包 | ⛔ **有两个** —— `web_napstar2.0\`（本文引用）与 `web_install\`。**Redis 实例数、dataId 数都不一样**（§0.2） |
-| 20 | 生产 Nacos 有 11 个 dataId | ⛔ **14 个**（7 个带 `oms:`）—— 11 是 `web_install\` 那份的数字（§0.4） |
+| 19 | `单机(华盾)\` 下有两个安装包，是两套不同的东西 | ⛔ **是同一个包的升级前后** —— `web_napstar2.0\` 是 `web_install\` 的升级版，**配置沿用**（§0.2） |
+| 20 | 生产 Nacos 有 11 个 dataId | ⛔ **14 个**（7 个带 `oms:`）—— 11 是**升级前**的数字（§0.4） |
 | 21 | 6389 是闲置的第二个实例 | ⛔ **有真实数据** —— `hisDataProducer` / `hisDataSend` 的 `oms:` **就指向 6389**（§2.1） |
 | 22 | `icms-hisDataSend` 这个 dataId 有 `.yaml` 扩展名 | ⛔ **没有扩展名** —— 用 `find -name '*.yaml'` 扫会漏掉它（§0.4） |
+| 23 | 升级前那份配置（11 个 dataId）**完全不能用** | ⛔ **能用** —— **Redis 配置是沿用的**（11 个共有 dataId 里 10 个 `oms:` 逐字相同；5 个带 `spring.redis:` 的里 4 个完全相同），只需补升级版新增的几项（§0.2） |
 
 ### 8.3.1 消费组名：配置里的 `group-id` 不一定是真正的组名
 
