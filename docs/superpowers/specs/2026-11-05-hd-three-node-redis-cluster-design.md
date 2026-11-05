@@ -17,7 +17,8 @@
 > **3 个 master 分到 2 台机器，必有一台承担 2 个 ⇒ 那台挂掉集群停写**。
 > ��是**算术**，不是配置能绕过的（`docs/superpowers/specs/2026-10-28-two-node-cluster-assembly-design.md` §3.5）。
 >
-> ⇒ **三台机器不是「多一台冗余」，而是第一次让「挂掉任意一台集群仍能服务」成为可能。**
+> ⇒ **三台机器不是「多一台冗余」，而是第一次让「挂掉任意一台，集群全量可写」成为可能。**
+> （推导与仓库 E2E 已实测的 DoD5 / A4 / A5 对照见 §6。）
 
 本轮的目标：把华盾 Redis 的目标方案改成 **三台 × 每台 2 个实例（每台 6379+6380）= 3 主 3 从**，
 并让手册、配置模板和脚本提示三者与之一致。
@@ -33,9 +34,11 @@
 
 | # | 事 | 说明 |
 |---|---|---|
-| 1 | `cluster-config.sh` 的**容错提示**修正 | 提示要考虑 `cluster_require_full_coverage`（§4.2）—— 这是**唯一**的代码改动 |
-| 2 | `cluster.conf.hd.example`（**新建**） | 三台机器的完整样例配置（§4.4） |
-| 3 | `docs/HD-OPERATIONS.md` 的 **Redis 相关章节** | 「两台」→「三台」、端口规划、容错边界、端口表、一页速查（§4.5） |
+| 1 | `lib/cluster.sh` 新增纯函数 `cluster_failure_verdict` + `cluster-config.sh` 的 `print_topology` 调用它 | 容错提示要考虑 `cluster_require_full_coverage`（§4.2）—— 这是**唯一**的代码改动 |
+| 2 | `scripts/e2e-cluster-config.sh` 的 A3 断言同步 | 它断言的正是本轮要改的措辞（§4.2）—— **不改就会红** |
+| 3 | `tests/check_syntax.sh` 补上 `cluster-config.sh` | 它**本来就不在**检查清单里（§4.6） |
+| 4 | `cluster.conf.hd.example`（**新建**） | 三台机器的完整样例配置（§4.4） |
+| 5 | `docs/HD-OPERATIONS.md` 的 **Redis 相关章节** | 「两台」→「三台」、端口规划、容错边界、端口表、一页速查（§4.5） |
 
 ### 2.2 不在范围内
 
@@ -118,8 +121,12 @@ fi
 「if it fails the cluster keeps serving (degraded)」。
 
 **但这是错的**：`cluster-require-full-coverage yes` 的语义是「**只要有槽位没被覆盖，集群就拒绝一切写入**」
-（`CLUSTERDOWN`）。三机挂掉任意一台**必然**有一个 master 的槽位无人接管
-（它的副本与它同机，一起挂了）⇒ 有槽位未覆盖 ⇒ `yes` 时**全集群停写**。
+（`CLUSTERDOWN`）。而脚本的「keeps serving」抹掉了**两个**真实存在的限制：
+
+| 限制 | 什么时候存在 |
+|---|---|
+| **提升窗口** | master 挂掉到它的副本被提升之间（`cluster-node-timeout 15000`）⇒ 它的槽位无人覆盖 ⇒ `yes` 时**全集群停写这 15 秒** |
+| **无多数派时永久停写** | 挂掉承担多数派 master 的那台（两台布局）⇒ 副本不能提升 ⇒ 槽位永远无人覆盖 ⇒ `yes` 时**永久停写** |
 
 ⚠️ **这不是三机引入的** —— 两机时 `yes` 同样会停写，脚本同样在骗人。
 三机只是让三台**全部**打印成「keeps serving」，错得更整齐。
@@ -175,19 +182,60 @@ replica node3:6380 -> master node1:6379
 
 ### 4.2 `cluster-config.sh`：容错提示考虑覆盖率（唯一的代码改动）
 
-改 `print_topology`（`cluster-config.sh` 第 130 行附近）：
+**问题**：`print_topology` 打印容错结论时**完全不看** `CONF_REQUIRE_FULL_COVERAGE`，
+于是无论 `yes` 还是 `no` 都印同一句话 —— 而这两句话在两种配置下**结论相反**。
 
-| `CONF_REQUIRE_FULL_COVERAGE` | 改后的措辞 |
-|---|---|
-| `no` | **保持现状**：`if it fails the cluster keeps serving (degraded)` |
-| `yes` | `if it fails the cluster STOPS accepting writes (CLUSTERDOWN) — a master's slots are left uncovered` |
+**改法**：把措辞抽成一个**纯函数**放到 `lib/cluster.sh`（可单测），
+`cluster-config.sh` 的 `print_topology` 调用它：
+
+```bash
+# lib/cluster.sh
+# cluster_failure_verdict SURVIVES REQUIRE_FULL_COVERAGE
+#   SURVIVES = "yes" | "no"     —— 挂掉这台机器后，多数派是否还在
+#   REQUIRE_FULL_COVERAGE = "yes" | "no"
+# Echoes the verdict for "what happens if this host dies".
+cluster_failure_verdict() {
+    local survives="$1" coverage="$2"
+    if [ "$survives" = "yes" ]; then
+        if [ "$coverage" = "yes" ]; then
+            printf 'the cluster refuses every write until the replica is promoted (~15s), then serves again'
+        else
+            printf 'the cluster keeps serving (degraded): the failed master'"'"'s slots are unavailable until its replica is promoted'
+        fi
+    else
+        if [ "$coverage" = "yes" ]; then
+            printf 'the cluster STOPS serving (no quorum to promote a replica, and cluster-require-full-coverage=yes refuses every write)'
+        else
+            printf 'the cluster keeps serving the surviving masters'"'"' slots only (no quorum to promote a replica)'
+        fi
+    fi
+}
+```
+
+四种组合的完整真值表（**这张表就是 §6 的判定标准**）：
+
+| `SURVIVES` | `REQUIRE_FULL_COVERAGE` | 措辞 |
+|---|---|---|
+| `yes` | `no` | `the cluster keeps serving (degraded): the failed master's slots are unavailable until its replica is promoted` |
+| `yes` | `yes` | `the cluster refuses every write until the replica is promoted (~15s), then serves again` |
+| `no` | `no` | `the cluster keeps serving the surviving masters' slots only (no quorum to promote a replica)` |
+| `no` | `yes` | `the cluster STOPS serving (no quorum to promote a replica, and cluster-require-full-coverage=yes refuses every write)` |
 
 ⚠️ **`lib/topology.sh` 保持纯函数** —— 它是「输入进、输出进全局」的无副作用模块，
 引入 `CONF_*` 依赖会破坏它「可单测」的属性（文件头自己写着这一点）。
-覆盖率相关的措辞**只**放在 `cluster-config.sh` 的 `print_topology` 里。
+覆盖率相关的措辞**只**放在 `lib/cluster.sh` 的纯函数 + `cluster-config.sh` 的 `print_topology` 里。
 
-**配套单测**（`tests/validate_libs.sh`）：断言 `print_topology` 在 `yes` 时输出
-`STOPS accepting writes`、在 `no` 时输出 `keeps serving`。
+⚠️ **`scripts/e2e-cluster-config.sh` 的 A3 断言必须同步改**（它是本轮的隐藏依赖）：
+
+| 位置 | 现状 | 要改成 |
+|---|---|---|
+| A3 · fragile 那台 | `grep "host $fragile: if it fails the cluster STOPS serving"` | **不变**（`survives=no` + `yes` ⇒ 措辞仍含 `the cluster STOPS serving`） |
+| A3 · protected 那台 | `grep "host $protected: if it fails the cluster keeps serving"` | 改成 `grep "host $protected: if it fails the cluster refuses every write until the replica is promoted"` —— 主 E2E 配置**没写** `cluster_require_full_coverage` ⇒ 用的是默认 `yes` |
+| A6（`coverage=no` 那次重建） | 无措辞断言 | **加一条**：protected 那台应打印 `keeps serving (degraded)` |
+
+⚠️ **这条 E2E 断言改动不是「改测试来迁就代码」** —— 仓库的 E2E **自己就矛盾**：
+A3 断言「protected 那台挂了集群 keeps serving」，而 **A5**（同一份默认 `yes` 的配置）
+断言「protected 那台挂掉后集群拒绝写入」。本轮让脚本的措辞与 A5 的实测一致。
 
 ### 4.3 `cluster.conf.example`：只加一行指路
 
@@ -221,11 +269,25 @@ replica node3:6380 -> master node1:6379
 | §2.3 第 2 步 | `NODE_A_*` / `NODE_B_*` / **`NODE_C_*`** 三组环境变量 |
 | §2.3 第 3 步判据 | `cluster_size:3` · `cluster_known_nodes:6` 不变 |
 | §2.4 回退表 | 三台的回退路径 |
-| §2.5 容错硬边界 | **整节重写**（§6） |
+| §2.5 容错硬边界 | **整节重写**（§6）：四象限真值表（`是否还有多数派` × `cluster-require-full-coverage`）；两台那套结论也要补上覆盖率这一维 |
 | §5.3.1 / §7.4 | 中间件判据、日常巡检条数 |
 | §8.1 端口表 / §8.3 易错点 / §9 一页速查 | 同步 |
 
 **§3（ZK/Kafka 两节点）整章不动** —— 本轮只做 Redis。
+
+### 4.6 `tests/check_syntax.sh`：补上 `cluster-config.sh`
+
+`tests/check_syntax.sh` 的脚本清单是**硬编码**的，而 `cluster-config.sh` **不在里面**：
+
+```bash
+for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh \
+         scripts/e2e-cluster-config.sh scripts/e2e-cpsweb-nodes.sh \
+         scripts/e2e-kafka-cluster.sh scripts/bench-consumer-write.sh \
+         scripts/check-bash-compat.sh tests/validate_libs.sh tests/validate_java_pipelines.sh; do
+```
+
+⇒ 本轮要改的**恰恰是 `cluster-config.sh`**，而它的语法**从来不被检查**。
+⇒ 本轮把 `cluster-config.sh` 加进清单（`TOTAL` 46 → 47）。
 
 ---
 
@@ -245,27 +307,59 @@ replica node3:6380 -> master node1:6379
 
 ## 六、容错边界：三台机器的真相（手册 §2.5 重写的内容）
 
-| 场景 | 结果 |
+> ⚠️ **【2026-11-05 更正】本节初稿写错了，已按仓库自己实测过的 E2E 证据改写。**
+> 初稿说「挂掉任一台 ⇒ 有 1 个 master 的槽位无人接管 ⇒ `yes` 时全集群停写」——
+> **那是把「死掉的副本」当成了「死掉的 master」**。
+> 死掉的 master 的槽位**由它的副本接管**（前提：副本活着 + 有多数派）——
+> 这是仓库 E2E 里 **DoD5**（`kill a master, expect its replica to be promoted`）**已经实测过**的事。
+
+### 6.1 三台 × 每台 1 个 master ⇒ 挂任一台都**全量可写**
+
+| 步骤 | 分析 |
 |---|---|
-| 挂掉任意一台 | **2/3 master 存活 = 多数派**（`cluster_size/2 + 1 = 2`）✅ ⇒ 副本**有权提升** |
-| 提升后 | **2 个 master 的槽位被接管**（它们的副本在别的机器上） |
-| 但 | **有 1 个 master 的槽位无人接管** —— 它的副本与它同机，一起挂了 |
-| `cluster_require_full_coverage = no` | 集群**降级但仍可读写**（那 1 个 master 的槽位不可用） |
-| `cluster_require_full_coverage = yes` | **全集群 `CLUSTERDOWN` 停写** |
+| 挂掉 node1 | 死的是 `node1:6379`（master）和 `node1:6380`（**node3 的副本**） |
+| 多数派？ | 存活 master = node2:6379、node3:6379 = **2/3** ✅ ⇒ 副本**有权提升** |
+| `node1:6379` 的槽位 | 它的副本是 `node2:6380` —— **活着，在另一台** ✅ ⇒ 提升 ⇒ **槽位被接管** |
+| `node3:6379` 的槽位 | master **自己活着** ✅（它只是没了副本，不影响槽位覆盖） |
+| 结论 | **16384 个槽位全覆盖** ⇒ `cluster_state:ok` ⇒ **写入照常** |
 
-⇒ **`cluster_require_full_coverage` 必须是 `no`**（和两台时一样，加机器不会自动变好）。
+⇒ **三台机器买到的是「挂掉任意一台，集群全量可写」** —— 这是两台**数学上做不到**的事
+（两台时必有一台承担 2 个 master，那台挂掉就不过多数派 ⇒ 副本不能提升 ⇒ 槽位无人接管）。
 
-**与两台的对比**：
+**这正是 2026-10-28 那份 spec §3.5 说的「要两头都活至少需要 3 台机器」的兑现。**
+
+### 6.2 `cluster_require_full_coverage` 仍然要 `no`（但理由不同）
+
+`yes` 与 `no` 的差别体现在**故障后的那 ~15 秒窗口**里（`cluster-node-timeout 15000`，
+副本被标记 fail 之前，死掉的 master 的槽位处于「无人覆盖」状态）：
+
+| 配置 | 挂掉一台后的**那 15 秒** | 15 秒后（副本提升完成） |
+|---|---|---|
+| `no` | 只有死掉的 master 的槽位不可写，**其余照常** | 全量可写 |
+| `yes` | **全集群拒绝一切写入**（`CLUSTERDOWN`） | 全量可写 |
+
+⇒ **仍然推荐 `no`** —— 它把「一台机器故障」从「全集群停写 15 秒」降级成「部分槽位短暂不可写」。
+
+### 6.3 与两台的对比（同一套判定标准）
 
 | | 两台 × 3 实例 | 三台 × 2 实例 |
 |---|---|---|
-| 挂掉主多的那台 | **集群停写**（只剩 1/3 master，不过多数派） | 不适用（每台各 1 主） |
-| 挂掉任意一台 | — | **降级但仍可读写** |
-| 停写的条件 | 半数机故障 | **任何一台故障**（若配了 `yes`） |
+| 挂掉「master 少」的那台 | 槽位全覆盖（它的 master 在另一台有活副本）⇒ 可写 | **槽位全覆盖 ⇒ 可写** |
+| 挂掉「master 多」的那台 | 无多数派 ⇒ 副本不能提升 ⇒ **槽位无人接管** ⇒ 停写（`yes`） | **不适用**（每台恰好 1 个 master，没有「多」的那台） |
+| 停写的触发条件 | 挂掉承担多数派 master 的那台 | **任何一台都不会导致停写**（`no` 下连 15 秒窗口都没有） |
 
-⚠️ **「三台 ⇒ 高可用」这句话要说准**：三台买到的是「**挂一台还能服务（降级）**」，
-**不是**「挂一台还全量可写」。要后者得让每个 master 的副本都不与它同机，
-在 `replicas=1` 固定的前提下**做不到**（副本数不够）。
+### 6.4 顺带：两台那套说法本身也不精确（手册 §2.5 一起改）
+
+手册 §2.5 现在的表是「主数少的那台挂 → 集群仍可用（降级）/ 主数多的那台挂 → 集群停写」，
+**没有提 `cluster_require_full_coverage`** ⇒ 两句话都只在一种配置下成立：
+
+| 场景 | `no` | `yes` |
+|---|---|---|
+| 挂掉「master 少」的那台 | 可写 | **提升完成前全集群停写 ~15 秒**，之后可写 |
+| 挂掉「master 多」的那台 | **存活 master 的槽位仍可写**（死掉的那些不可用） | **全集群永久停写** |
+
+⇒ 手册 §2.5 重写时**必须把 `cluster_require_full_coverage` 这一维写进表里**，
+否则又是一个「只说一半」的容错结论。
 
 ---
 
@@ -288,13 +382,15 @@ replica node3:6380 -> master node1:6379
 
 | # | 验证 | 命令 | 期望 |
 |---|---|---|---|
-| 1 | 语法 | `bash tests/check_syntax.sh` | `TOTAL=46 FAIL=0` |
-| 2 | 库函数 | `bash tests/validate_libs.sh` | `PASS=54 FAIL=0`（**+2 条新增**：覆盖率两种措辞） |
+| 1 | 语法 | `bash tests/check_syntax.sh` | `TOTAL=47 FAIL=0`（**+1**：`cluster-config.sh` 原来**不在**检查清单里，本轮补进去） |
+| 2 | 库函数 | `bash tests/validate_libs.sh` | `PASS=58 FAIL=0`（**+4**：四种 `survives × coverage` 组合各一条） |
 | 3 | 三机拓扑 | `bash cluster-config.sh --config cluster.conf.hd.example --dry-run` | 3 master + 3 replica 循环映射；三台 survives |
-| 4 | 覆盖率措辞 | 同上，把样例里 `cluster_require_full_coverage` 改成 `yes` 再跑 | 三台都打印 **`STOPS accepting writes`** |
-| 5 | 文档一致性 | 全树扫 `§N` 引用 | 每一处都能解析到真实章节 |
-| 6 | 手册无残留 | 扫 `docs/HD-OPERATIONS.md` 的「两台」 | 只剩 §3（ZK/Kafka）里的 |
-| 7 | 脱敏 | 扫真实内网 IP / 口令 | 样例里 **0 处**真实值 |
+| 4 | 覆盖率措辞 | 同上，把样例里 `cluster_require_full_coverage` 改成 `yes` 再跑 | 三台都打印 `refuses every write until the replica is promoted` |
+| 5 | 样例文件自检 | 解析 `cluster.conf.hd.example` | 3 个节点组 / 6 个实例 / `coverage=no` |
+| 6 | 文档一致性 | 全树扫 `§N` 引用 | 每一处都能解析到真实章节 |
+| 7 | 手册无残留 | 扫 `docs/HD-OPERATIONS.md` 的「两台」 | 只剩 §3（ZK/Kafka）里的 |
+| 8 | 脱敏 | 扫真实内网 IP / 口令 | 样例里 **0 处**真实值 |
+| 9 | Docker E2E | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`（退出码 0）—— **需要 Docker**，本机 Docker Desktop 未启动时跳过并标注 |
 
 ---
 
