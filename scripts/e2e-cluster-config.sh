@@ -437,8 +437,14 @@ pick_fragile_and_protected
 grep -q "host $fragile: if it fails the cluster STOPS serving" "$WORK/install.log" \
     || fail "cluster-config.sh did not name $fragile as the host the cluster cannot survive losing:
 $(grep -i 'if it fails' "$WORK/install.log" || true)"
-grep -q "host $protected: if it fails the cluster keeps serving" "$WORK/install.log" \
-    || fail "cluster-config.sh did not name $protected as the survivable host"
+# The main run's config does NOT set cluster_require_full_coverage, so the
+# default (yes) applies: the cluster refuses every write until the replica is
+# promoted. Saying "keeps serving" there would be the lie this whole change
+# is about -- the A5 case below already measures that a host failure stops
+# writes with coverage=yes.
+grep -q "host $protected: if it fails the cluster refuses every write once the failure is detected" "$WORK/install.log" \
+    || fail "cluster-config.sh did not name $protected as the host whose failure interrupts writes:
+$(grep -i 'if it fails' "$WORK/install.log" || true)"
 echo "  OK"
 
 log "DoD7: idempotent re-run"
@@ -614,6 +620,12 @@ ports    = 6382,6383,6384
 CONF
 export CLUSTER_CONF="$(cat "$WORK/cluster-nocov.conf")"
 reset_cluster "$WORK/rebuild-a6.log" || fail "rebuilding the cluster for A6 failed"
+
+# With coverage=no the verdict must be the degraded-but-serving one.
+pick_fragile_and_protected
+grep -q "host $protected: if it fails the cluster keeps serving (degraded)" "$WORK/rebuild-a6.log" \
+    || fail "cluster-config.sh did not report the degraded verdict with coverage=no:
+$(grep -i 'if it fails' "$WORK/rebuild-a6.log" || true)"
 
 rendered="$(ssh_root "$A_IP" "grep -h 'cluster-require-full-coverage' /etc/redis/cluster/redis-6379.conf" | tr -d '\r')"
 [ "$rendered" = "cluster-require-full-coverage no" ] \
