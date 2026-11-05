@@ -277,13 +277,13 @@ ZK / Kafka 扩成两节点集群。
    └──────┬───────┘                           └──────┬───────┘
           │                                          │
    ┌──────▼─────────────────────────┐     ┌──────────▼──────────┐
-   │            node1（一台）         │   │       node1         │
-   │  ┌───────────────────────────┐  │    │ Redis 6379  master  │
-   │  │ Redis 6379  一个独立单机   │  │   │ Redis 6380  replica │
-   │  │ ZK    2181  单节点         │  │   │ ZK    2181  voter#1 │
-   │  │ Kafka 9092  单 broker      │  │   │ Kafka 9092  broker#1│
-   │  │ PG    5432                 │  │   └──────────┬──────────┘
-   │  └───────────────────────────┘  │               │
+   │            node1（一台）       │
+   │  ┌───────────────────────────┐ │
+   │  │ Redis 6379  一个独立单机  │ │
+   │  │ ZK    2181  单节点        │ │
+   │  │ Kafka 9092  单 broker     │ │
+   │  │ PG    5432                │ │
+   │  └───────────────────────────┘ │
    └────────────────────────────────┘     ┌──────────▼──────────┐
                                           │       node2         │
                                           │ Redis 6379  master  │
@@ -322,7 +322,7 @@ ZK / Kafka 扩成两节点集群。
 
 | 组件 | 装在哪 | 配置文件 | 谁拉起它 |
 |---|---|---|---|
-| **Redis** | `/opt/software/redis-6.0.6/` | `config/redis.conf`（**6379**，只有一个） | 安装包 `bin/1start_env.sh` |
+| **Redis** | `/opt/software/redis-6.0.6/`（**安装包里的路径**；现场实际目录见下方注） | `config/redis.conf`（**6379**，只有一个） | 安装包 `bin/1start_env.sh` |
 | **ZooKeeper** | `/opt/software/apache-zookeeper-3.9.0-bin/` | `conf/zoo.cfg` | 同上 |
 | **Kafka** | `/opt/software/kafka_2.13-2.8.0/` | `config/server.properties` | 安装包 `bin/2start_kafka.sh` |
 | **Nacos** | `/opt/software/nacos/` | `conf/application.properties` | 安装包 `bin/3start_nacos.sh` |
@@ -330,8 +330,8 @@ ZK / Kafka 扩成两节点集群。
 | **应用 jar** | `/opt/napstar_app/` | — | 按批次手工拉起（见 §5.2） |
 
 > 📌 **Redis 的目录名**：安装包（`web_install`）里写的是 `/opt/software/redis-6.0.6/`，
-> 但**现场装的是 `/opt/software/redis-8.10.0/`** ⇒ 先 `ls -d /opt/software/redis-*`
-> 确认，再填 `cluster.conf` 的 `redis_prefix`（§2.2）。
+> 但**现场装的是 `/opt/software/redis-8.10.0/`（实施方确认）** ⇒ 先
+> `ls -d /opt/software/redis-*` 确认，再填 `cluster.conf` 的 `redis_prefix`（§2.2）。
 
 **安装包里的原始配置**（改之前先看它们）：
 
@@ -444,7 +444,7 @@ vim cluster.conf
 
 ```ini
 # Redis 安装根目录。必须与生产机上完全一致
-# ⚠️ 安装包写的是 redis-6.0.6，但现场装的是 8.10.0 ⇒ 先查：
+# ⚠️ 安装包写的是 redis-6.0.6，但现场装的是 8.10.0（实施方确认）⇒ 先查：
 #     ls -d /opt/software/redis-*
 redis_prefix = <现场实际的 redis 安装目录>
 
@@ -554,7 +554,7 @@ ss -lnt | grep -E ':6379\b'        # 应该没有输出
 > ⇒ 现象是「集群节点反复起不来，但 preflight 说端口没被占」。
 >
 > 📌 顺带：`1start_env.sh` 里的 Redis 路径写的是 **`redis-6.0.6`**，
-> 而现场装的是 `redis-8.10.0` ⇒ 这两个脚本本来就对不上，
+> 而现场装的是 `redis-8.10.0`（实施方确认）⇒ 这两个脚本本来就对不上，
 > 说明**生产上很可能是手工起 Redis 的，不是靠这个脚本** ⇒ 停的时候要确认清楚
 > 「到底是谁起的」，别只改脚本。
 
@@ -564,7 +564,7 @@ ss -lnt | grep -E ':6379\b'        # 应该没有输出
 
 | 项 | 检查命令 | 期望 | 缺了会怎样 |
 |---|---|---|---|
-| Redis 二进制 | `ls /opt/software/redis-*/bin/redis-server` | 存在且可执行 | preflight 报缺项并退出 |
+| Redis 二进制 | `ls /opt/software/redis-*/bin/redis-{server,cli}` | 两个都在且可执行 | preflight 报缺项并退出 |
 | `redis` 用户 | `id redis` | 有输出 | preflight 报缺项并退出 |
 | systemd | `systemctl --version` | 有版本号 | 单元装不上 |
 | 文件描述符 | `ulimit -n` | ≥ 10001 | 组集群时连接失败 |
@@ -609,7 +609,7 @@ bash cluster-config.sh --config cluster.conf
 | 判据 | 期望 |
 |---|---|
 | 集群创建 | `[OK] All 16384 slots covered.` |
-| 每个 master 有副本 | `cluster_config.sh` 打印的主从映射里每个 master 都有 replica |
+| 每个 master 有副本 | `cluster-config.sh` 打印的主从映射里每个 master 都有 replica |
 | 副本与 master **不同机** | 同上 |
 | `CLUSTER INFO` | `cluster_state:ok` · `cluster_slots_assigned:16384` · `cluster_size:3` |
 | `CLUSTER NODES` | `cluster_known_nodes:6`（3 master + 3 replica） |
@@ -2140,7 +2140,7 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 |---|---|---|---|
 | 1 | **集群健康** | `redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER INFO` | `cluster_state:ok` · `cluster_size:3` · `cluster_known_nodes:6` |
 | 2 | **每个 master 都有副本** | `... CLUSTER NODES` | 3 个 master 各有 1 个 replica，**都在另一台机器上** |
-| 3 | **三台机器都在** | 三台各跑 `redis-cli -h <本机IP> -p 6379` 与 `-p 6380` | 6 个实例都在（每台 1 master + 1 replica） |
+| 3 | **三台机器都在** | **逐台**确认：在本机跑 `redis-cli -p 6379` 与 `-p 6380`（或 `redis-cli -h <该机IP> -p 6379` / `-p 6380`） | 6 个实例都在（每台 1 master + 1 replica） |
 | 4 | **没有槽位无主** | `... CLUSTER SLOTS` | 覆盖 0-16383 |
 | 5 | **内存没顶到上限** | `redis-cli ... INFO memory` | `used_memory` 远小于 `maxmemory`（测试集群是 64mb，**生产按需调大**） |
 | 6 | **持久化没坏** | `redis-cli ... INFO persistence` | `rdb_last_bgsave_status:ok` |
@@ -2256,6 +2256,9 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
         └ DM 版 / PG 版 / …：内容不同，以生产机上的那个为准
   install.sh                                 ← ⭐ 写 hosts：node1 / node2（现两处都是 127.0.0.1）
 ```
+
+> 📌 同 §1.2：安装包里写的是 `redis-6.0.6/`，**现场**装的是 `redis-8.10.0/`
+> ⇒ **以 `ls -d /opt/software/redis-*` 为准**（§2.2）。
 
 **源码树**（`D:\work\info\web\extendsystem\华盾-napstar2.0\code\`）：
 
