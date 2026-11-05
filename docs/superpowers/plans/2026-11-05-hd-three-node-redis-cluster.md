@@ -56,9 +56,9 @@ with open(path, "w", encoding="utf-8", newline="") as f:
 | 验证 | 结果 |
 |---|---|
 | Task 1 的 3 条表征测试 | **一次就绿**（`lib/topology.sh` 本来就支持三机） |
-| Task 2 的 4 条 verdict 测试 | 加实现前 **红**（`command not found`，status 127）→ 加实现后 **全绿** |
+| Task 2 的 5 条 verdict 测试 | 加实现前 **红**（`command not found`，status 127）→ 加实现后 **全绿** |
 | Task 3 的 2 条行为测试 | 改 `print_topology` 前 **红** → 改后 **全绿** |
-| 全量 bats | `bats tests/` → **51/51**（⚠️ **不递归** `tests/lib/`）· CI 等价的 `find tests -name '*.bats' \| xargs bats` → **206/206** |
+| 全量 bats | `bats tests/` → **51/51**（⚠️ **不递归** `tests/lib/`）· CI 等价的 `find tests -name '*.bats' \| xargs bats` → **211/211** |
 | `bash tests/check_syntax.sh` | `TOTAL=46 FAIL=0`（Task 4 后为 47） |
 | `bash tests/validate_libs.sh` | `SUMMARY: PASS=54 FAIL=0` |
 
@@ -297,9 +297,9 @@ cluster_failure_verdict() {
         fi
     else
         if [ "$coverage" = "yes" ]; then
-            printf 'the cluster STOPS serving (the slots that just lost their master are never covered, and cluster-require-full-coverage=yes refuses every write)'
+            printf 'the cluster STOPS serving (the slots of at least one master on that host are never covered, and cluster-require-full-coverage=yes refuses every write)'
         else
-            printf "the cluster keeps serving the surviving masters' slots only (the slots that just lost their master are never covered)"
+            printf "the cluster keeps serving the surviving masters' slots only (the slots of at least one master on that host are never covered)"
         fi
     fi
 }
@@ -558,9 +558,14 @@ bind_addr = 0.0.0.0
 #   no  —— 只有没被覆盖的那些槽位不可写，其余照常。
 #
 # 这里必须是 no：三台机器里挂掉任意一台之后，那台 master 的副本会被提升
-# （副本在别的机器上），但在提升完成之前的 ~15 秒（cluster-node-timeout
-# 15000）里它的槽位处于无人覆盖状态 —— `yes` 会让这 15 秒变成**全集群
-# 停写**，`no` 只影响那些槽位。
+# （副本在别的机器上）。
+#
+# ⚠️ 时间线要分清两段：
+#   1) master 挂掉 → 故障被发现（cluster-node-timeout 15000，约 15 秒）：
+#      这段里集群还「看起来健康」、照常接受写入，只有死掉的 master 的槽位
+#      写不进去（见 scripts/e2e-cluster-config.sh 的实测注释）。
+#   2) 被发现 → 副本被提升、槽位重新被接管（通常远小于 15 秒）：
+#      这段里 `yes` 会变成**全集群停写**（CLUSTERDOWN），`no` 只影响那些槽位。
 cluster_require_full_coverage = no
 
 # ---------------------------------------------------------------------------
@@ -864,23 +869,29 @@ master node3:6379  <- replica node1:6380
 > ⇒ 那台挂掉只剩 1 个 master，**不过多数派** ⇒ 副本无权提升 ⇒
 > 那些槽位永远无人接管。**这是算术，不是配置问题**（见 §8.3）。
 
-⚠️ **`cluster-require-full-coverage` 决定的是「故障后的那 ~15 秒」**：
+⚠️ **`cluster-require-full-coverage` 决定的是「故障被发现之后」的那段窗口**：
 
-副本从「被标记 fail」到「被提升」之间有 `cluster-node-timeout 15000` 的窗口，
-这段时间死掉的 master 的槽位处于无人覆盖状态：
+⚠️ **`cluster-node-timeout 15000` 是「故障被发现」要花的时间，不是停写窗口的长度**
+（master 挂掉 → 被标记 FAIL 需要 15 秒）。**在这 15 秒里集群还「看起来健康」**，
+其它 master 照常接受写入 —— 仓库自己的 E2E 注释就是这么说的
+（`scripts/e2e-cluster-config.sh:556-558`：*"the masters are only marked fail
+after cluster-node-timeout (15s in the template), and until then the
+cluster can still look healthy and accept writes"*）。
+**停写窗口从「被发现」开始，到「副本被提升、槽位重新被接管」为止**（通常远小于 15 秒）：
 
-| 配置 | 那 15 秒里 | 提升完成后 |
-|---|---|---|
-| `no` | 只有死掉的 master 的槽位不可写，**其余照常** | 全量可写 |
-| `yes` | **全集群拒绝一切写入**（`CLUSTERDOWN`） | 全量可写 |
+| 配置 | 发现之前（~15s） | 发现之后 ~ 提升完成 | 提升完成后 |
+|---|---|---|---|
+| `no` | 死掉的 master 的槽位写不进去，**其余照常** | 只有那些槽位不可写 | 全量可写 |
+| `yes` | 同上（`cluster_state` 可能还是 `ok`） | **全集群拒绝一切写入**（`CLUSTERDOWN`） | 全量可写 |
 
-⇒ **本方案用 `no`**（§2.2 的模板里已经带上了）。
+⇒ **本方案用 `no`** —— 它把「一台机器故障」从「**故障被发现后**全集群停写」降级成
+「**只有那些槽位**短暂不可写」（§2.2 的模板里已经带上了）。
 
 ⚠️ **两台那套说法的同一张表（供对照，勿混用）**：
 
 | 场景 | `no` | `yes` |
 |---|---|---|
-| 挂掉「master 少」的那台 | 槽位全覆盖 ⇒ 可写 | 提升完成前**全集群停写 ~15 秒**，之后可写 |
+| 挂掉「master 少」的那台 | 槽位全覆盖 ⇒ 可写 | **故障被发现后到提升完成前全集群停写**（窗口 ≈ 提升耗时，不是 15 秒），之后可写 |
 | 挂掉「master 多」的那台 | 存活 master 的槽位**仍可写**（死掉的那些不可用） | **全集群永久停写** |
 ```
 

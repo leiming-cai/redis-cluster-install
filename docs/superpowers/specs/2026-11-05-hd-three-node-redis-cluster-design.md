@@ -125,7 +125,7 @@ fi
 
 | 限制 | 什么时候存在 |
 |---|---|
-| **提升窗口** | master 挂掉 → 故障**被发现**（`cluster-node-timeout 15000`）→ 副本被提升 ⇒ 这段时间它的槽位无人覆盖 ⇒ `yes` 时**全集群停写**；⚠️ **但前 15 秒集群可能还「看起来健康、还在接受写入」** —— 停写不是立刻发生的，措辞不能说「拒绝写入直到副本被提升（~15s）」 |
+| **提升窗口** | 分**两段**：**master 挂掉 → 故障被发现（`cluster-node-timeout 15000`）→ 副本被提升**。**第一段**（≈15s）集群还「看起来健康、照常接受写入」，只有死掉的 master 的槽位写不进去；**第二段**（被发现 → 提升完成，通常很短）它的槽位无人覆盖 ⇒ `yes` 时**全集群停写**，`no` 时只有那些槽位不可写。⚠️ **停写窗口是第二段，不是那 15 秒** |
 | **无多数派时永久停写** | 挂掉承担多数派 master 的那台（两台布局）⇒ 副本不能提升 ⇒ 槽位永远无人覆盖 ⇒ `yes` 时**永久停写** |
 
 ⚠️ **这不是三机引入的** —— 两机时 `yes` 同样会停写，脚本同样在骗人。
@@ -242,9 +242,9 @@ cluster_failure_verdict() {
         fi
     else
         if [ "$coverage" = "yes" ]; then
-            printf 'the cluster STOPS serving (the slots that just lost their master are never covered, and cluster-require-full-coverage=yes refuses every write)'
+            printf 'the cluster STOPS serving (the slots of at least one master on that host are never covered, and cluster-require-full-coverage=yes refuses every write)'
         else
-            printf "the cluster keeps serving the surviving masters' slots only (the slots that just lost their master are never covered)"
+            printf "the cluster keeps serving the surviving masters' slots only (the slots of at least one master on that host are never covered)"
         fi
     fi
 }
@@ -256,8 +256,8 @@ cluster_failure_verdict() {
 |---|---|---|
 | `yes` | `no` | `the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted` |
 | `yes` | `yes` | `the cluster refuses every write once the failure is detected, until the replicas are promoted (after cluster-node-timeout, 15s in the shipped template)` |
-| `no` | `no` | `the cluster keeps serving the surviving masters' slots only (the slots that just lost their master are never covered)` |
-| `no` | `yes` | `the cluster STOPS serving (the slots that just lost their master are never covered, and cluster-require-full-coverage=yes refuses every write)` |
+| `no` | `no` | `the cluster keeps serving the surviving masters' slots only (the slots of at least one master on that host are never covered)` |
+| `no` | `yes` | `the cluster STOPS serving (the slots of at least one master on that host are never covered, and cluster-require-full-coverage=yes refuses every write)` |
 
 > 📌 **`~15s` 那个数字是模板里的 `cluster-node-timeout 15000`，是配置值不是常量**
 > （仓库里 `scripts/smoke-test.sh` 用的是 5000）⇒ 消息里**点配置名**，
@@ -373,15 +373,23 @@ for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh \
 
 ### 6.2 `cluster_require_full_coverage` 仍然要 `no`（但理由不同）
 
-`yes` 与 `no` 的差别体现在**故障后的那 ~15 秒窗口**里（`cluster-node-timeout 15000`，
-副本被标记 fail 之前，死掉的 master 的槽位处于「无人覆盖」状态）：
+`yes` 与 `no` 的差别出现在**故障被发现之后**的那段窗口里。
 
-| 配置 | 挂掉一台后的**那 15 秒** | 15 秒后（副本提升完成） |
-|---|---|---|
-| `no` | 只有死掉的 master 的槽位不可写，**其余照常** | 全量可写 |
-| `yes` | **全集群拒绝一切写入**（`CLUSTERDOWN`） | 全量可写 |
+⚠️ **`cluster-node-timeout 15000` 是「故障被发现」要花的时间，不是停写窗口的长度**
+（master 挂掉 → 被标记 FAIL 需要 15 秒）。**在这 15 秒里集群还「看起来健康」**，
+其它 master 照常接受写入 —— 仓库自己的 E2E 注释就是这么说的
+（`scripts/e2e-cluster-config.sh:556-558`：*"the masters are only marked fail
+after cluster-node-timeout (15s in the template), and until then the
+cluster can still look healthy and accept writes"*）。
+**停写窗口从「被发现」开始，到「副本被提升、槽位重新被接管」为止**（通常远小于 15 秒）：
 
-⇒ **仍然推荐 `no`** —— 它把「一台机器故障」从「全集群停写 15 秒」降级成「部分槽位短暂不可写」。
+| 配置 | 发现之前（~15s） | 发现之后 ~ 提升完成 | 提升完成后 |
+|---|---|---|---|
+| `no` | 死掉的 master 的槽位写不进去，**其余照常** | 只有那些槽位不可写 | 全量可写 |
+| `yes` | 同上（`cluster_state` 可能还是 `ok`） | **全集群拒绝一切写入**（`CLUSTERDOWN`） | 全量可写 |
+
+⇒ **仍然推荐 `no`** —— 它把「一台机器故障」从「**故障被发现后**全集群停写」降级成
+「**只有那些槽位**短暂不可写」。
 
 ### 6.3 与两台的对比（同一套判定标准）
 
@@ -389,7 +397,7 @@ for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh \
 |---|---|---|
 | 挂掉「master 少」的那台 | 槽位全覆盖（它的 master 在另一台有活副本）⇒ 可写 | **槽位全覆盖 ⇒ 可写** |
 | 挂掉「master 多」的那台 | 无多数派 ⇒ 副本不能提升 ⇒ **槽位无人接管** ⇒ 停写（`yes`） | **不适用**（每台恰好 1 个 master，没有「多」的那台） |
-| 停写的触发条件 | 挂掉承担多数派 master 的那台 | **任何一台都不会导致停写**（`no` 下连 15 秒窗口都没有） |
+| 停写的触发条件 | 挂掉承担多数派 master 的那台 | **任何一台都不会导致停写**（`no` 下只有那个 master 的槽位不可写，不是全集群） |
 
 ### 6.4 顺带：两台那套说法本身也不精确（手册 §2.5 一起改）
 
@@ -398,7 +406,7 @@ for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh \
 
 | 场景 | `no` | `yes` |
 |---|---|---|
-| 挂掉「master 少」的那台 | 可写 | **提升完成前全集群停写 ~15 秒**，之后可写 |
+| 挂掉「master 少」的那台 | 可写 | **故障被发现后到提升完成前全集群停写**（窗口 ≈ 提升耗时，不是 15 秒），之后可写 |
 | 挂掉「master 多」的那台 | **存活 master 的槽位仍可写**（死掉的那些不可用） | **全集群永久停写** |
 
 ⇒ 手册 §2.5 重写时**必须把 `cluster_require_full_coverage` 这一维写进表里**，
@@ -418,6 +426,11 @@ for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh \
 | 6 | 改生产 Nacos 的 `oms:` | 生产环境的动作 |
 | 7 | 写数据迁移脚本 | 业务语义只有实施方知道 |
 | 8 | 真机验证 | 真机要改生产环境 |
+
+> ⚠️ **但有一处后果要记下来**：主线手册 `docs/OPERATIONS.md` §2 用「keeps serving (degraded)」
+> 来识别「受保护的那台主机」，`docs/USAGE.md` 的示例输出里也有这句。
+> ⇒ **改完之后，在默认的 `cluster_require_full_coverage = yes` 下，没有任何一台会打印这句话**
+> ⇒ 那句「靠这句话认主机」的指引会失效（主线文档本轮不改，单独一轮处理）。
 
 ---
 
