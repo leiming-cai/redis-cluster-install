@@ -183,3 +183,63 @@ cluster_slots_assigned:16384
 cluster_known_nodes:6"
     [ "$status" -eq 0 ]
 }
+
+# --- the failure verdict -------------------------------------------------
+#
+# What happens when a host dies depends on TWO things, and the old code
+# looked at only one of them:
+#
+#   survives  — will the slots that just lost their master ever be covered
+#               again? "no" has two causes: no quorum to promote with, or the
+#               master has no replica at all. lib/topology.sh computes the
+#               flag as "a quorum survives AND the master has a replica", so
+#               both causes collapse into this one flag.
+#   coverage  — `cluster-require-full-coverage`. With `yes` the cluster
+#               refuses EVERY write while any slot is uncovered; with `no`
+#               only the uncovered slots are refused.
+#
+# The combination decides everything, so all four are pinned here. Each case
+# asserts a marker no other case contains, so a rewording of one verdict
+# cannot make two of them overlap.
+
+@test "cluster_failure_verdict keeps serving when a quorum survives and coverage is off" {
+    out=$(cluster_failure_verdict yes no)
+    [[ "$out" == *"keeps serving (degraded)"* ]]
+    [[ "$out" == *"promoted"* ]]
+    [[ "$out" != *"never covered"* ]]
+    [[ "$out" != *"refuses every write"* ]]
+}
+
+@test "cluster_failure_verdict warns about the write outage while coverage is on" {
+    out=$(cluster_failure_verdict yes yes)
+    [[ "$out" == *"refuses every write"* ]]
+    [[ "$out" == *"cluster-node-timeout"* ]]
+    [[ "$out" != *"keeps serving"* ]]
+    [[ "$out" != *"never covered"* ]]
+}
+
+@test "cluster_failure_verdict stops the cluster when the slots are never covered and coverage is on" {
+    out=$(cluster_failure_verdict no yes)
+    [[ "$out" == *"STOPS serving"* ]]
+    [[ "$out" == *"never covered"* ]]
+    [[ "$out" != *"keeps serving"* ]]
+}
+
+@test "cluster_failure_verdict keeps the surviving masters writable when coverage is off" {
+    out=$(cluster_failure_verdict no no)
+    [[ "$out" == *"surviving masters"* ]]
+    [[ "$out" == *"never covered"* ]]
+    [[ "$out" != *"STOPS serving"* ]]
+    [[ "$out" != *"refuses every write"* ]]
+}
+
+@test "cluster_failure_verdict fails closed on an unknown coverage value" {
+    # An unknown value must not read as the optimistic one: "keeps serving"
+    # is the reading that hides a cluster-wide write outage.
+    out=$(cluster_failure_verdict yes maybe)
+    [[ "$out" == *"refuses every write"* ]]
+    out=$(cluster_failure_verdict yes "")
+    [[ "$out" == *"refuses every write"* ]]
+    out=$(cluster_failure_verdict no maybe)
+    [[ "$out" == *"STOPS serving"* ]]
+}

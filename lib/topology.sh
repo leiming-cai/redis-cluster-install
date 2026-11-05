@@ -52,8 +52,11 @@ TOPOLOGY_REPLICAS=1
 #   TOPO_REPLICA_COUNT       number of replicas
 #   TOPO_REPLICA[i]          "host:port" of replica i
 #   TOPO_REPLICA_MASTER[i]   "host:port" of the master replica i belongs to
-#   TOPO_SURVIVES[i]         "yes" if the cluster keeps serving when group i
-#                            dies, "no" otherwise
+#   TOPO_SURVIVES[i]  'yes' if group i's masters all have a replica AND a quorum
+#                     would survive group i's death -- i.e. the slots that just
+#                     lost their master would be covered again. (The
+#                     operator-facing wording is lib/cluster.sh's
+#                     cluster_failure_verdict.)
 #   TOPO_UNPROTECTED_COUNT   masters that have no replica at all
 #   TOPO_WARNINGS[]          human-readable warnings
 #

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # lib/cluster.sh — parse and inspect Redis cluster state.
-# These helpers read the output of `redis-cli -a PASS cluster info` from stdin.
+# Most of these helpers read Redis Cluster output from stdin (`cluster info` or
+# `cluster nodes`); the ones that build commands, look up a node, or format a
+# verdict take arguments instead.
 
 # cluster_known_nodes
 # Echoes the integer value of `cluster_known_nodes:N` from stdin, or empty string.
@@ -151,4 +153,54 @@ cluster_exists() {
     known=$(printf '%s\n' "$info" | cluster_known_nodes)
     slots=$(printf '%s\n' "$info" | grep -E '^cluster_slots_assigned:' | awk -F: '{print $2}' | tr -d '[:space:]')
     [ "${known:-1}" -gt 1 ] || [ "${slots:-0}" -gt 0 ]
+}
+
+# cluster_failure_verdict SURVIVES REQUIRE_FULL_COVERAGE
+# Echoes what happens to the cluster when the host holding these nodes dies.
+#
+#   SURVIVES               "yes" | "no"  — will the slots that just lost their
+#                                             master ever be covered again?
+#                                             "yes" = a quorum survives AND the
+#                                             master has a replica to promote.
+#                                             "no" = they stay uncovered forever
+#                                             -- either no quorum to promote
+#                                             with, or the master has no
+#                                             replica at all.
+#   REQUIRE_FULL_COVERAGE  "yes" | "no"  — the value of
+#                                             cluster-require-full-coverage.
+#                                             With `yes` the cluster refuses
+#                                             EVERY write while any slot is
+#                                             uncovered; with `no` only the
+#                                             uncovered slots are refused.
+#
+# The two are independent, so there are four outcomes and none of them may
+# be collapsed into a single sentence: the old code printed "keeps serving
+# (degraded)" for every case, which is wrong for coverage=yes.
+#
+# The strings state the EFFECT, not the cause: SURVIVES=no has two possible
+# causes (no quorum, or no replica for the dead master) and only the effect is
+# the same for both.
+cluster_failure_verdict() {
+    local survives="$1" coverage="$2"
+    # An unrecognised coverage value must not fail OPEN: the optimistic
+    # reading ("keeps serving") is the one that hides a cluster-wide write
+    # outage. lib/conf.sh only ever produces yes|no, but this prints an
+    # operator-facing verdict, so it defaults to the safe side.
+    case "$coverage" in
+        yes|no) ;;
+        *) coverage=yes ;;
+    esac
+    if [ "$survives" = "yes" ]; then
+        if [ "$coverage" = "yes" ]; then
+            printf 'the cluster refuses every write once the failure is detected, until the replicas are promoted (detection takes cluster-node-timeout, 15s in the shipped template)'
+        else
+            printf 'the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted'
+        fi
+    else
+        if [ "$coverage" = "yes" ]; then
+            printf 'the cluster STOPS serving (the slots of at least one master on that host are never covered, and cluster-require-full-coverage=yes refuses every write)'
+        else
+            printf "the cluster keeps serving the surviving masters' slots only (the slots of at least one master on that host are never covered)"
+        fi
+    fi
 }
