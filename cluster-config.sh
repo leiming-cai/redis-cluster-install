@@ -120,8 +120,9 @@ done
 # === Topology ===
 # lib/topology.sh is pure, so the layout can be shown before anything is
 # touched. That is the whole point of --dry-run: printing the plan but not the
-# thing the operator most needs to see (which host ends up holding the
-# majority of the masters, i.e. which host the cluster cannot survive losing)
+# thing the operator most needs to see (which host the cluster cannot survive
+# losing -- the slots of its masters are never covered again, either because
+# no quorum is left to promote a replica or because the master had none)
 # would be a dry-run that answers the easy question only.
 #
 # This first computation uses the CONFIG hosts, because credentials are not
@@ -138,14 +139,21 @@ print_topology() {
     # The verdict comes from lib/cluster.sh, which knows about BOTH inputs:
     # whether the slots that just lost their master will be covered again, and
     # what cluster-require-full-coverage is. The old code looked at the first
-    # one only and printed "keeps serving" even with coverage=yes, where the
-    # cluster refuses every write once the failure is detected.
+    # one only: it printed "keeps serving" even with coverage=yes, where the
+    # cluster refuses every write once the failure is detected, and its
+    # "STOPS serving" message named the cause (no quorum) instead of the
+    # effect -- a master with no replica at all is the other cause.
     #
     # log_info only when nothing has to be acted on: the slots are covered
     # again AND coverage is off. Everything else is a warning.
+    #
+    # "coverage is off" is spelled `= no` and not `!= yes` on purpose: the
+    # verdict fails closed on an unrecognised coverage value (it reads it as
+    # yes), so the severity has to fail closed with it -- otherwise an unknown
+    # value would print "refuses every write" as a routine INFO line.
     for (( j = 1; j <= TOPO_GROUP_COUNT; j++ )); do
         verdict="$(cluster_failure_verdict "${TOPO_SURVIVES[$j]}" "$CONF_REQUIRE_FULL_COVERAGE")"
-        if [ "${TOPO_SURVIVES[$j]}" = "yes" ] && [ "$CONF_REQUIRE_FULL_COVERAGE" != "yes" ]; then
+        if [ "${TOPO_SURVIVES[$j]}" = "yes" ] && [ "$CONF_REQUIRE_FULL_COVERAGE" = "no" ]; then
             log_info "  host ${TOPO_GROUP_HOST[$j]}: if it fails $verdict"
         else
             log_warn "  host ${TOPO_GROUP_HOST[$j]}: if it fails $verdict"

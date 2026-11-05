@@ -241,6 +241,16 @@ EOF
 # The verdict depends on cluster-require-full-coverage, so the same layout
 # produces different words. Grepping the source for "keeps serving" proved
 # nothing: the text can be in the file and never reach the operator.
+#
+# The LEVEL is part of the verdict too: log_warn goes to stderr and log_info
+# to stdout (lib/common.sh), so the operator can tell a routine note from a
+# warning by the stream alone -- a cluster-wide write outage must not be
+# reported as routine information. bats' `run` merges stderr into $output, so
+# the marker is visible, but it has to be asserted ON THE SAME LINE as the
+# verdict: a glob like *"[INFO]"*"host ..."* is satisfied just as well by an
+# [INFO] line printed earlier, so it would pin nothing. grep -E works line by
+# line, so "[INFO].*host ..." means "the marker and the verdict are on the
+# same line".
 
 @test "cluster-config.sh --dry-run says the cluster keeps serving when coverage is off" {
     cat > "$CONF_TMP/three-no.conf" <<'EOF'
@@ -261,6 +271,10 @@ EOF
     [[ "$output" == *"10.0.0.1: if it fails the cluster keeps serving (degraded)"* ]]
     [[ "$output" == *"10.0.0.2: if it fails the cluster keeps serving (degraded)"* ]]
     [[ "$output" == *"10.0.0.3: if it fails the cluster keeps serving (degraded)"* ]]
+    # All three hosts are at INFO: with coverage off nothing has to be acted
+    # on, so a WARN here would cry wolf.
+    local info_lines='\[INFO\].*host 10\.0\.0\.[123]: if it fails the cluster keeps serving \(degraded\)'
+    [ "$(printf '%s\n' "$output" | grep -cE "$info_lines" || true)" -eq 3 ]
 }
 
 @test "cluster-config.sh --dry-run warns about the write outage when coverage is on" {
@@ -282,4 +296,10 @@ EOF
     [[ "$output" == *"10.0.0.1: if it fails the cluster refuses every write once the failure is detected"* ]]
     [[ "$output" == *"cluster-node-timeout"* ]]
     [[ "$output" != *"keeps serving"* ]]
+    # The level is pinned here too: the verdict says the cluster refuses EVERY
+    # write, so it has to be a WARNING. Downgraded to log_info the words stay
+    # true but the operator reads a cluster-wide outage as a routine note --
+    # and both tests above would still be green.
+    local warn_lines='\[WARN\].*host 10\.0\.0\.[123]: if it fails the cluster refuses every write once the failure is detected'
+    [ "$(printf '%s\n' "$output" | grep -cE "$warn_lines" || true)" -eq 3 ]
 }
