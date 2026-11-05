@@ -289,13 +289,20 @@ cluster_failure_verdict() {
 A3 断言「protected 那台挂了集群 keeps serving」，而 **A5**（同一份默认 `yes` 的配置）
 断言「protected 那台挂掉后集群拒绝写入」。本轮让脚本的措辞与 A5 的实测一致。
 
-### 4.3 `cluster.conf.example`：只加一行指路
+### 4.3 `cluster.conf.example`：加一段指路 + 修一处过期样例输出
 
 ⚠️ **一个配置样例文件只能放一套拓扑** —— `cluster.conf.example` 是「复制成 `cluster.conf` 就能用」的文件，
 塞两套样例（两台的 + 三台的）会变成**一台五机集群**，反而误导。
 
-⇒ **主线的 `cluster.conf.example` 不动**（README / USAGE 都在引用它的两台形态），
+⇒ **主线的 `cluster.conf.example` 的拓扑不动**（README / USAGE 都在引用它的两台形态），
 只加一段注释指路：「三台机器的写法见 `cluster.conf.hd.example` 与 `docs/HD-OPERATIONS.md` §2.2」。
+
+⚠️ **另有一处过期内容要一起修**：那份样例**没有**设置 `cluster_require_full_coverage`
+⇒ 用的是默认 `yes` ⇒ 脚本打印的结论是
+`the cluster refuses every write once the failure is detected...`，
+**没有任何一台会打印 `keeps serving (degraded)`**
+⇒ 样例里那两行「脚本每次运行会把这两行打印出来」是错的，改成实际会打印的样子
+（措辞随 `cluster_require_full_coverage` 变，默认 `yes`）。
 
 ### 4.4 `cluster.conf.hd.example`（新建）
 

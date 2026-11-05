@@ -79,7 +79,7 @@ with open(path, "w", encoding="utf-8", newline="") as f:
 | `tests/cluster_config.bats` | 修改 | 把「grep 脚本文本」改成「跑 `--dry-run` 看输出」 |
 | `tests/check_syntax.sh` | 修改 | 把 `cluster-config.sh` 加进语法检查清单 |
 | `cluster.conf.hd.example` | **新建** | 三台机器的样例配置 |
-| `cluster.conf.example` | 修改 | 加一行指路（主线两台样例保持不动） |
+| `cluster.conf.example` | 修改 | 加指路注释 + 修一处过期样例输出（主线两台拓扑不动） |
 | `docs/HD-OPERATIONS.md` | 修改 | Redis 相关章节「两台」→「三台」+ 容错边界重写 |
 | `scripts/e2e-cluster-config.sh` | 修改 | A3 断言跟随新措辞；A6 加一条 `no` 的断言 |
 
@@ -600,8 +600,8 @@ git commit -m "test(hd): put cluster-config.sh under the syntax check"
 
 **Files:**
 - Create: `cluster.conf.hd.example`
-- Modify: `cluster.conf.example`（末尾加指路注释）
-- Modify: `tests/cluster_config.bats`（追加 1 条）
+- Modify: `cluster.conf.example`（末尾加指路注释 + 修一处过期样例输出）
+- Modify: `tests/cluster_config.bats`（追加 2 条）
 - Test: `tests/cluster_config.bats`
 
 - [ ] **Step 1: 新建 `cluster.conf.hd.example`**
@@ -748,6 +748,31 @@ ports    = 6379,6380
 # 两者不能合在一个文件里 —— 一个样例文件只能放一套拓扑，
 # 两套写在一起会变成「一台五机集群」。
 ```
+
+⚠️ **顺带修一处过期内容**（代码审查发现，本任务正好动这个文件）：
+`cluster.conf.example` 里原来有一段「脚本每次运行会把这两行打印出来」：
+
+```
+#   host 192.168.1.10: if it fails the cluster STOPS serving (...)
+#   host 192.168.1.11: if it fails the cluster keeps serving (degraded)
+```
+
+**这段现在是错的** —— 那份样例**没有**设置 `cluster_require_full_coverage`
+⇒ 用的是默认 `yes` ⇒ 受保护的那台打印的是
+`refuses every write once the failure is detected...`，
+**没有任何一台会打印 "keeps serving (degraded)"**。
+
+⇒ 改成脚本实际会打印的样子，并把「这两行」改成「这些行」：
+
+```
+# 脚本每次运行会把这些行打印出来（措辞取决于 cluster_require_full_coverage，默认 yes）：
+#   host 192.168.1.10: if it fails the cluster STOPS serving (...)
+#   host 192.168.1.11: if it fails the cluster refuses every write once the failure is detected (...)
+```
+
+> 📌 同一段里那句「另一台挂掉集群仍可用（降级）」也要一起改：
+> 措辞随 `cluster_require_full_coverage` 变（`yes` 时是「提升前全集群拒写」），
+> 不能一句话说死。
 
 - [ ] **Step 3: 在 `tests/cluster_config.bats` 末尾追加样例自检**
 
@@ -1172,7 +1197,7 @@ Expected: `git status --short` 无输出；push 成功。
 |---|---|---|
 | 1 | **实测证据** | 三机 `--dry-run` 的真实输出（主从映射逐字抄）、实例数矩阵、8.10.0 的版本核对、`cluster_role_of` 按 `host:port` 匹配的依据 | 
 | 2 | **规格被修正的那一处** | spec §6 初稿把「死掉的副本」当成「死掉的 master」⇒ 三机的容错结论应是**全量可写**，不是「降级」 |
-| 3 | **隐藏依赖** | `tests/cluster_config.bats` 那条 grep 文件文本的测试、`scripts/e2e-cluster-config.sh` 的 A3 断言、`tests/check_syntax.sh` 漏了 `cluster-config.sh` |
+| 3 | **隐藏依赖** | `tests/cluster_config.bats` 那条 grep 文件文本的测试、`scripts/e2e-cluster-config.sh` 的 A3 断言、`tests/check_syntax.sh` 漏了 `cluster-config.sh`、`cluster.conf.example` 里那两行过期的样例输出（写的是 `keeps serving (degraded)`，而那份样例用的默认 `yes` 永远不会打印这句） |
 | 4 | **没做的事** | Docker E2E 未跑（Docker 不可用）、ZK/Kafka 未动、主线产品文档未动、没碰生产 Nacos、没建表、没写迁移脚本 |
 | 5 | **下一轮** | ① 跑一次 Docker E2E ② 现场装 Redis 8.10.0 + 建 `redis` 用户 ③ 现场数实例数（确认真的只有 1 个 6379）④ 抽查生产 Nacos 的 `oms:` 真值 ⑤ 迁数据的停机窗口与 `DBSIZE` 基线 |
 
