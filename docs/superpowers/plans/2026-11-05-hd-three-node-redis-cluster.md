@@ -73,7 +73,7 @@ with open(path, "w", encoding="utf-8", newline="") as f:
 |---|---|---|
 | `lib/cluster.sh` | 修改 | 新增纯函数 `cluster_failure_verdict`（容错结论的唯一出处） |
 | `cluster-config.sh` | 修改 | `print_topology` 调用上面那个函数 |
-| `tests/lib/cluster.bats` | 修改 | `cluster_failure_verdict` 的 4 种组合各一条 |
+| `tests/lib/cluster.bats` | 修改 | `cluster_failure_verdict` 的 4 种组合各一条 + 1 条 fail-closed 守卫 |
 | `tests/lib/topology.bats` | 修改 | 锁定三机布局的推导结果（表征测试） |
 | `tests/cluster_config.bats` | 修改 | 把「grep 脚本文本」改成「跑 `--dry-run` 看输出」 |
 | `tests/check_syntax.sh` | 修改 | 把 `cluster-config.sh` 加进语法检查清单 |
@@ -180,10 +180,10 @@ git commit -m "test(hd): pin the three-host redis cluster layout"
 
 **Files:**
 - Modify: `lib/cluster.sh`（在文件末尾追加函数）
-- Modify: `tests/lib/cluster.bats`（在文件末尾追加 4 条测试）
+- Modify: `tests/lib/cluster.bats`（在文件末尾追加 5 条测试）
 - Test: `tests/lib/cluster.bats`
 
-- [ ] **Step 1: 在 `tests/lib/cluster.bats` 末尾追加 4 条失败的测试**
+- [ ] **Step 1: 在 `tests/lib/cluster.bats` 末尾追加 5 条失败的测试**
 
 ```bash
 
@@ -192,46 +192,62 @@ git commit -m "test(hd): pin the three-host redis cluster layout"
 # What happens when a host dies depends on TWO things, and the old code
 # looked at only one of them:
 #
-#   survives  — is a majority of the masters still alive? (a replica can only
-#               be promoted with a quorum, so without one the dead master's
-#               slots stay uncovered FOREVER)
+#   survives  — will the slots that just lost their master ever be covered
+#               again? "no" has two causes: no quorum to promote with, or the
+#               master has no replica at all. lib/topology.sh computes the
+#               flag as "a quorum survives AND the master has a replica", so
+#               both causes collapse into this one flag.
 #   coverage  — `cluster-require-full-coverage`. With `yes` the cluster
 #               refuses EVERY write while any slot is uncovered; with `no`
 #               only the uncovered slots are refused.
 #
-# The combination decides everything, so all four are pinned here.
+# The combination decides everything, so all four are pinned here. Each case
+# asserts a marker no other case contains, so a rewording of one verdict
+# cannot make two of them overlap.
 
 @test "cluster_failure_verdict keeps serving when a quorum survives and coverage is off" {
     out=$(cluster_failure_verdict yes no)
     [[ "$out" == *"keeps serving"* ]]
-    [[ "$out" == *"replica is promoted"* ]]
+    [[ "$out" == *"promoted"* ]]
+    [[ "$out" != *"never covered"* ]]
+    [[ "$out" != *"refuses every write"* ]]
 }
 
 @test "cluster_failure_verdict warns about the write outage while coverage is on" {
     out=$(cluster_failure_verdict yes yes)
     [[ "$out" == *"refuses every write"* ]]
-    [[ "$out" == *"promoted"* ]]
+    [[ "$out" == *"cluster-node-timeout"* ]]
     [[ "$out" != *"keeps serving"* ]]
+    [[ "$out" != *"never covered"* ]]
 }
 
-@test "cluster_failure_verdict stops the cluster when there is no quorum and coverage is on" {
+@test "cluster_failure_verdict stops the cluster when the slots are never covered and coverage is on" {
     out=$(cluster_failure_verdict no yes)
     [[ "$out" == *"STOPS serving"* ]]
-    [[ "$out" == *"no quorum"* ]]
+    [[ "$out" == *"never covered"* ]]
+    [[ "$out" != *"keeps serving"* ]]
 }
 
 @test "cluster_failure_verdict keeps the surviving masters writable when coverage is off" {
     out=$(cluster_failure_verdict no no)
     [[ "$out" == *"surviving masters"* ]]
-    [[ "$out" == *"no quorum"* ]]
+    [[ "$out" == *"never covered"* ]]
     [[ "$out" != *"STOPS serving"* ]]
+    [[ "$out" != *"refuses every write"* ]]
+}
+
+@test "cluster_failure_verdict fails closed on an unknown coverage value" {
+    # An unknown value must not read as the optimistic one: "keeps serving"
+    # is the reading that hides a cluster-wide write outage.
+    out=$(cluster_failure_verdict yes maybe)
+    [[ "$out" == *"refuses every write"* ]]
 }
 ```
 
 - [ ] **Step 2: 跑测试，确认失败（red）**
 
 Run: `bats tests/lib/cluster.bats`
-Expected: **新增的 4 条 FAIL**（报 `cluster_failure_verdict: command not found`），
+Expected: **新增的 5 条 FAIL**（报 `cluster_failure_verdict: command not found`），
 其余 PASS。
 
 - [ ] **Step 3: 在 `lib/cluster.sh` 末尾追加实现**
@@ -241,11 +257,14 @@ Expected: **新增的 4 条 FAIL**（报 `cluster_failure_verdict: command not f
 # cluster_failure_verdict SURVIVES REQUIRE_FULL_COVERAGE
 # Echoes what happens to the cluster when the host holding these nodes dies.
 #
-#   SURVIVES               "yes" | "no"  — is a majority of the masters still
-#                                             alive? A replica can only be
-#                                             promoted with a quorum, so
-#                                             without one the dead master's
-#                                             slots stay uncovered forever.
+#   SURVIVES               "yes" | "no"  — will the slots that just lost their
+#                                             master ever be covered again?
+#                                             "yes" = a quorum survives AND the
+#                                             master has a replica to promote.
+#                                             "no" = they stay uncovered forever
+#                                             -- either no quorum to promote
+#                                             with, or the master has no
+#                                             replica at all.
 #   REQUIRE_FULL_COVERAGE  "yes" | "no"  — the value of
 #                                             cluster-require-full-coverage.
 #                                             With `yes` the cluster refuses
@@ -256,23 +275,47 @@ Expected: **新增的 4 条 FAIL**（报 `cluster_failure_verdict: command not f
 # The two are independent, so there are four outcomes and none of them may
 # be collapsed into a single sentence: the old code printed "keeps serving
 # (degraded)" for every case, which is wrong for coverage=yes.
+#
+# The strings state the EFFECT, not the cause: SURVIVES=no has two possible
+# causes (no quorum, or no replica for the dead master) and only the effect is
+# the same for both.
 cluster_failure_verdict() {
     local survives="$1" coverage="$2"
+    # An unrecognised coverage value must not fail OPEN: the optimistic
+    # reading ("keeps serving") is the one that hides a cluster-wide write
+    # outage. lib/conf.sh only ever produces yes|no, but this prints an
+    # operator-facing verdict, so it defaults to the safe side.
+    case "$coverage" in
+        yes|no) ;;
+        *) coverage=yes ;;
+    esac
     if [ "$survives" = "yes" ]; then
         if [ "$coverage" = "yes" ]; then
-            printf 'the cluster refuses every write until the replica is promoted (~15s), then serves again'
+            printf 'the cluster refuses every write once the failure is detected, until the replicas are promoted (after cluster-node-timeout, 15s in the shipped template)'
         else
-            printf "the cluster keeps serving (degraded): the failed master's slots are unavailable until its replica is promoted"
+            printf 'the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted'
         fi
     else
         if [ "$coverage" = "yes" ]; then
-            printf 'the cluster STOPS serving (no quorum to promote a replica, and cluster-require-full-coverage=yes refuses every write)'
+            printf 'the cluster STOPS serving (the slots that just lost their master are never covered, and cluster-require-full-coverage=yes refuses every write)'
         else
-            printf "the cluster keeps serving the surviving masters' slots only (no quorum to promote a replica)"
+            printf "the cluster keeps serving the surviving masters' slots only (the slots that just lost their master are never covered)"
         fi
     fi
 }
 ```
+
+> 📌 **`SURVIVES` 不是「多数派还在不在」，而是「那台机刚失去 master 的槽位还会不会被接管」**
+> —— `lib/topology.sh` 的判定是 `alive >= majority && protected == 1`，
+> 所以 `no` 有两个成因（没有多数派 / 那个 master 没有副本），
+> 措辞因此只说**效果**不说**成因**。
+> 📌 `~15s` 那个数字来自模板里的 `cluster-node-timeout 15000`，**是配置值不是常量**
+> （仓库里 `scripts/smoke-test.sh` 用的是 5000）⇒ 消息里**点配置名**，不写死数字。
+> ⚠️ 而且故障**不是立刻被发现的**：在 `cluster-node-timeout` 到期之前，
+> 集群可能**看起来还健康、还在接受写入**（`scripts/e2e-cluster-config.sh` 的实测注释），
+> 所以措辞是「**故障被发现之后**拒绝写入」，不是「拒绝写入直到副本被提升（~15s）」。
+> 📌 覆盖率是**配置值**，不是常量 ⇒ 遇到**不认识的值**必须**fail closed**
+> （往 `yes` 靠），因为「keeps serving」恰好是那个会**掩盖全集群停写**的读法。
 
 - [ ] **Step 4: 跑测试，确认通过（green）**
 
@@ -359,7 +402,8 @@ ports = 6379,6380
 EOF
     run bash "$REPO_ROOT/cluster-config.sh" --config "$CONF_TMP/three-yes.conf" --dry-run
     [ "$status" -eq 0 ]
-    [[ "$output" == *"10.0.0.1: if it fails the cluster refuses every write until the replica is promoted"* ]]
+    [[ "$output" == *"10.0.0.1: if it fails the cluster refuses every write once the failure is detected"* ]]
+    [[ "$output" == *"cluster-node-timeout"* ]]
     [[ "$output" != *"keeps serving"* ]]
 }
 ```
@@ -388,13 +432,13 @@ Expected: **新增的 2 条 FAIL**（当前脚本对 `yes` 也打印 `keeps serv
 
 ```bash
     # The verdict comes from lib/cluster.sh, which knows about BOTH inputs:
-    # whether a quorum survives and what cluster-require-full-coverage is.
-    # The old code looked at the first one only and printed "keeps serving"
-    # even with coverage=yes, where the cluster refuses every write until the
-    # replica is promoted.
+    # whether the slots that just lost their master will be covered again, and
+    # what cluster-require-full-coverage is. The old code looked at the first
+    # one only and printed "keeps serving" even with coverage=yes, where the
+    # cluster refuses every write once the failure is detected.
     #
-    # log_info only when nothing has to be acted on: a quorum survives AND
-    # coverage is off. Everything else is a warning.
+    # log_info only when nothing has to be acted on: the slots are covered
+    # again AND coverage is off. Everything else is a warning.
     for (( j = 1; j <= TOPO_GROUP_COUNT; j++ )); do
         verdict="$(cluster_failure_verdict "${TOPO_SURVIVES[$j]}" "$CONF_REQUIRE_FULL_COVERAGE")"
         if [ "${TOPO_SURVIVES[$j]}" = "yes" ] && [ "$CONF_REQUIRE_FULL_COVERAGE" != "yes" ]; then
@@ -921,11 +965,11 @@ grep -q "host $protected: if it fails the cluster keeps serving" "$WORK/install.
 
 ```bash
 # The main run's config does NOT set cluster_require_full_coverage, so the
-# default (yes) applies: the cluster refuses every write until the replica is
-# promoted. Saying "keeps serving" there would be the lie this whole change
-# is about -- the A5 case below already measures that a host failure stops
-# writes with coverage=yes.
-grep -q "host $protected: if it fails the cluster refuses every write until the replica is promoted" "$WORK/install.log" \
+# default (yes) applies: once the failure is detected the cluster refuses
+# every write until the replicas are promoted. Saying "keeps serving" there
+# would be the lie this whole change is about -- the A5 case below already
+# measures that a host failure stops writes with coverage=yes.
+grep -q "host $protected: if it fails the cluster refuses every write once the failure is detected" "$WORK/install.log" \
     || fail "cluster-config.sh did not name $protected as the host whose failure interrupts writes:
 $(grep -i 'if it fails' "$WORK/install.log" || true)"
 ```
@@ -998,9 +1042,9 @@ Config OK: 3 node(s), 6 instance(s), 1 replica(s) per master
   replica 192.168.1.10:6380 -> master 192.168.1.12:6379
   replica 192.168.1.11:6380 -> master 192.168.1.10:6379
   replica 192.168.1.12:6380 -> master 192.168.1.11:6379
-  host 192.168.1.10: if it fails the cluster keeps serving (degraded)
-  host 192.168.1.11: if it fails the cluster keeps serving (degraded)
-  host 192.168.1.12: if it fails the cluster keeps serving (degraded)
+  host 192.168.1.10: if it fails the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted
+  host 192.168.1.11: if it fails the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted
+  host 192.168.1.12: if it fails the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted
 ```
 
 ⚠️ **主从映射必须与上面逐字一致** —— 贪心分配按「候选数相同取先选中者」打破平局，
@@ -1013,7 +1057,7 @@ sed 's/cluster_require_full_coverage = no/cluster_require_full_coverage = yes/' 
     cluster.conf.hd.example > /tmp/cov-yes.conf
 bash cluster-config.sh --config /tmp/cov-yes.conf --dry-run
 ```
-Expected: 三台都打印 `if it fails the cluster refuses every write until the replica is promoted`，
+Expected: 三台都打印 `if it fails the cluster refuses every write once the failure is detected`，
 且**不再出现** `keeps serving`。
 
 - [ ] **Step 4: 确认工作区干净、推送**

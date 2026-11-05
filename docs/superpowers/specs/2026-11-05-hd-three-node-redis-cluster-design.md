@@ -125,7 +125,7 @@ fi
 
 | 限制 | 什么时候存在 |
 |---|---|
-| **提升窗口** | master 挂掉到它的副本被提升之间（`cluster-node-timeout 15000`）⇒ 它的槽位无人覆盖 ⇒ `yes` 时**全集群停写这 15 秒** |
+| **提升窗口** | master 挂掉 → 故障**被发现**（`cluster-node-timeout 15000`）→ 副本被提升 ⇒ 这段时间它的槽位无人覆盖 ⇒ `yes` 时**全集群停写**；⚠️ **但前 15 秒集群可能还「看起来健康、还在接受写入」** —— 停写不是立刻发生的，措辞不能说「拒绝写入直到副本被提升（~15s）」 |
 | **无多数派时永久停写** | 挂掉承担多数派 master 的那台（两台布局）⇒ 副本不能提升 ⇒ 槽位永远无人覆盖 ⇒ `yes` 时**永久停写** |
 
 ⚠️ **这不是三机引入的** —— 两机时 `yes` 同样会停写，脚本同样在骗人。
@@ -188,25 +188,63 @@ replica node3:6380 -> master node1:6379
 **改法**：把措辞抽成一个**纯函数**放到 `lib/cluster.sh`（可单测），
 `cluster-config.sh` 的 `print_topology` 调用它：
 
+> 📌 **`SURVIVES` 的含义是「那台机器上刚失去 master 的槽位，日后还会不会被接管」**，
+> 不是「多数派还在不在」——
+> `lib/topology.sh` 的判定是「多数派还在 **且** 该机的每个 master 都有副本」
+> （`alive >= majority && protected == 1`），
+> 所以 `no` 有**两个**成因：**没有多数派**，**或**那个 master **压根没有副本**
+> （`lib/conf.sh` 允许最少 5 个实例 ⇒ 这种布局真实可达）。
+> ⇒ **措辞只说「效果」（槽位永远没人接管），不说「成因」** ——
+> 否则第二种情形下会给出**错误的诊断**，把操作的人引向「加机器」而不是「加副本」。
+
 ```bash
 # lib/cluster.sh
 # cluster_failure_verdict SURVIVES REQUIRE_FULL_COVERAGE
-#   SURVIVES = "yes" | "no"     —— 挂掉这台机器后，多数派是否还在
-#   REQUIRE_FULL_COVERAGE = "yes" | "no"
-# Echoes the verdict for "what happens if this host dies".
+# Echoes what happens to the cluster when the host holding these nodes dies.
+#
+#   SURVIVES               "yes" | "no"  — will the slots that just lost their
+#                                             master ever be covered again?
+#                                             "yes" = a quorum survives AND the
+#                                             master has a replica to promote.
+#                                             "no" = they stay uncovered forever
+#                                             -- either no quorum to promote
+#                                             with, or the master has no
+#                                             replica at all.
+#   REQUIRE_FULL_COVERAGE  "yes" | "no"  — the value of
+#                                             cluster-require-full-coverage.
+#                                             With `yes` the cluster refuses
+#                                             EVERY write while any slot is
+#                                             uncovered; with `no` only the
+#                                             uncovered slots are refused.
+#
+# The two are independent, so there are four outcomes and none of them may
+# be collapsed into a single sentence: the old code printed "keeps serving
+# (degraded)" for every case, which is wrong for coverage=yes.
+#
+# The strings state the EFFECT, not the cause: SURVIVES=no has two possible
+# causes (no quorum, or no replica for the dead master) and only the effect is
+# the same for both.
 cluster_failure_verdict() {
     local survives="$1" coverage="$2"
+    # An unrecognised coverage value must not fail OPEN: the optimistic
+    # reading ("keeps serving") is the one that hides a cluster-wide write
+    # outage. lib/conf.sh only ever produces yes|no, but this prints an
+    # operator-facing verdict, so it defaults to the safe side.
+    case "$coverage" in
+        yes|no) ;;
+        *) coverage=yes ;;
+    esac
     if [ "$survives" = "yes" ]; then
         if [ "$coverage" = "yes" ]; then
-            printf 'the cluster refuses every write until the replica is promoted (~15s), then serves again'
+            printf 'the cluster refuses every write once the failure is detected, until the replicas are promoted (after cluster-node-timeout, 15s in the shipped template)'
         else
-            printf 'the cluster keeps serving (degraded): the failed master'"'"'s slots are unavailable until its replica is promoted'
+            printf 'the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted'
         fi
     else
         if [ "$coverage" = "yes" ]; then
-            printf 'the cluster STOPS serving (no quorum to promote a replica, and cluster-require-full-coverage=yes refuses every write)'
+            printf 'the cluster STOPS serving (the slots that just lost their master are never covered, and cluster-require-full-coverage=yes refuses every write)'
         else
-            printf 'the cluster keeps serving the surviving masters'"'"' slots only (no quorum to promote a replica)'
+            printf "the cluster keeps serving the surviving masters' slots only (the slots that just lost their master are never covered)"
         fi
     fi
 }
@@ -216,10 +254,15 @@ cluster_failure_verdict() {
 
 | `SURVIVES` | `REQUIRE_FULL_COVERAGE` | 措辞 |
 |---|---|---|
-| `yes` | `no` | `the cluster keeps serving (degraded): the failed master's slots are unavailable until its replica is promoted` |
-| `yes` | `yes` | `the cluster refuses every write until the replica is promoted (~15s), then serves again` |
-| `no` | `no` | `the cluster keeps serving the surviving masters' slots only (no quorum to promote a replica)` |
-| `no` | `yes` | `the cluster STOPS serving (no quorum to promote a replica, and cluster-require-full-coverage=yes refuses every write)` |
+| `yes` | `no` | `the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted` |
+| `yes` | `yes` | `the cluster refuses every write once the failure is detected, until the replicas are promoted (after cluster-node-timeout, 15s in the shipped template)` |
+| `no` | `no` | `the cluster keeps serving the surviving masters' slots only (the slots that just lost their master are never covered)` |
+| `no` | `yes` | `the cluster STOPS serving (the slots that just lost their master are never covered, and cluster-require-full-coverage=yes refuses every write)` |
+
+> 📌 **`~15s` 那个数字是模板里的 `cluster-node-timeout 15000`，是配置值不是常量**
+> （仓库里 `scripts/smoke-test.sh` 用的是 5000）⇒ 消息里**点配置名**，
+> 并且说「**故障被发现之后**」才拒绝写入 ——
+> 在那之前集群可能**看起来还健康、还在接受写入**（`scripts/e2e-cluster-config.sh` 的实测注释）。
 
 ⚠️ **`lib/topology.sh` 保持纯函数** —— 它是「输入进、输出进全局」的无副作用模块，
 引入 `CONF_*` 依赖会破坏它「可单测」的属性（文件头自己写着这一点）。
@@ -230,7 +273,7 @@ cluster_failure_verdict() {
 | 位置 | 现状 | 要改成 |
 |---|---|---|
 | A3 · fragile 那台 | `grep "host $fragile: if it fails the cluster STOPS serving"` | **不变**（`survives=no` + `yes` ⇒ 措辞仍含 `the cluster STOPS serving`） |
-| A3 · protected 那台 | `grep "host $protected: if it fails the cluster keeps serving"` | 改成 `grep "host $protected: if it fails the cluster refuses every write until the replica is promoted"` —— 主 E2E 配置**没写** `cluster_require_full_coverage` ⇒ 用的是默认 `yes` |
+| A3 · protected 那台 | `grep "host $protected: if it fails the cluster keeps serving"` | 改成 `grep "host $protected: if it fails the cluster refuses every write once the failure is detected"` —— 主 E2E 配置**没写** `cluster_require_full_coverage` ⇒ 用的是默认 `yes` |
 | A6（`coverage=no` 那次重建） | 无措辞断言 | **加一条**：protected 那台应打印 `keeps serving (degraded)` |
 
 ⚠️ **这条 E2E 断言改动不是「改测试来迁就代码」** —— 仓库的 E2E **自己就矛盾**：
@@ -383,9 +426,9 @@ for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh \
 | # | 验证 | 命令 | 期望 |
 |---|---|---|---|
 | 1 | 语法 | `bash tests/check_syntax.sh` | `TOTAL=47 FAIL=0`（**+1**：`cluster-config.sh` 原来**不在**检查清单里，本轮补进去） |
-| 2 | 库函数 | `bash tests/validate_libs.sh` | `PASS=58 FAIL=0`（**+4**：四种 `survives × coverage` 组合各一条） |
+| 2 | 库函数 | `bash tests/validate_libs.sh` | `PASS=54 FAIL=0`（**不变** —— 覆盖率措辞的断言放在 `tests/lib/cluster.bats` 里：**5** 条 = 四种 `survives × coverage` 组合 + 1 条 fail-closed 守卫） |
 | 3 | 三机拓扑 | `bash cluster-config.sh --config cluster.conf.hd.example --dry-run` | 3 master + 3 replica 循环映射；三台 survives |
-| 4 | 覆盖率措辞 | 同上，把样例里 `cluster_require_full_coverage` 改成 `yes` 再跑 | 三台都打印 `refuses every write until the replica is promoted` |
+| 4 | 覆盖率措辞 | 同上，把样例里 `cluster_require_full_coverage` 改成 `yes` 再跑 | 三台都打印 `refuses every write once the failure is detected` |
 | 5 | 样例文件自检 | 解析 `cluster.conf.hd.example` | 3 个节点组 / 6 个实例 / `coverage=no` |
 | 6 | 文档一致性 | 全树扫 `§N` 引用 | 每一处都能解析到真实章节 |
 | 7 | 手册无残留 | 扫 `docs/HD-OPERATIONS.md` 的「两台」 | 只剩 §3（ZK/Kafka）里的 |
