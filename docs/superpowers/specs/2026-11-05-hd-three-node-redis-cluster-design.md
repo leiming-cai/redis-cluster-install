@@ -34,7 +34,7 @@
 
 | # | 事 | 说明 |
 |---|---|---|
-| 1 | `lib/cluster.sh` 新增纯函数 `cluster_failure_verdict` + `cluster-config.sh` 的 `print_topology` 调用它 | 容错提示要考虑 `cluster_require_full_coverage`（§4.2）—— 这是**唯一**的代码改动 |
+| 1 | `lib/cluster.sh` 新增纯函数 `cluster_failure_verdict` + `cluster-config.sh` 的 `print_topology` 调用它 | 容错提示要考虑 `cluster_require_full_coverage`（§4.2）—— 这是**唯一**的行为改动（另有一处**纯注释**的改动：`lib/topology.sh` 里 `TOPO_SURVIVES` 的含义说明） |
 | 2 | `scripts/e2e-cluster-config.sh` 的 A3 断言同步 | 它断言的正是本轮要改的措辞（§4.2）—— **不改就会红** |
 | 3 | `tests/check_syntax.sh` 补上 `cluster-config.sh` | 它**本来就不在**检查清单里（§4.6） |
 | 4 | `cluster.conf.hd.example`（**新建**） | 三台机器的完整样例配置（§4.4） |
@@ -45,7 +45,7 @@
 | # | 事 | 为什么 |
 |---|---|---|
 | 1 | **`install.sh`** | Redis **现场已装好**（8.10.0），不需要脚本编译安装。`install.sh` 硬编码 `A_HOST`/`B_HOST` + `A_PORTS`/`B_PORTS`（6379-6384）—— **保持不动** |
-| 2 | **`lib/topology.sh` / `lib/conf.sh`** | 实测它们**已经是 N 台通用**（§3.1），不需要改 |
+| 2 | **`lib/conf.sh`**（`lib/topology.sh` **只改注释**） | 实测它们**已经是 N 台通用**（§3.1），不需要改行为；本轮只把 `lib/topology.sh` 里 `TOPO_SURVIVES` 的含义说明改成准确的（**纯注释**，不改行为） |
 | 3 | **`config/redis.conf.template` / `config/redis-cluster.service.template`** | 实测模板的 54 条指令**全部存在于 8.10.0**（§3.3） |
 | 4 | **ZK / Kafka 的任何内容** | 本轮只做 Redis。§3 整章（两节点 ZK/Kafka）**原封不动** |
 | 5 | **主线产品文档**（`docs/OPERATIONS.md` / `docs/USAGE.md` / `README.md`） | 那是另一个交付形态（用户自己的两台机），改了会与已交付的内容不一致 |
@@ -236,7 +236,7 @@ cluster_failure_verdict() {
     esac
     if [ "$survives" = "yes" ]; then
         if [ "$coverage" = "yes" ]; then
-            printf 'the cluster refuses every write once the failure is detected, until the replicas are promoted (after cluster-node-timeout, 15s in the shipped template)'
+            printf 'the cluster refuses every write once the failure is detected, until the replicas are promoted (detection takes cluster-node-timeout, 15s in the shipped template)'
         else
             printf 'the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted'
         fi
@@ -255,7 +255,7 @@ cluster_failure_verdict() {
 | `SURVIVES` | `REQUIRE_FULL_COVERAGE` | 措辞 |
 |---|---|---|
 | `yes` | `no` | `the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted` |
-| `yes` | `yes` | `the cluster refuses every write once the failure is detected, until the replicas are promoted (after cluster-node-timeout, 15s in the shipped template)` |
+| `yes` | `yes` | `the cluster refuses every write once the failure is detected, until the replicas are promoted (detection takes cluster-node-timeout, 15s in the shipped template)` |
 | `no` | `no` | `the cluster keeps serving the surviving masters' slots only (the slots of at least one master on that host are never covered)` |
 | `no` | `yes` | `the cluster STOPS serving (the slots of at least one master on that host are never covered, and cluster-require-full-coverage=yes refuses every write)` |
 
@@ -364,9 +364,9 @@ for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh \
 | 多数派？ | 存活 master = node2:6379、node3:6379 = **2/3** ✅ ⇒ 副本**有权提升** |
 | `node1:6379` 的槽位 | 它的副本是 `node2:6380` —— **活着，在另一台** ✅ ⇒ 提升 ⇒ **槽位被接管** |
 | `node3:6379` 的槽位 | master **自己活着** ✅（它只是没了副本，不影响槽位覆盖） |
-| 结论 | **16384 个槽位全覆盖** ⇒ `cluster_state:ok` ⇒ **写入照常** |
+| 结论 | **16384 个槽位全覆盖** ⇒ `cluster_state:ok` ⇒ **写入照常**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见 §6.2） |
 
-⇒ **三台机器买到的是「挂掉任意一台，集群全量可写」** —— 这是两台**数学上做不到**的事
+⇒ **三台机器买到的是「挂掉任意一台，集群全量可写」**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见 §6.2）—— 这是两台**数学上做不到**的事
 （两台时必有一台承担 2 个 master，那台挂掉就不过多数派 ⇒ 副本不能提升 ⇒ 槽位无人接管）。
 
 **这正是 2026-10-28 那份 spec §3.5 说的「要两头都活至少需要 3 台机器」的兑现。**
@@ -419,7 +419,7 @@ cluster can still look healthy and accept writes"*）。
 | # | 事 | 为什么 |
 |---|---|---|
 | 1 | 改 `install.sh` | Redis 现场已装好（8.10.0） |
-| 2 | 改 `lib/topology.sh` / `lib/conf.sh` | 实测 N 台通用 |
+| 2 | 改 `lib/topology.sh` 的**行为** / `lib/conf.sh` | 实测 N 台通用；`lib/topology.sh` 本轮**只改了注释**（`TOPO_SURVIVES` 的含义说明） |
 | 3 | 改 `config/*.template` | 实测 54 条指令在 8.10.0 全部有效 |
 | 4 | 改 ZK/Kafka | 本轮只做 Redis |
 | 5 | 改主线产品文档 | 另一个交付形态 |

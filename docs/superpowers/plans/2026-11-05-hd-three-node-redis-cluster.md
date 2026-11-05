@@ -4,7 +4,7 @@
 
 **Goal:** 把华盾生产的 Redis 目标形态从「两台 × 3 实例」改成「**三台 × 2 实例（每台 6379+6380）**」，并让**脚本的容错提示**、**配置样例**、**运维手册**三者一致且不说假话。
 
-**Architecture:** 拓扑算法（`lib/topology.sh`）实测已经是 N 台通用，**一行都不用改** —— 本轮改的是三处「说错了话」的地方：(1) `cluster-config.sh` 打印的容错结论不看 `cluster-require-full-coverage`，在 `yes` 下会撒谎；(2) 没有三台机器的样例配置；(3) `docs/HD-OPERATIONS.md` 通篇按「两台」写。
+**Architecture:** 拓扑算法（`lib/topology.sh`）实测已经是 N 台通用，**行为一行都不用改**（本轮只改了它文件头一句注释）—— 本轮改的是三处「说错了话」的地方：(1) `cluster-config.sh` 打印的容错结论不看 `cluster-require-full-coverage`，在 `yes` 下会撒谎；(2) 没有三台机器的样例配置；(3) `docs/HD-OPERATIONS.md` 通篇按「两台」写。
 
 **Tech Stack:** Bash 4+ · bats（`tests/*.bats`）· `tests/validate_libs.sh`（纯 bash 断言）· `tests/check_syntax.sh`（`bash -n`）· Redis 8.10.0（现场版本）
 
@@ -72,6 +72,7 @@ with open(path, "w", encoding="utf-8", newline="") as f:
 | 文件 | 动作 | 职责 |
 |---|---|---|
 | `lib/cluster.sh` | 修改 | 新增纯函数 `cluster_failure_verdict`（容错结论的唯一出处） |
+| `lib/topology.sh` | 修改 | 只改 `TOPO_SURVIVES` 的含义说明（**纯注释**，不改行为） |
 | `cluster-config.sh` | 修改 | `print_topology` 调用上面那个函数 |
 | `tests/lib/cluster.bats` | 修改 | `cluster_failure_verdict` 的 4 种组合各一条 + 1 条 fail-closed 守卫 |
 | `tests/lib/topology.bats` | 修改 | 锁定三机布局的推导结果（表征测试） |
@@ -82,7 +83,8 @@ with open(path, "w", encoding="utf-8", newline="") as f:
 | `docs/HD-OPERATIONS.md` | 修改 | Redis 相关章节「两台」→「三台」+ 容错边界重写 |
 | `scripts/e2e-cluster-config.sh` | 修改 | A3 断言跟随新措辞；A6 加一条 `no` 的断言 |
 
-⚠️ **`lib/topology.sh` / `lib/conf.sh` / `config/*.template` / `install.sh` 一行都不改** —— 实测它们不需要改（spec §3.1 / §3.3）。
+⚠️ **`lib/conf.sh` / `config/*.template` / `install.sh` 一行都不改**；
+**`lib/topology.sh` 只改注释**（`TOPO_SURVIVES` 的含义说明，不改行为）—— 实测它不需要改行为（spec §3.1 / §3.3）。
 
 ⚠️ **`scripts/e2e-cluster-config.sh` 的改动需要 Docker 才能验证** —— 本机 Docker Desktop 未启动时，Task 7 只做 `bash -n` 与人工核对，**并如实记录「未在 Docker 里跑过」**。
 
@@ -180,6 +182,7 @@ git commit -m "test(hd): pin the three-host redis cluster layout"
 
 **Files:**
 - Modify: `lib/cluster.sh`（在文件末尾追加函数）
+- Modify: `lib/topology.sh`（只改 `TOPO_SURVIVES` 的注释，不改行为）
 - Modify: `tests/lib/cluster.bats`（在文件末尾追加 5 条测试）
 - Test: `tests/lib/cluster.bats`
 
@@ -207,7 +210,7 @@ git commit -m "test(hd): pin the three-host redis cluster layout"
 
 @test "cluster_failure_verdict keeps serving when a quorum survives and coverage is off" {
     out=$(cluster_failure_verdict yes no)
-    [[ "$out" == *"keeps serving"* ]]
+    [[ "$out" == *"keeps serving (degraded)"* ]]
     [[ "$out" == *"promoted"* ]]
     [[ "$out" != *"never covered"* ]]
     [[ "$out" != *"refuses every write"* ]]
@@ -241,6 +244,10 @@ git commit -m "test(hd): pin the three-host redis cluster layout"
     # is the reading that hides a cluster-wide write outage.
     out=$(cluster_failure_verdict yes maybe)
     [[ "$out" == *"refuses every write"* ]]
+    out=$(cluster_failure_verdict yes "")
+    [[ "$out" == *"refuses every write"* ]]
+    out=$(cluster_failure_verdict no maybe)
+    [[ "$out" == *"STOPS serving"* ]]
 }
 ```
 
@@ -291,7 +298,7 @@ cluster_failure_verdict() {
     esac
     if [ "$survives" = "yes" ]; then
         if [ "$coverage" = "yes" ]; then
-            printf 'the cluster refuses every write once the failure is detected, until the replicas are promoted (after cluster-node-timeout, 15s in the shipped template)'
+            printf 'the cluster refuses every write once the failure is detected, until the replicas are promoted (detection takes cluster-node-timeout, 15s in the shipped template)'
         else
             printf 'the cluster keeps serving (degraded): the slots that just lost their master are unavailable until a replica is promoted'
         fi
@@ -316,6 +323,21 @@ cluster_failure_verdict() {
 > 所以措辞是「**故障被发现之后**拒绝写入」，不是「拒绝写入直到副本被提升（~15s）」。
 > 📌 覆盖率是**配置值**，不是常量 ⇒ 遇到**不认识的值**必须**fail closed**
 > （往 `yes` 靠），因为「keeps serving」恰好是那个会**掩盖全集群停写**的读法。
+
+- [ ] **Step 3b: 把 `lib/topology.sh` 里 `TOPO_SURVIVES` 的注释改准确（纯注释）**
+
+`lib/topology.sh` 的**行为一行都不改** —— 只改它文件头对 `TOPO_SURVIVES` 的说明。
+旧说明（*"yes if the cluster keeps serving when group i dies"*）与 `lib/cluster.sh` 里
+`cluster_failure_verdict` 用的定义**不是一回事**（`TOPO_SURVIVES` 还要求「该机的每个
+master 都有副本」），而且在 `coverage=yes` 下旧说法是**错的**：
+
+```bash
+#   TOPO_SURVIVES[i]  'yes' if group i's masters all have a replica AND a quorum
+#                     would survive group i's death -- i.e. the slots that just
+#                     lost their master would be covered again. (The
+#                     operator-facing wording is lib/cluster.sh's
+#                     cluster_failure_verdict.)
+```
 
 - [ ] **Step 4: 跑测试，确认通过（green）**
 
@@ -853,7 +875,7 @@ master node2:6379  <- replica node3:6380
 master node3:6379  <- replica node1:6380
 ```
 
-**结论先说**：**三台机器下，挂掉任意一台，集群都还能全量可写。**
+**结论先说**：**三台机器下，挂掉任意一台，集群都还能全量可写**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见 §6.2）。
 
 **为什么**（两台做不到的事）：
 
@@ -863,7 +885,7 @@ master node3:6379  <- replica node1:6380
 | 多数派？ | 存活 master = node2:6379、node3:6379 = **2/3** ✅ ⇒ 副本**有权提升** |
 | node1:6379 的槽位 | 它的副本 `node2:6380` **活着，在另一台** ✅ ⇒ 提升 ⇒ **槽位被接管** |
 | node3:6379 的槽位 | master **自己活着** ✅（它只是没了副本，不影响槽位覆盖） |
-| 结论 | **16384 个槽位全覆盖** ⇒ `cluster_state:ok` ⇒ **写入照常** |
+| 结论 | **16384 个槽位全覆盖** ⇒ `cluster_state:ok` ⇒ **写入照常**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见 §6.2） |
 
 > 📌 **两台为什么做不到**：3 个 master 分到 2 台机器，必有一台承担 2 个
 > ⇒ 那台挂掉只剩 1 个 master，**不过多数派** ⇒ 副本无权提升 ⇒
@@ -1105,7 +1127,7 @@ git push origin main
 | # | 事 | 为什么 |
 |---|---|---|
 | 1 | 改 `install.sh` | Redis 现场已装好（8.10.0） |
-| 2 | 改 `lib/topology.sh` / `lib/conf.sh` | 实测 N 台通用 |
+| 2 | 改 `lib/topology.sh` 的**行为** / `lib/conf.sh` | 实测 N 台通用；`lib/topology.sh` 本轮**只改了注释**（`TOPO_SURVIVES` 的含义说明） |
 | 3 | 改 `config/*.template` | 实测 54 条指令在 8.10.0 全部有效 |
 | 4 | 改 ZK/Kafka（§3 整章） | 本轮只做 Redis |
 | 5 | 改主线产品文档（`OPERATIONS.md` / `USAGE.md` / `README.md`） | 另一个交付形态 |
