@@ -362,8 +362,8 @@ git commit -m "feat(cluster): add the coverage-aware failure verdict"
 ### Task 3: `cluster-config.sh` 的 `print_topology` 用上新函数（TDD）
 
 **Files:**
-- Modify: `cluster-config.sh:130-148`（`print_topology` 函数）
-- Modify: `tests/cluster_config.bats:239-243`（把「grep 脚本文本」改成「跑 `--dry-run` 看输出」）
+- Modify: `cluster-config.sh:120-165`（`print_topology` 函数 + 它上面的说明）
+- Modify: `tests/cluster_config.bats:239-305`（把「grep 脚本文本」改成「跑 `--dry-run` 看输出」+ 钉住日志级别）
 - Test: `tests/cluster_config.bats`
 
 - [ ] **Step 1: 在 `tests/cluster_config.bats` 里替换掉那条靠 grep 文件文本的测试**
@@ -387,6 +387,16 @@ git commit -m "feat(cluster): add the coverage-aware failure verdict"
 # The verdict depends on cluster-require-full-coverage, so the same layout
 # produces different words. Grepping the source for "keeps serving" proved
 # nothing: the text can be in the file and never reach the operator.
+#
+# The LEVEL is part of the verdict too: log_warn goes to stderr and log_info
+# to stdout (lib/common.sh), so the operator can tell a routine note from a
+# warning by the stream alone -- a cluster-wide write outage must not be
+# reported as routine information. bats' `run` merges stderr into $output, so
+# the marker is visible, but it has to be asserted ON THE SAME LINE as the
+# verdict: a glob like *"[INFO]"*"host ..."* is satisfied just as well by an
+# [INFO] line printed earlier, so it would pin nothing. grep -E works line by
+# line, so "[INFO].*host ..." means "the marker and the verdict are on the
+# same line".
 
 @test "cluster-config.sh --dry-run says the cluster keeps serving when coverage is off" {
     cat > "$CONF_TMP/three-no.conf" <<'EOF'
@@ -407,6 +417,10 @@ EOF
     [[ "$output" == *"10.0.0.1: if it fails the cluster keeps serving (degraded)"* ]]
     [[ "$output" == *"10.0.0.2: if it fails the cluster keeps serving (degraded)"* ]]
     [[ "$output" == *"10.0.0.3: if it fails the cluster keeps serving (degraded)"* ]]
+    # All three hosts are at INFO: with coverage off nothing has to be acted
+    # on, so a WARN here would cry wolf.
+    local info_lines='\[INFO\].*host 10\.0\.0\.[123]: if it fails the cluster keeps serving \(degraded\)'
+    [ "$(printf '%s\n' "$output" | grep -cE "$info_lines" || true)" -eq 3 ]
 }
 
 @test "cluster-config.sh --dry-run warns about the write outage when coverage is on" {
@@ -428,6 +442,12 @@ EOF
     [[ "$output" == *"10.0.0.1: if it fails the cluster refuses every write once the failure is detected"* ]]
     [[ "$output" == *"cluster-node-timeout"* ]]
     [[ "$output" != *"keeps serving"* ]]
+    # The level is pinned here too: the verdict says the cluster refuses EVERY
+    # write, so it has to be a WARNING. Downgraded to log_info the words stay
+    # true but the operator reads a cluster-wide outage as a routine note --
+    # and both tests above would still be green.
+    local warn_lines='\[WARN\].*host 10\.0\.0\.[123]: if it fails the cluster refuses every write once the failure is detected'
+    [ "$(printf '%s\n' "$output" | grep -cE "$warn_lines" || true)" -eq 3 ]
 }
 ```
 
@@ -441,7 +461,7 @@ Expected: **新增的 `coverage = yes` 那条 FAIL**（当前脚本对 `yes` 也
 
 - [ ] **Step 3: 改 `cluster-config.sh` 的 `print_topology`**
 
-把 `cluster-config.sh` 里 `print_topology()` 的这一段：
+把 `cluster-config.sh` 里 `print_topology()` 的这一段（**Task 3 之前的代码**，见 §3.5）：
 
 ```bash
     for (( j = 1; j <= TOPO_GROUP_COUNT; j++ )); do
@@ -459,14 +479,21 @@ Expected: **新增的 `coverage = yes` 那条 FAIL**（当前脚本对 `yes` 也
     # The verdict comes from lib/cluster.sh, which knows about BOTH inputs:
     # whether the slots that just lost their master will be covered again, and
     # what cluster-require-full-coverage is. The old code looked at the first
-    # one only and printed "keeps serving" even with coverage=yes, where the
-    # cluster refuses every write once the failure is detected.
+    # one only: it printed "keeps serving" even with coverage=yes, where the
+    # cluster refuses every write once the failure is detected, and its
+    # "STOPS serving" message named the cause (no quorum) instead of the
+    # effect -- a master with no replica at all is the other cause.
     #
     # log_info only when nothing has to be acted on: the slots are covered
     # again AND coverage is off. Everything else is a warning.
+    #
+    # "coverage is off" is spelled `= no` and not `!= yes` on purpose: the
+    # verdict fails closed on an unrecognised coverage value (it reads it as
+    # yes), so the severity has to fail closed with it -- otherwise an unknown
+    # value would print "refuses every write" as a routine INFO line.
     for (( j = 1; j <= TOPO_GROUP_COUNT; j++ )); do
         verdict="$(cluster_failure_verdict "${TOPO_SURVIVES[$j]}" "$CONF_REQUIRE_FULL_COVERAGE")"
-        if [ "${TOPO_SURVIVES[$j]}" = "yes" ] && [ "$CONF_REQUIRE_FULL_COVERAGE" != "yes" ]; then
+        if [ "${TOPO_SURVIVES[$j]}" = "yes" ] && [ "$CONF_REQUIRE_FULL_COVERAGE" = "no" ]; then
             log_info "  host ${TOPO_GROUP_HOST[$j]}: if it fails $verdict"
         else
             log_warn "  host ${TOPO_GROUP_HOST[$j]}: if it fails $verdict"
@@ -480,6 +507,38 @@ Expected: **新增的 `coverage = yes` 那条 FAIL**（当前脚本对 `yes` 也
 print_topology() {
     local j verdict
 ```
+
+- [ ] **Step 3b: 审查后补的四处（把「日志级别」变成被钉住的行为 + 三处说明）**
+
+审查发现：Task 3 把日志级别从「措辞隐含」变成了**显式的第二个决定**，而**没有任何测试覆盖它** ——
+`log_warn` 写 stderr、`log_info` 写 stdout（`lib/common.sh`），级别是**可观察的**，
+但把「refuses every write」那一行降级成 `log_info`，Step 1 的两条测试**仍然全绿**。
+
+⇒ **Step 1 的两条测试各加一条级别断言**（级别标记必须和结论在**同一行**上）：
+
+```bash
+    # All three hosts are at INFO: with coverage off nothing has to be acted
+    # on, so a WARN here would cry wolf.
+    local info_lines='\[INFO\].*host 10\.0\.0\.[123]: if it fails the cluster keeps serving \(degraded\)'
+    [ "$(printf '%s\n' "$output" | grep -cE "$info_lines" || true)" -eq 3 ]
+```
+
+`coverage = yes` 那条同理（断言 `[WARN]`、且仍然是 3 行）。
+
+> 📌 **为什么不用 `[[ "$output" == *"[INFO]"*"host ..."* ]]`** ——
+> bash 的 `*` **会跨行**匹配 ⇒ 输出里**前面**的任意一条 `[INFO]` 行都能满足它 ⇒ 它什么都没钉住。
+> `grep -E` 是**逐行**的，`.` 不跨换行 ⇒ `[INFO].*host ...` 才是「同一行」。
+
+⇒ **`cluster-config.sh` 的严重级别条件从 `!= "yes"` 改成 `= "no"`**：
+`cluster_failure_verdict` 对**不认识的**覆盖率值 **fail closed**（当 `yes` 读），
+严重级别必须**跟它一起 fail closed** —— 否则未知值会把「refuses every write」印成一条**普通 INFO**。
+（今天不可达：`lib/conf.sh` 只收 `yes|no`，而 `parse_conf` 跑在 `print_topology` 之前。）
+
+⇒ **两处说明改准确**（都只说**效果**，不说**成因**）：
+- 文件头（`print_topology` 上面那段）原来写「which host ends up holding the majority of the masters」——
+  那是**成因**，而 `TOPO_SURVIVES` 要的是「多数派还在 **且** 该机的每个 master 都有副本」。
+- 循环上面的注释原来只说旧代码在 `coverage=yes` 下说「keeps serving」——
+  旧代码的「STOPS serving」**也**是错的（它说了成因，而成因有**两个**）。
 
 - [ ] **Step 4: 跑测试，确认通过（green）**
 

@@ -186,7 +186,7 @@ replica node3:6380 -> master node1:6379
 
 ### 4.2 `cluster-config.sh`：容错提示考虑覆盖率（唯一的代码改动）
 
-**问题**：`print_topology` 打印容错结论时**完全不看** `CONF_REQUIRE_FULL_COVERAGE`，
+**问题（修复前）**：`print_topology` 打印容错结论时**完全不看** `CONF_REQUIRE_FULL_COVERAGE`，
 于是无论 `yes` 还是 `no` 都印同一句话 —— 而这两句话在两种配置下**结论相反**。
 
 **改法**：把措辞抽成一个**纯函数**放到 `lib/cluster.sh`（可单测），
@@ -271,6 +271,11 @@ cluster_failure_verdict() {
 ⚠️ **`lib/topology.sh` 保持纯函数** —— 它是「输入进、输出进全局」的无副作用模块，
 引入 `CONF_*` 依赖会破坏它「可单测」的属性（文件头自己写着这一点）。
 覆盖率相关的措辞**只**放在 `lib/cluster.sh` 的纯函数 + `cluster-config.sh` 的 `print_topology` 里。
+
+⚠️ **级别也是结论的一部分** —— `log_info` 走 stdout、`log_warn` 走 stderr（`lib/common.sh`），
+所以「refuses every write」那行**必须**是 WARN：不能让操作员把**全集群停写**读成一条**日常提示**。
+严重级别的判定与 `cluster_failure_verdict` **同向 fail closed** ——
+**不认识的**覆盖率值在两处都当 `yes` 读（`cluster-config.sh` 用 `= "no"`，不是 `!= "yes"`）。
 
 ⚠️ **`scripts/e2e-cluster-config.sh` 的 A3 断言必须同步改**（它是本轮的隐藏依赖）：
 
