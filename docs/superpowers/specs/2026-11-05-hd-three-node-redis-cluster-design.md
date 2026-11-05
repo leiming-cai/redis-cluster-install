@@ -332,7 +332,7 @@ A3 断言「protected 那台挂了集群 keeps serving」，而 **A5**（同一�
 | §2.2 `cluster.conf` 模板 | 3 个 `[node.X]` 段，每台 `ports = 6379,6380`；指路 `cluster.conf.hd.example` |
 | §2.2.1 端口规划 | 整张表重写：现状那三行（node1 的 6379 / node1 的 6380-6381 / node2 的 6382-6384）换成六行（每台 6379 = master、每台 6380 = replica）；**防火墙/总线端口表改成 6379-6380 + 16379-16380**；保留「6379 复用为 master #1」与「重建前清空数据目录（旧 `nodes.conf` 会让节点带旧身份启动）」两条告警 |
 | §2.3 第 1 步 | node2 **和 node3** 都要先装 Redis 二进制 + 建 `redis` 用户 |
-| §2.3 第 2 步 | `NODE_A_*` / `NODE_B_*` / **`NODE_C_*`** 三组环境变量 |
+| §2.3 第 2 步 | `NODE_NODE1_*` / `NODE_NODE2_*` / **`NODE_NODE3_*`** 三组环境变量 |
 | §2.3 第 3 步判据 | `cluster_size:3` · `cluster_known_nodes:6` 不变 |
 | §2.4 回退表 | 三台的回退路径 |
 | §2.5 容错硬边界 | **整节重写**（§6）：四象限真值表（`是否还有多数派` × `cluster-require-full-coverage`）；两台那套结论也要补上覆盖率这一维 |
@@ -401,7 +401,7 @@ for f in install.sh status.sh uninstall.sh add-node.sh scripts/smoke-test.sh \
 ⚠️ **`cluster-node-timeout 15000` 是「故障被发现」要花的时间，不是停写窗口的长度**
 （master 挂掉 → 被标记 FAIL 需要 15 秒）。**在这 15 秒里集群还「看起来健康」**，
 其它 master 照常接受写入 —— 仓库自己的 E2E 注释就是这么说的
-（`scripts/e2e-cluster-config.sh:556-558`：*"the masters are only marked fail
+（`scripts/e2e-cluster-config.sh:562-564`：*"the masters are only marked fail
 after cluster-node-timeout (15s in the template), and until then the
 cluster can still look healthy and accept writes"*）。
 **停写窗口从「被发现」开始，到「副本被提升、槽位重新被接管」为止**（通常远小于 15 秒）：

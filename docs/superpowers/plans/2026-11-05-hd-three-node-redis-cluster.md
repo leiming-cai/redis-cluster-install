@@ -971,7 +971,7 @@ export NODE_NODE3_SSH_USER=root NODE_NODE3_SSH_PASS='<node3 的 ssh 密码>'
 
 把 §2.5 整节换成（**四个象限都要写，缺一维就又变成「只说一半」**）：
 
-```markdown
+````markdown
 ### 2.5 ⭐ 容错边界（**两个维度一起看**）
 
 扩容后是 **3 master + 3 replica 跨 3 台机器**，每台机器恰好 1 个 master + 1 个副本
@@ -983,7 +983,7 @@ master node2:6379  <- replica node3:6380
 master node3:6379  <- replica node1:6380
 ```
 
-**结论先说**：**三台机器下，挂掉任意一台，集群都还能全量可写**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见 §6.2）。
+**结论先说**：**三台机器下，挂掉任意一台，集群都还能全量可写**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见本节下面的时间线表）。
 
 **为什么**（两台做不到的事）：
 
@@ -993,7 +993,7 @@ master node3:6379  <- replica node1:6380
 | 多数派？ | 存活 master = node2:6379、node3:6379 = **2/3** ✅ ⇒ 副本**有权提升** |
 | node1:6379 的槽位 | 它的副本 `node2:6380` **活着，在另一台** ✅ ⇒ 提升 ⇒ **槽位被接管** |
 | node3:6379 的槽位 | master **自己活着** ✅（它只是没了副本，不影响槽位覆盖） |
-| 结论 | **16384 个槽位全覆盖** ⇒ `cluster_state:ok` ⇒ **写入照常**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见 §6.2） |
+| 结论 | **16384 个槽位全覆盖** ⇒ `cluster_state:ok` ⇒ **写入照常**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见本节下面的时间线表） |
 
 > 📌 **两台为什么做不到**：3 个 master 分到 2 台机器，必有一台承担 2 个
 > ⇒ 那台挂掉只剩 1 个 master，**不过多数派** ⇒ 副本无权提升 ⇒
@@ -1004,7 +1004,7 @@ master node3:6379  <- replica node1:6380
 ⚠️ **`cluster-node-timeout 15000` 是「故障被发现」要花的时间，不是停写窗口的长度**
 （master 挂掉 → 被标记 FAIL 需要 15 秒）。**在这 15 秒里集群还「看起来健康」**，
 其它 master 照常接受写入 —— 仓库自己的 E2E 注释就是这么说的
-（`scripts/e2e-cluster-config.sh:556-558`：*"the masters are only marked fail
+（`scripts/e2e-cluster-config.sh:562-564`：*"the masters are only marked fail
 after cluster-node-timeout (15s in the template), and until then the
 cluster can still look healthy and accept writes"*）。
 **停写窗口从「被发现」开始，到「副本被提升、槽位重新被接管」为止**（通常远小于 15 秒）：
@@ -1023,7 +1023,7 @@ cluster can still look healthy and accept writes"*）。
 |---|---|---|
 | 挂掉「master 少」的那台 | 槽位全覆盖 ⇒ 可写 | **故障被发现后到提升完成前全集群停写**（窗口 ≈ 提升耗时，不是 15 秒），之后可写 |
 | 挂掉「master 多」的那台 | 存活 master 的槽位**仍可写**（死掉的那些不可用） | **全集群永久停写** |
-```
+````
 
 - [ ] **Step 6: 改 §5.3.1 / §7.4 / §8.1 / §8.3 / §9**
 
