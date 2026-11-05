@@ -128,18 +128,27 @@ done
 # resolved yet and a dry-run must never prompt. The real run recomputes from
 # the RESOLVED hosts (step 9), which is the authoritative answer.
 print_topology() {
-    local j
+    local j verdict
     for (( j = 1; j <= TOPO_MASTER_COUNT; j++ )); do
         log_info "  master  ${TOPO_MASTER[$j]}"
     done
     for (( j = 1; j <= TOPO_REPLICA_COUNT; j++ )); do
         log_info "  replica ${TOPO_REPLICA[$j]} -> master ${TOPO_REPLICA_MASTER[$j]}"
     done
+    # The verdict comes from lib/cluster.sh, which knows about BOTH inputs:
+    # whether the slots that just lost their master will be covered again, and
+    # what cluster-require-full-coverage is. The old code looked at the first
+    # one only and printed "keeps serving" even with coverage=yes, where the
+    # cluster refuses every write once the failure is detected.
+    #
+    # log_info only when nothing has to be acted on: the slots are covered
+    # again AND coverage is off. Everything else is a warning.
     for (( j = 1; j <= TOPO_GROUP_COUNT; j++ )); do
-        if [ "${TOPO_SURVIVES[$j]}" = "yes" ]; then
-            log_info "  host ${TOPO_GROUP_HOST[$j]}: if it fails the cluster keeps serving (degraded)"
+        verdict="$(cluster_failure_verdict "${TOPO_SURVIVES[$j]}" "$CONF_REQUIRE_FULL_COVERAGE")"
+        if [ "${TOPO_SURVIVES[$j]}" = "yes" ] && [ "$CONF_REQUIRE_FULL_COVERAGE" != "yes" ]; then
+            log_info "  host ${TOPO_GROUP_HOST[$j]}: if it fails $verdict"
         else
-            log_warn "  host ${TOPO_GROUP_HOST[$j]}: if it fails the cluster STOPS serving (it holds too many masters for a quorum to survive)"
+            log_warn "  host ${TOPO_GROUP_HOST[$j]}: if it fails $verdict"
         fi
     done
     for j in "${TOPO_WARNINGS[@]+"${TOPO_WARNINGS[@]}"}"; do

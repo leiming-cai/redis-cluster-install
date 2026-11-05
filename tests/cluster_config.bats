@@ -236,8 +236,50 @@ EOF
     [ "$output" -ge 1 ]
 }
 
-@test "cluster-config.sh prints which host the cluster cannot survive losing" {
-    run cat "$REPO_ROOT/cluster-config.sh"
-    [[ "$output" == *"STOPS serving"* ]]
-    [[ "$output" == *"keeps serving"* ]]
+# --- the failure verdict the operator reads --------------------------------
+#
+# The verdict depends on cluster-require-full-coverage, so the same layout
+# produces different words. Grepping the source for "keeps serving" proved
+# nothing: the text can be in the file and never reach the operator.
+
+@test "cluster-config.sh --dry-run says the cluster keeps serving when coverage is off" {
+    cat > "$CONF_TMP/three-no.conf" <<'EOF'
+cluster_password = pw
+cluster_require_full_coverage = no
+[node.a]
+host  = 10.0.0.1
+ports = 6379,6380
+[node.b]
+host  = 10.0.0.2
+ports = 6379,6380
+[node.c]
+host  = 10.0.0.3
+ports = 6379,6380
+EOF
+    run bash "$REPO_ROOT/cluster-config.sh" --config "$CONF_TMP/three-no.conf" --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"10.0.0.1: if it fails the cluster keeps serving (degraded)"* ]]
+    [[ "$output" == *"10.0.0.2: if it fails the cluster keeps serving (degraded)"* ]]
+    [[ "$output" == *"10.0.0.3: if it fails the cluster keeps serving (degraded)"* ]]
+}
+
+@test "cluster-config.sh --dry-run warns about the write outage when coverage is on" {
+    cat > "$CONF_TMP/three-yes.conf" <<'EOF'
+cluster_password = pw
+cluster_require_full_coverage = yes
+[node.a]
+host  = 10.0.0.1
+ports = 6379,6380
+[node.b]
+host  = 10.0.0.2
+ports = 6379,6380
+[node.c]
+host  = 10.0.0.3
+ports = 6379,6380
+EOF
+    run bash "$REPO_ROOT/cluster-config.sh" --config "$CONF_TMP/three-yes.conf" --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"10.0.0.1: if it fails the cluster refuses every write once the failure is detected"* ]]
+    [[ "$output" == *"cluster-node-timeout"* ]]
+    [[ "$output" != *"keeps serving"* ]]
 }
