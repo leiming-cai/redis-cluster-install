@@ -315,8 +315,65 @@ EOF
     run bash "$REPO_ROOT/cluster-config.sh" --config "$REPO_ROOT/cluster.conf.hd.example" --dry-run
     [ "$status" -eq 0 ]
     [[ "$output" == *"3 node(s), 6 instance(s)"* ]]
+    # Every host and every port of the example is pinned: a changed address or
+    # a changed replica port must fail here, not in a production window.
     [[ "$output" == *"192.168.1.10:6379"* ]]
+    [[ "$output" == *"192.168.1.11:6379"* ]]
     [[ "$output" == *"192.168.1.12:6379"* ]]
+    [[ "$output" == *"192.168.1.10:6380"* ]]
+    [[ "$output" == *"192.168.1.11:6380"* ]]
+    [[ "$output" == *"192.168.1.12:6380"* ]]
+}
+
+@test "cluster.conf.hd.example pins the master/replica mapping" {
+    run bash "$REPO_ROOT/cluster-config.sh" --config "$REPO_ROOT/cluster.conf.hd.example" --dry-run
+    [ "$status" -eq 0 ]
+    # The mapping is the load-bearing claim of the example file, and it is
+    # easy to transpose: each replica follows the PREVIOUS machine's master
+    # (node1's replica -> node3's master, node2's -> node1's, node3's -> node2's).
+    [[ "$output" == *"replica 192.168.1.10:6380 -> master 192.168.1.12:6379"* ]]
+    [[ "$output" == *"replica 192.168.1.11:6380 -> master 192.168.1.10:6379"* ]]
+    [[ "$output" == *"replica 192.168.1.12:6380 -> master 192.168.1.11:6379"* ]]
+    # ... and none of the transposed variants may show up.
+    [[ "$output" != *"replica 192.168.1.10:6380 -> master 192.168.1.11:6379"* ]]
+    [[ "$output" != *"replica 192.168.1.11:6380 -> master 192.168.1.12:6379"* ]]
+    [[ "$output" != *"replica 192.168.1.12:6380 -> master 192.168.1.10:6379"* ]]
+}
+
+@test "the mapping comment in cluster.conf.hd.example is what the script produces" {
+    run bash "$REPO_ROOT/cluster-config.sh" --config "$REPO_ROOT/cluster.conf.hd.example" --dry-run
+    [ "$status" -eq 0 ]
+    # The example file states the mapping in a comment block
+    # ("master X <- replica Y"). That comment is what the operator reads, so it
+    # has to BE the mapping the script produces -- and the easiest way to get
+    # that wrong is to transpose the cycle (the design spec did exactly that
+    # once). Derive the expected "replica A -> master B" lines from the comment
+    # itself (node labels resolved to their hosts) and require every one of
+    # them in the dry-run output.
+    local expected line missing=""
+    expected="$(awk '
+        /^\[node\.[^]]+\]$/ { label = substr($0, 7, length($0) - 7); next }
+        /^host[ \t]*=/ { host[label] = $3; next }
+        $1 == "#" && $2 == "master" && $4 == "<-" && $5 == "replica" {
+            n++; mlab[n] = $3; rlab[n] = $6
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                m = mlab[i]; r = rlab[i]
+                mp = substr(m, index(m, ":") + 1); ml = substr(m, 1, index(m, ":") - 1)
+                rp = substr(r, index(r, ":") + 1); rl = substr(r, 1, index(r, ":") - 1)
+                print "replica " host[rl] ":" rp " -> master " host[ml] ":" mp
+            }
+        }
+    ' "$REPO_ROOT/cluster.conf.hd.example")"
+    # An empty list means the comment block is gone or in a shape this test
+    # cannot read -- that is a failure too, not a vacuous pass.
+    [ -n "$expected" ]
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        [[ "$output" == *"$line"* ]] || missing="${missing}${line} "
+    done <<< "$expected"
+    [ -z "$missing" ]
 }
 
 @test "cluster.conf.hd.example keeps coverage off so a host failure does not stop all writes" {
