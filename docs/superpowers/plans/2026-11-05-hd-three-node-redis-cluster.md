@@ -861,7 +861,7 @@ git commit -m "feat(hd): add the three-host cluster.conf example"
 
 ```ini
 # Redis 安装根目录。必须与生产机上完全一致
-# ⚠️ 安装包写的是 redis-6.0.6，但现场装的是 8.10.0 ⇒ 先查：
+# ⚠️ 安装包写的是 redis-6.0.6，但现场装的是 8.10.0（实施方确认）⇒ 先查：
 #     ls -d /opt/software/redis-*
 redis_prefix = <现场实际的 redis 安装目录>
 
