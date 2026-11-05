@@ -58,7 +58,7 @@ with open(path, "w", encoding="utf-8", newline="") as f:
 | Task 1 的 3 条表征测试 | **一次就绿**（`lib/topology.sh` 本来就支持三机） |
 | Task 2 的 4 条 verdict 测试 | 加实现前 **红**（`command not found`，status 127）→ 加实现后 **全绿** |
 | Task 3 的 2 条行为测试 | 改 `print_topology` 前 **红** → 改后 **全绿** |
-| 全量 bats（`bats tests/`） | **52/52 ok，0 not ok** |
+| 全量 bats | `bats tests/` → **51/51**（⚠️ **不递归** `tests/lib/`）· CI 等价的 `find tests -name '*.bats' \| xargs bats` → **206/206** |
 | `bash tests/check_syntax.sh` | `TOTAL=46 FAIL=0`（Task 4 后为 47） |
 | `bash tests/validate_libs.sh` | `SUMMARY: PASS=54 FAIL=0` |
 
@@ -107,11 +107,12 @@ with open(path, "w", encoding="utf-8", newline="") as f:
 # machine. The cluster identifies a node by IP:port, so repeating the ports
 # is safe (lib/cluster.sh matches on "host:port").
 #
-# This is the layout the huading deployment uses. It is the first one in
+# This is the layout the huading deployment is moving to. It is the first one in
 # which losing ANY single host keeps the cluster serving: every host holds
 # exactly one master, and that master's replica lives on another host, so a
-# failure leaves a live replica to be promoted (measured in the Docker E2E:
-# DoD5 "kill a master, expect its replica to be promoted").
+# failure leaves a live replica to be promoted. The promotion mechanism is what
+# the Docker E2E measured (DoD5 "kill a master, expect its replica to be
+# promoted"), on the two-host layout.
 THREE="10.0.0.1:6379,6380 10.0.0.2:6379,6380 10.0.0.3:6379,6380"
 
 @test "topology_plan spreads three masters over three hosts, one each" {
@@ -119,15 +120,22 @@ THREE="10.0.0.1:6379,6380 10.0.0.2:6379,6380 10.0.0.3:6379,6380"
     [ "$TOPO_MASTER_COUNT" -eq 3 ]
     [ "$TOPO_REPLICA_COUNT" -eq 3 ]
     [ "$TOPO_TOTAL_INSTANCES" -eq 6 ]
+    # The name says "one each", so pin the spread itself: the counts above
+    # cannot see it. A layout with two masters on the first host and none on
+    # the third has the same three counts -- the "marks the host holding
+    # fewer masters" test above spells out exactly that trap for the
+    # two-host layout.
+    [ "${TOPO_MASTER[1]%%:*}" = "10.0.0.1" ]
+    [ "${TOPO_MASTER[2]%%:*}" = "10.0.0.2" ]
+    [ "${TOPO_MASTER[3]%%:*}" = "10.0.0.3" ]
 }
 
 @test "topology_plan gives every master a replica on another host" {
     topology_plan "$THREE"
     [ "$TOPO_UNPROTECTED_COUNT" -eq 0 ]
-    for i in 1 2 3; do
-        replica_host="${TOPO_REPLICA[$i]%%:*}"
-        master_host="${TOPO_REPLICA_MASTER[$i]%%:*}"
-        [ "$replica_host" != "$master_host" ]
+    local i
+    for (( i = 1; i <= TOPO_REPLICA_COUNT; i++ )); do
+        [ "${TOPO_REPLICA[$i]%%:*}" != "${TOPO_REPLICA_MASTER[$i]%%:*}" ]
     done
 }
 
@@ -138,6 +146,12 @@ THREE="10.0.0.1:6379,6380 10.0.0.2:6379,6380 10.0.0.3:6379,6380"
     [ "${TOPO_SURVIVES[3]}" = "yes" ]
 }
 ```
+
+> 📌 **这段代码块已按代码审查的结论改过**（提交 `5aeaadd` 就是它的落地版本）：
+> ① 断言了 **master 的主机**（不只是数量）—— 数量看不出「2 个 master 挤在第 1 台」；
+> ② 副本循环改成**按 `TOPO_REPLICA_COUNT` 驱动 + `local i`**（与文件里已有的写法一致，
+> 且不漏掉将来多出来的副本）；③ 措辞改成「is moving to」（手册要到 Task 6 才改）；
+> ④ DoD5 那句补上「on the two-host layout」，免得被读成「这个三机布局在 Docker 里验过」。
 
 - [ ] **Step 2: 跑测试**
 
