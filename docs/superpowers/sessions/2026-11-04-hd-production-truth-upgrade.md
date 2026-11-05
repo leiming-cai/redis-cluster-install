@@ -131,7 +131,7 @@ a0a9295  docs(hd): repoint the production truth at the napstar2.0 install packag
 
 > ⚠️ **【2026-11-04 再更正】本节描述的是 `web_napstar2.0` 升级版的结构，
 > 而**现状是 `web_install`（一个 Redis 实例）** ⇒ 本节**只适用于「已升级」的情况**。
-> **现状的层次见 §3.5.7。**
+> **现状的层次见 §6.5.2（下面 §六·五）；手册对应 `docs/HD-OPERATIONS.md` §0.4.1。**
 
 `单机(华盾)\updateconfig\` 下有 3 个 `-napstar2.0-update.zip`
 （kingbase 2026-04-07 / dm 2026-04-07 / postgresql 2026-10-31），
@@ -156,7 +156,8 @@ a0a9295  docs(hd): repoint the production truth at the napstar2.0 install packag
 
 > **用户明确更正**：**「不管 web_install 还是 web_napstar2.0，目前都是 1 个实例、
 > 11 dataId / 4 个 `oms:`，全是 6379，后面要升级为 Redis 集群模式」**
-> ⇒ **上面 §一 / §3.5.1 / §3.5.2 那套「升级版 14/7、6389 有数据」是【升级之后】的状态，
+> ⇒ **上面 §一 那套（以及上一份存档 `2026-11-04-hd-operations-manual.md` §3.5.1 / §3.5.2）
+> 那套「升级版 14/7、6389 有数据」是【升级之后】的状态，
 > 不是现状。** 手册已全面改回「一个实例」。
 
 ### 6.5.1 实测证据（现状 = `web_install`）
@@ -259,6 +260,7 @@ ss -lntp | grep -E '6379|6389'              # 现状：只有 6379 在听
 | `tests/validate_libs.sh` | `PASS=54 FAIL=0` |
 | 容器环境 | 未动（集群仍停 · 4 个 app 跑在 Standalone · Nacos 200 · 夹具 3 行） |
 | 独立复算 | **本轮所有数字都用脚本从包本身重新算过一遍**（现状 12/12 通过） |
+| 文档交叉引用 | **已全树校验**：所有 `§N` 引用都能解析（脚本扫描 `docs/**` + `README.md`）—— 本轮修掉本文件里 2 处过期指针（原写的 `3.5.7` 改为 `§6.5.2` / 手册 `§0.4.1`；`§3.5.1`/`§3.5.2` 补明是**上一份存档**的章节） |
 
 ---
 
