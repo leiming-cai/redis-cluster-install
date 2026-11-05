@@ -4,7 +4,7 @@
 
 **Goal:** 把华盾生产的 Redis 目标形态从「两台 × 3 实例」改成「**三台 × 2 实例（每台 6379+6380）**」，并让**脚本的容错提示**、**配置样例**、**运维手册**三者一致且不说假话。
 
-**Architecture:** 拓扑算法（`lib/topology.sh`）实测已经是 N 台通用，**行为一行都不用改**（本轮只改了它文件头一句注释）—— 本轮改的是三处「说错了话」的地方：(1) `cluster-config.sh` 打印的容错结论不看 `cluster-require-full-coverage`，在 `yes` 下会撒谎；(2) 没有三台机器的样例配置；(3) `docs/HD-OPERATIONS.md` 通篇按「两台」写。
+**Architecture:** 拓扑算法（`lib/topology.sh`）实测已经是 N 台通用，**行为一行都不用改**（本轮只改了它文件头一句注释）—— 本轮改的是三处「说错了话」的地方：(1) `cluster-config.sh` 打印的容错结论不看 `cluster-require-full-coverage`，在 `yes` 下会撒谎（**已修**：Task 3 把 `print_topology` 接到了 `lib/cluster.sh` 的 `cluster_failure_verdict` 上）；(2) 没有三台机器的样例配置；(3) `docs/HD-OPERATIONS.md` 通篇按「两台」写。
 
 **Tech Stack:** Bash 4+ · bats（`tests/*.bats`）· `tests/validate_libs.sh`（纯 bash 断言）· `tests/check_syntax.sh`（`bash -n`）· Redis 8.10.0（现场版本）
 
@@ -179,6 +179,7 @@ git commit -m "test(hd): pin the three-host redis cluster layout"
 **要解决的缺陷**（spec §3.5）：`cluster-config.sh` 打印「挂掉这台机器会怎样」时
 **完全不看** `cluster-require-full-coverage` ⇒ 在 `yes` 下它说「keeps serving」，
 而 `yes` 的语义是「有槽位没被覆盖就拒绝一切写入」。
+（Task 2 只把措辞抽成纯函数；**真正修好的是 Task 3** —— 它才把这个函数接到 `print_topology` 上。）
 
 **Files:**
 - Modify: `lib/cluster.sh`（在文件末尾追加函数）
@@ -433,7 +434,9 @@ EOF
 - [ ] **Step 2: 跑测试，确认新测试失败（red）、旧测试通过**
 
 Run: `bats tests/cluster_config.bats`
-Expected: **新增的 2 条 FAIL**（当前脚本对 `yes` 也打印 `keeps serving (degraded)`），
+Expected: **新增的 `coverage = yes` 那条 FAIL**（当前脚本对 `yes` 也打印 `keeps serving (degraded)`）；
+**新增的 `coverage = no` 那条 PASS** —— 旧措辞在那条路径上本来就对，
+这正是「靠 grep 源码证明不了什么」的原因（那句话在文件里，却从没被打印出来）；
 其余 PASS（含 `--dry-run prints the plan` 那条）。
 
 - [ ] **Step 3: 改 `cluster-config.sh` 的 `print_topology`**

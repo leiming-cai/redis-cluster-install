@@ -104,12 +104,12 @@ Config OK: 3 node(s), 6 instance(s), 1 replica(s) per master
 | `cluster-config-file` / `dir` / `logfile` 的 `%PORT%` | ✅ 路径在**各自的机器**上，同名无妨 |
 | `redis-cli --cluster create` 的地址列表 | ✅ 3 个不同 `IP:6379` ⇒ 互不重复 |
 
-### 3.5 ⚠️ 发现一个缺陷：容错提示与 `cluster-require-full-coverage` 脱节
+### 3.5 ⚠️ 发现一个缺陷：容错提示与 `cluster-require-full-coverage` 脱节（**已修**）
 
-`cluster-config.sh` 的 `print_topology` 打印容错结论时**完全不看** `CONF_REQUIRE_FULL_COVERAGE`：
+`cluster-config.sh` 的 `print_topology` 打印容错结论时**完全不看** `CONF_REQUIRE_FULL_COVERAGE`（**修复前**的代码）：
 
 ```bash
-# cluster-config.sh 的 print_topology()，现状
+# cluster-config.sh 的 print_topology()，修复前
 if [ "${TOPO_SURVIVES[$j]}" = "yes" ]; then
     log_info "  host ${TOPO_GROUP_HOST[$j]}: if it fails the cluster keeps serving (degraded)"
 else
@@ -117,7 +117,7 @@ else
 fi
 ```
 
-**实测**：`cluster_require_full_coverage = yes` + 三机 ⇒ 三台**全都**打印
+**实测（修复前）**：`cluster_require_full_coverage = yes` + 三机 ⇒ 三台**全都**打印
 「if it fails the cluster keeps serving (degraded)」。
 
 **但这是错的**：`cluster-require-full-coverage yes` 的语义是「**只要有槽位没被覆盖，集群就拒绝一切写入**」
@@ -128,10 +128,14 @@ fi
 | **提升窗口** | 分**两段**：**master 挂掉 → 故障被发现（`cluster-node-timeout 15000`）→ 副本被提升**。**第一段**（≈15s）集群还「看起来健康、照常接受写入」，只有死掉的 master 的槽位写不进去；**第二段**（被发现 → 提升完成，通常很短）它的槽位无人覆盖 ⇒ `yes` 时**全集群停写**，`no` 时只有那些槽位不可写。⚠️ **停写窗口是第二段，不是那 15 秒** |
 | **无多数派时永久停写** | 挂掉承担多数派 master 的那台（两台布局）⇒ 副本不能提升 ⇒ 槽位永远无人覆盖 ⇒ `yes` 时**永久停写** |
 
-⚠️ **这不是三机引入的** —— 两机时 `yes` 同样会停写，脚本同样在骗人。
+⚠️ **这不是三机引入的** —— 两机时 `yes` 同样会停写，脚本同样在骗人（以上都是**修复前**的行为）。
 三机只是让三台**全部**打印成「keeps serving」，错得更整齐。
 
-⇒ 本轮修这一处（§4.2）。
+⇒ 本轮修这一处（§4.2）。**已修**（Task 3：`cluster-config.sh` 的 `print_topology` 接上了 `cluster_failure_verdict`）。
+
+**修复后**：`print_topology` 调用 `lib/cluster.sh` 的纯函数 `cluster_failure_verdict`（survives × coverage），
+措辞按 §4.2 的真值表走 ⇒ 默认的 `cluster_require_full_coverage = yes` 下三台都打印
+「if it fails the cluster refuses every write once the failure is detected」。
 
 ---
 
