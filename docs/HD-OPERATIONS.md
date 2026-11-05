@@ -4,12 +4,13 @@
 > `D:\work\info\web\extendsystem\华盾-napstar2.0\code`）。
 >
 > **它描述的是一次改造**：把**现在跑在一台机器上的单机**
-> Redis / ZooKeeper / Kafka，改成**两台机器的集群**，
+> Redis / ZooKeeper / Kafka，改成**集群**
+> （Redis 扩到**三台**机器；ZooKeeper / Kafka 扩到**两台**机器），
 > 并把四个后台程序的配置改到能正确连上集群。
 >
 > | | 现状 | 改成 |
 > |---|---|---|
-> | Redis | 一台机器上**一个**单机（6379） | 两台机器，3 master + 3 replica |
+> | Redis | 一台机器上**一个**单机（6379） | **三台**机器，每台 2 个实例（3 master + 3 replica） |
 > | ZooKeeper | 单节点 | 2 voter ensemble |
 > | Kafka | 单 broker | 2 broker |
 > | 四个后台程序 | 连单机（`oms: hostname: node1`） | 连集群（`oms: redisMode: cluster`） |
@@ -20,7 +21,7 @@
 > 这一条能省掉实施人员一整天。
 >
 > 📌 **§1.1 是全局前提** —— 现状是**一台**机器、**一个** Redis 实例。
-> 把「两台机器 / 两个 Redis」当成现状是本章最常见的误读。
+> 把「多台机器 / 多个 Redis」当成现状是本章最常见的误读。
 
 ---
 
@@ -103,7 +104,8 @@
 | **交付树** | 华盾树的别称（它是给客户交付的那棵树） |
 | **`oms:`** | 本项目自己的 Redis 配置块（`RedisPropertiesConfig` 读它），**不是** Spring Boot 的 `spring.redis` |
 | **dataId** | Nacos 里的一个配置文件，由 `dataId` + `group` 两个坐标唯一确定 |
-| **node1 / node2** | 主机别名。⚠️ **现状是一台机器**（`install.sh` 把两个 IP 都设成 `127.0.0.1`），**扩成两台是这次要做的事**。另有一套 `node01`/`node02`（ZK 用）—— **两套别名体系并存** |
+| **node1 / node2** | 主机别名。⚠️ **现状是一台机器**（`install.sh` 把两个 IP 都设成 `127.0.0.1`），**扩成多台是这次要做的事**（Redis 扩到**三台**，ZK / Kafka 扩到**两台**）。另有一套 `node01`/`node02`（ZK 用）—— **两套别名体系并存** |
+| **node3** | 主机别名。**Redis 集群的第三台机器**（`cluster.conf` 的 `[node.node3]`，环境变量前缀 `NODE_NODE3_`）—— 本轮新增；ZK / Kafka 仍是两节点，不需要它 |
 
 ### 0.4 ⭐ 贯穿全文的一条规则：配置写在**哪**才生效
 
@@ -263,32 +265,37 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\n
 
 ### 1.1 拓扑（生产现状 → 目标）
 
-**现状：一台机器。** 目标：**扩成两台机器**，Redis / ZK / Kafka 三个都变集群。
+**现状：一台机器。** 目标：**Redis 扩成三台机器**（每台 1 master + 1 replica），
+ZK / Kafka 扩成两节点集群。
 
 ```
-【现状：单台 node1】                        【目标：两台 node1 + node2】
+【现状：单台 node1】               【目标：三台 node1 + node2 + node3】
 
-   ┌──────────────┐                             ┌──────────────┐
-   │    Nacos     │                             │    Nacos     │
-   │  18848/19848 │                             │  18848/19848 │
-   └──────┬───────┘                             └──────┬───────┘
-          │                                            │
-   ┌──────▼─────────────────────────┐      ┌──────────▼──────────┐
-   │            node1（一台）         │      │       node1         │
-   │  ┌───────────────────────────┐  │      │ Redis 6379  master │
-   │  │ Redis 6379  一个独立单机   │  │      │ Redis 6380  master │
-   │  │ ZK    2181  单节点         │  │      │ Redis 6381  master │
-   │  │ Kafka 9092  单 broker      │  │      │ ZK    2181  voter#1 │
-   │  │ PG    5432                 │  │      │ Kafka 9092  broker#1│
-   │  └───────────────────────────┘  │      └──────────┬──────────┘
-   └────────────────────────────────┘                 │
-                                          ┌──────────▼──────────┐
+   ┌──────────────┐                           ┌──────────────┐
+   │    Nacos     │                           │    Nacos     │
+   │  18848/19848 │                           │  18848/19848 │
+   └──────┬───────┘                           └──────┬───────┘
+          │                                          │
+   ┌──────▼─────────────────────────┐     ┌──────────▼──────────┐
+   │            node1（一台）         │   │       node1         │
+   │  ┌───────────────────────────┐  │    │ Redis 6379  master  │
+   │  │ Redis 6379  一个独立单机   │  │   │ Redis 6380  replica │
+   │  │ ZK    2181  单节点         │  │   │ ZK    2181  voter#1 │
+   │  │ Kafka 9092  单 broker      │  │   │ Kafka 9092  broker#1│
+   │  │ PG    5432                 │  │   └──────────┬──────────┘
+   │  └───────────────────────────┘  │               │
+   └────────────────────────────────┘     ┌──────────▼──────────┐
                                           │       node2         │
-   ⛔ Redis：一个**独立单机**（6379）       │ Redis 6382  replica │
-   ⛔ ZK   ：单节点                       │ Redis 6383  replica │
-   ⛔ Kafka：单 broker                    │ Redis 6384  replica │
-                                          │ ZK    2181  voter#2 │
-                                          │ Kafka 9092  broker#2│
+                                          │ Redis 6379  master  │
+   ⛔ Redis：一个**独立单机**（6379）     │ Redis 6380  replica │
+   ⛔ ZK   ：单节点                       │ ZK    2181  voter#2 │
+   ⛔ Kafka：单 broker                    │ Kafka 9092  broker#2│
+                                          └──────────┬──────────┘
+                                                     │
+                                          ┌──────────▼──────────┐
+                                          │       node3         │
+                                          │ Redis 6379  master  │
+                                          │ Redis 6380  replica │
                                           └─────────────────────┘
 ```
 
@@ -296,8 +303,8 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\n
 
 | # | 容易以为 | 实际 |
 |---|---|---|
-| 1 | 现状有两个 Redis（6379 + 6389），在两台机器上 | ⛔ **现状只有**一个**（6379）**，在一台机器上。安装包 `env/redis/` 下**只有 `redis.conf` 一份**，`1start_env.sh` 也**只起一个**。**Nacos 配置里 `6389` 出现 0 次**（§0.4 / §2.1） |
-| 2 | 生产已经是两台机器 | ⛔ **现在是单台**。安装包 `install.sh:6-13` 把 `ip_webserver_address` 和 `ip_napstar_address` **都设成 `127.0.0.1`**（两台合一），并写 `node1` / `node2` 两条 hosts。**扩成两台是这次要做的事** |
+| 1 | 现状有两个 Redis（6379 + 6389），分散在多台机器上 | ⛔ **现状只有**一个**（6379）**，在一台机器上。安装包 `env/redis/` 下**只有 `redis.conf` 一份**，`1start_env.sh` 也**只起一个**。**Nacos 配置里 `6389` 出现 0 次**（§0.4 / §2.1） |
+| 2 | 生产已经是多台机器 | ⛔ **现在是单台**。安装包 `install.sh:6-13` 把 `ip_webserver_address` 和 `ip_napstar_address` **都设成 `127.0.0.1`**（两台合一），并写 `node1` / `node2` 两条 hosts。**扩成多台是这次要做的事**（Redis 三台、ZK / Kafka 两台） |
 
 > 📌 **安装包自带两节点集群的安装脚本** —— 不用手写配置：
 >
@@ -322,6 +329,10 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\n
 | **PostgreSQL** | — | `/etc/postgresql/14/main/` | 安装包 `bin/1start_env.sh` |
 | **应用 jar** | `/opt/napstar_app/` | — | 按批次手工拉起（见 §5.2） |
 
+> 📌 **Redis 的目录名**：安装包（`web_install`）里写的是 `/opt/software/redis-6.0.6/`，
+> 但**现场装的是 `/opt/software/redis-8.10.0/`** ⇒ 先 `ls -d /opt/software/redis-*`
+> 确认，再填 `cluster.conf` 的 `redis_prefix`（§2.2）。
+
 **安装包里的原始配置**（改之前先看它们）：
 
 | 文件 | 内容 |
@@ -338,7 +349,7 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\n
 ```
 [0] 备份 Redis 数据目录 + Nacos 配置导出 + 现有 ZK/Kafka 配置
 [1] ⛔ 停应用（全部四个）→ 停 Redis（6379）→ 停 ZK/Kafka
-[2] 装 Redis 集群（扩到两台）  → §2
+[2] 装 Redis 集群（扩到**三台**）  → §2
 [3] 装 ZK + Kafka 集群（扩到两台）→ §3
 [4] 改 Nacos 的 oms: 块 + spring.kafka.*  → §4.7
 [5] 迁数据（6379 → 集群）       → §2.3 末
@@ -366,8 +377,8 @@ D:\work\info\web\installpackage\napstar_install\单机(华盾)\web_install\env\n
 
 | | 现状 | 集群 | 差在哪 |
 |---|---|---|---|
-| 机器数 | **1 台** | **2 台** | 要**加机器**、装 Redis、建用户、放行端口 |
-| 实例数 | **1 个**（6379） | **6 个**（6379-6384） | 要新建 5 个实例 |
+| 机器数 | **1 台** | **3 台** | 要**加机器**、装 Redis、建用户、放行端口 |
+| 实例数 | **1 个**（6379） | **6 个**（每台 2 个：6379/6380） | 要新建 5 个实例 |
 | 关系 | 单机（`cluster-enabled` 注释） | 3 master + 3 replica | 要建集群、分配主从 |
 | 数据 | **一份** | 合并成一个 keyspace | ⚠️ **要迁数据**（§2.3 末） |
 
@@ -420,7 +431,7 @@ redis.conf:1059  appendonly no
 用本仓库的 `cluster-config.sh` 组网。先复制模板：
 
 ```bash
-cp cluster.conf.example cluster.conf
+cp cluster.conf.hd.example cluster.conf
 vim cluster.conf
 ```
 
@@ -433,32 +444,38 @@ vim cluster.conf
 
 ```ini
 # Redis 安装根目录。必须与生产机上完全一致
-# ⚠️ ��装包写的是 redis-6.0.6，但现场版本可能不同（容器里是 8.10.0）⇒ 先查：
+# ⚠️ 安装包写的是 redis-6.0.6，但现场装的是 8.10.0 ⇒ 先查：
 #     ls -d /opt/software/redis-*
 redis_prefix = <现场实际的 redis 安装目录>
 
 # 集群密码。必填。
 # ⚠️ 必须与 Nacos 里 oms.password 完全一致（见 §4.7）
-# ⚠️ 华盾现有的 Redis 口令与安装包里的一致（见 §2.1）——
-#    集群化后建议换一个新口令，并同步改 4 个 dataId 的 oms.password（见 §4.7）
 cluster_password = <集群密码>
 
 # redis.conf 的 bind 地址
 bind_addr = 0.0.0.0
 
-# 两台机器部署必须是 no。原因见 §2.5
+# 必须是 no。原因见 §2.5
 cluster_require_full_coverage = no
 
-[node.a]
+[node.node1]
 host     = <node1 的 IP>
 ssh_port = 22
-ports    = 6379,6380,6381
+ports    = 6379,6380
 
-[node.b]
+[node.node2]
 host     = <node2 的 IP>
 ssh_port = 22
-ports    = 6382,6383,6384
+ports    = 6379,6380
+
+[node.node3]
+host     = <node3 的 IP>
+ssh_port = 22
+ports    = 6379,6380
 ```
+
+> 📌 **完整的样例见 `cluster.conf.hd.example`**（含防火墙端口、主从映射、
+> 前置条件清单）。`cluster.conf.example` 是**两台**机器的主线样例，别拿错。
 
 #### 2.2.1 ⭐ 扩容时的端口规划（**先定这个再动手**）
 
@@ -467,15 +484,22 @@ ports    = 6382,6383,6384
 | 项 | 现状 | 目标 | 怎么处置 |
 |---|---|---|---|
 | node1 的 **6379** | 一个独立单机，**有数据** | 集群的 **master #1** | **停掉 → 清空数据目录 → 重新以集群节点身份起**（数据在 §2.3 的迁移步骤里进集群） |
-| node1 的 **6380 / 6381** | 空闲 | 集群的 master #2 / #3 | 新建 |
-| node2 的 **6382-6384** | 空闲（node2 还没有 Redis） | 集群的 **3 个 replica** | 新建 |
+| node1 的 **6380** | 空闲 | 集群的 **replica**（跟随 node3 的 master） | 新建 |
+| node2 的 **6379** | 空闲（node2 还没有 Redis） | 集群的 **master #2** | 新建 |
+| node2 的 **6380** | 空闲 | 集群的 **replica**（跟随 node1 的 master） | 新建 |
+| node3 的 **6379** | 空闲（node3 还没有 Redis） | 集群的 **master #3** | 新建 |
+| node3 的 **6380** | 空闲 | 集群的 **replica**（跟随 node2 的 master） | 新建 |
 
-> 📌 **目标拓扑是「3 master + 3 replica」，6 个实例正好对应 6379-6384。**
+> 📌 **目标拓扑是「3 master + 3 replica」，6 个实例分布在 3 台机器上，每台 1 主 1 从。**
 > ⇒ **现状那个 6379 就是 master #1**（端口复用），不需要「退役」任何实例。
+>
+> 📌 **端口可以重复**：集群按 **IP:port** 区分节点，同一个端口号出现在多台机器上
+> 是合法的 ⇒ **每台机器都用 6379 + 6380**。
+> ⇒ **防火墙每台只需放行 4 个端口**：`6379,6380` + 总线 `16379,16380`。
 >
 > ⚠️ **端口复用有坑**：`cluster-config.sh` 会往节点自己的 `redis.conf` 里写
 > `cluster-enabled yes` 与 `cluster-config-file`，**但不会清理旧的 `nodes.conf`**。
-> ⇒ 旧的 `/opt/software/redis-6.0.6/logs/`（数据目录）里若残留
+> ⇒ 旧的 `/opt/software/redis-*/logs/`（数据目录）里若残留
 > `nodes.conf`，新节点会带着**旧集群的身份**启动 ⇒ 表现为「节点认不出自己」。
 > ⇒ **重建前务必把数据目录清空**（§2.3 第 1 步）。
 
@@ -486,7 +510,7 @@ ports    = 6382,6383,6384
 | `#` 只支持**整行注释** | 值后面写 `# ...` 会报错 —— 密码里出现 `#` 是合法字符，静默截断比报错危险 |
 | 同一个作用域里一个键不能写两次 | 重复的 `host` / `ports` 会报错并指出第一次出现的位置 |
 | 段名必须以小写 `node.` 开头 | 写成 `[nodes.a]` / `[a]` 会直接报错（会让 `NODE_A_*` 环境变量静默失效） |
-| `ports` 必须是逗号分隔的十进制整数 | `ports = 6379 6380 6381`（空格）**不会被切分**，会报错 |
+| `ports` 必须是逗号分隔的十进制整数 | `ports = 6379 6380`（空格）**不会被切分**，会报错 |
 | 文件开头的 UTF-8 BOM 会被忽略 | Windows 编辑器可能自动加 |
 
 **拓扑是推导出来的，不是 redis-cli 分配的**：
@@ -495,12 +519,14 @@ ports    = 6382,6383,6384
 上面这份配置推出来是：
 
 ```
-master  <node1>:6379   <- replica <node2>:6383
-master  <node2>:6382   <- replica <node1>:6381
-master  <node1>:6380   <- replica <node2>:6384
+master  <node1>:6379   <- replica <node2>:6380
+master  <node2>:6379   <- replica <node3>:6380
+master  <node3>:6379   <- replica <node1>:6380
 ```
 
-> 想让另一台成为「受保护的那台」，把 `[node.a]` 和 `[node.b]` **两段对调**即可。
+> 每台机器恰好 1 个 master + 1 个副本，副本都在**另一台**机器上。
+> ⚠️ **别按直觉推映射** —— 贪心分配按「候选数相同取先选中者」打破平局，
+> 实际是「每台的副本跟随**上一台**的 master」。以 `--dry-run` 的输出为准。
 
 > ⚠️ **参数详解在 `docs/OPERATIONS.md` §2**，本节只讲华盾特有的部分。
 
@@ -528,13 +554,13 @@ ss -lnt | grep -E ':6379\b'        # 应该没有输出
 > ⇒ 现象是「集群节点反复起不来，但 preflight 说端口没被占」。
 >
 > 📌 顺带：`1start_env.sh` 里的 Redis 路径写的是 **`redis-6.0.6`**，
-> 而现场可能装着别的版本（容器里是 `redis-8.10.0`）⇒ 这两个脚本本来就可能对不上，
+> 而现场装的是 `redis-8.10.0` ⇒ 这两个脚本本来就对不上，
 > 说明**生产上很可能是手工起 Redis 的，不是靠这个脚本** ⇒ 停的时候要确认清楚
 > 「到底是谁起的」，别只改脚本。
 
 #### 第 1 步：前置条件逐项核对
 
-**两台节点上**（逐台检查）：
+**三台节点上**（逐台检查）：
 
 | 项 | 检查命令 | 期望 | 缺了会怎样 |
 |---|---|---|---|
@@ -542,26 +568,31 @@ ss -lnt | grep -E ':6379\b'        # 应该没有输出
 | `redis` 用户 | `id redis` | 有输出 | preflight 报缺项并退出 |
 | systemd | `systemctl --version` | 有版本号 | 单元装不上 |
 | 文件描述符 | `ulimit -n` | ≥ 10001 | 组集群时连接失败 |
-| **端口放行** | 在**对端**机器上 `nc -z <本机IP> 6379` | 通 | 握手失败 |
-| **总线端口** | 在**对端**机器上 `nc -z <本机IP> 16379` | 通 | **组不成集群** |
+| **端口放行** | 在**对端**机器上 `nc -z <本机IP> 6379` 与 `nc -z <本机IP> 6380` | 都通 | 握手失败 |
+| **总线端口** | 在**对端**机器上 `nc -z <本机IP> 16379` 与 `nc -z <本机IP> 16380` | 都通 | **组不成集群** |
 | **旧数据目录** | `ls /opt/software/redis-*/logs/` | ⛔ **必须为空** | 残留 `nodes.conf` ⇒ 节点带旧身份启动（§2.2.1） |
 
 > ⚠️ **集群总线端口（业务端口 + 10000）最容易漏。**
-> 只放行 6379-6384 的话，节点能启动但**组不成集群**，
+> 只放行 6379/6380 的话，节点能启动但**组不成集群**，
 > 报错是 `Cluster join failed: Cannot find master to join` 或
 > `Unable to connect to any of the peers`。
-> 映射关系：6379→16379、6380→16380、6381→16381、6382→16382、6383→16383、6384→16384。
+> 映射关系：6379→16379、6380→16380 ⇒ **每台只需放行 4 个端口**。
 >
-> ⚠️ **node2 上还没有 Redis** —— 它连 Redis 都没装。
-> ⇒ 扩容的**第 0 步之外**，node2 还要先装 Redis 二进制 + 建 `redis` 用户
+> ⚠️ **node2 和 node3 上都还没有 Redis** —— 它们连 Redis 都没装。
+> ⇒ 扩容的**第 0 步之外**，node2 与 node3 还要先装 Redis 二进制 + 建 `redis` 用户
 > （`cluster-config.sh` 会**校验**这两项，缺了就指名报错）。
 
 #### 第 2 步：给 SSH 密码
 
 ```bash
-export NODE_A_SSH_USER=root NODE_A_SSH_PASS='<node1 的 ssh 密码>'
-export NODE_B_SSH_USER=root NODE_B_SSH_PASS='<node2 的 ssh 密码>'
+export NODE_NODE1_SSH_USER=root NODE_NODE1_SSH_PASS='<node1 的 ssh 密码>'
+export NODE_NODE2_SSH_USER=root NODE_NODE2_SSH_PASS='<node2 的 ssh 密码>'
+export NODE_NODE3_SSH_USER=root NODE_NODE3_SSH_PASS='<node3 的 ssh 密码>'
 ```
+
+> 📌 **环境变量前缀是段名的大写化**：`[node.node1]` ⇒ `NODE_NODE1_`，
+> `[node.a]` ⇒ `NODE_A_`。前缀写错的话，脚本会**静默**改用配置文件里的 host
+> 和交互式提示，而不是报错。
 
 #### 第 3 步：执行
 
@@ -654,22 +685,57 @@ redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER NODES
 > `*** Using Redis Standalone at node1:6379` ⇒ 退回去了。
 > 出现 `Using Redis Cluster with nodes:` ⇒ **还在集群里**。
 
-### 2.5 ⚠️ 两台机器的容错硬边界
+### 2.5 ⭐ 容错边界（**两个维度一起看**）
 
-扩容后是 **3 master + 3 replica 跨 2 台机器**（`cluster-config.sh` 推导出的布局）：
+扩容后是 **3 master + 3 replica 跨 3 台机器**，每台机器恰好 1 个 master + 1 个副本
+（`cluster-config.sh` 推导出的布局）：
 
-| 布局 | 机器故障后的结果 |
+```
+master node1:6379  <- replica node2:6380
+master node2:6379  <- replica node3:6380
+master node3:6379  <- replica node1:6380
+```
+
+**结论先说**：**三台机器下，挂掉任意一台，集群都还能全量可写**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见本节下面的时间线表）。
+
+**为什么**（两台做不到的事）：
+
+| 步骤 | 分析 |
 |---|---|
-| 主数少的那台（1 个 master）挂 | 集群**仍可用**（降级） |
-| 主数多的那台（2 个 master）挂 | **集群停写** |
+| 挂掉 node1 | 死的是 `node1:6379`（master）和 `node1:6380`（node3 的副本） |
+| 多数派？ | 存活 master = node2:6379、node3:6379 = **2/3** ✅ ⇒ 副本**有权提升** |
+| node1:6379 的槽位 | 它的副本 `node2:6380` **活着，在另一台** ✅ ⇒ 提升 ⇒ **槽位被接管** |
+| node3:6379 的槽位 | master **自己活着** ✅（它只是没了副本，不影响槽位覆盖） |
+| 结论 | **16384 个槽位全覆盖** ⇒ `cluster_state:ok` ⇒ **写入照常**（**副本被提升之后**；提升之前只有那个 master 的槽位短暂不可写，见本节下面的时间线表） |
 
-**为什么**：副本提升需要**过半 master 存活**授权（`cluster_size/2 + 1`）。
-3 个 master 分到 2 台机器，必有一台承担 2 个 ⇒ 那台挂掉就只剩 1 个 master，副本无权提升。
+> 📌 **两台为什么做不到**：3 个 master 分到 2 台机器，必有一台承担 2 个
+> ⇒ 那台挂掉只剩 1 个 master，**不过多数派** ⇒ 副本无权提升 ⇒
+> 那些槽位永远无人接管。**这是算术，不是配置问题**（见 §8.3）。
 
-> ⛔ **两台机器在数学上做不到对称容错。** 要两头都活，**至少需要 3 台机器**。
->
-> ⛔ **`cluster_require_full_coverage` 必须是 `no`** —— 默认 `yes` 时
-> 任一 master 挂掉即**全集群停写**。
+⚠️ **`cluster-require-full-coverage` 决定的是「故障被发现之后」的那段窗口**：
+
+⚠️ **`cluster-node-timeout 15000` 是「故障被发现」要花的时间，不是停写窗口的长度**
+（master 挂掉 → 被标记 FAIL 需要 15 秒）。**在这 15 秒里集群还「看起来健康」**，
+其它 master 照常接受写入 —— 仓库自己的 E2E 注释就是这么说的
+（`scripts/e2e-cluster-config.sh:556-558`：*"the masters are only marked fail
+after cluster-node-timeout (15s in the template), and until then the
+cluster can still look healthy and accept writes"*）。
+**停写窗口从「被发现」开始，到「副本被提升、槽位重新被接管」为止**（通常远小于 15 秒）：
+
+| 配置 | 发现之前（~15s） | 发现之后 ~ 提升完成 | 提升完成后 |
+|---|---|---|---|
+| `no` | 死掉的 master 的槽位写不进去，**其余照常** | 只有那些槽位不可写 | 全量可写 |
+| `yes` | 同上（`cluster_state` 可能还是 `ok`） | **全集群拒绝一切写入**（`CLUSTERDOWN`） | 全量可写 |
+
+⇒ **本方案用 `no`** —— 它把「一台机器故障」从「**故障被发现后**全集群停写」降级成
+「**只有那些槽位**短暂不可写」（§2.2 的模板里已经带上了）。
+
+⚠️ **两台那套说法的同一张表（供对照，勿混用）**：
+
+| 场景 | `no` | `yes` |
+|---|---|---|
+| 挂掉「master 少」的那台 | 槽位全覆盖 ⇒ 可写 | **故障被发现后到提升完成前全集群停写**（窗口 ≈ 提升耗时，不是 15 秒），之后可写 |
+| 挂掉「master 多」的那台 | 存活 master 的槽位**仍可写**（死掉的那些不可用） | **全集群永久停写** |
 
 ### 2.6 应用侧要跟着改的：4 个 `oms:` 块
 
@@ -692,10 +758,10 @@ oms:
   clusters:
     - <node1IP>:6379
     - <node1IP>:6380
-    - <node1IP>:6381
-    - <node2IP>:6382
-    - <node2IP>:6383
-    - <node2IP>:6384
+    - <node2IP>:6379
+    - <node2IP>:6380
+    - <node3IP>:6379
+    - <node3IP>:6380
   password: <集群密码>
   timeout: 5000
 ```
@@ -1404,10 +1470,10 @@ oms:
   clusters:
     - <node1IP>:6379
     - <node1IP>:6380
-    - <node1IP>:6381
-    - <node2IP>:6382
-    - <node2IP>:6383
-    - <node2IP>:6384
+    - <node2IP>:6379
+    - <node2IP>:6380
+    - <node3IP>:6379
+    - <node3IP>:6380
   password: <集群密码>
   timeout: 5000
 
@@ -1697,10 +1763,10 @@ spring:
       nodes:
         - <node1IP>:6379
         - <node1IP>:6380
-        - <node1IP>:6381
-        - <node2IP>:6382
-        - <node2IP>:6383
-        - <node2IP>:6384
+        - <node2IP>:6379
+        - <node2IP>:6380
+        - <node3IP>:6379
+        - <node3IP>:6380
       max-redirects: 3
 ```
 
@@ -1749,10 +1815,10 @@ oms:
   clusters:
     - <node1IP>:6379
     - <node1IP>:6380
-    - <node1IP>:6381
-    - <node2IP>:6382
-    - <node2IP>:6383
-    - <node2IP>:6384
+    - <node2IP>:6379
+    - <node2IP>:6380
+    - <node3IP>:6379
+    - <node3IP>:6380
   password: <集群密码>
   timeout: 5000
 ```
@@ -1913,13 +1979,15 @@ Started ModelserverRestApplication in 18.604 seconds
 #### 5.3.1 中间件
 
 ```bash
-# Redis（集群模式下三个 master 都要能 PING）
-for p in 6379 6380 6381 6382 6383 6384; do
-  redis-cli -h <nodeIP> -p $p -a <集群密码> PING
+# Redis（三台机器，每台 6379=master / 6380=replica，六个实例都要能 PING）
+for h in <node1IP> <node2IP> <node3IP>; do
+  for p in 6379 6380; do
+    redis-cli -h $h -p $p -a <集群密码> PING
+  done
 done
 
 # Redis 集群状态
-redis-cli -h <nodeIP> -p 6379 -a <集群密码> CLUSTER INFO | grep -E 'cluster_state|cluster_size|cluster_known_nodes'
+redis-cli -h <node1IP> -p 6379 -a <集群密码> CLUSTER INFO | grep -E 'cluster_state|cluster_size|cluster_known_nodes'
 # 期望：cluster_state:ok · cluster_size:3 · cluster_known_nodes:6
 
 # ZK
@@ -1992,7 +2060,7 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 | 启动日志里**只有** `Using Redis Standalone at ...` | `oms:` 没写 `redisMode: cluster`（默认走 standalone） | 补 `redisMode: cluster` + `clusters:` |
 | 启动日志里**两种行都有** | 配置有歧义（可能改了一半） | 查 `bootstrap.yml` 里的 `oms:` 是不是没注释掉 |
 | `NOAUTH Authentication required` | `oms.password` 与 `cluster.conf` 的 `cluster_password` 不一致 | 两边逐字对齐 |
-| `Cluster join failed: Cannot find master to join` | **集群总线端口没放行**（业务端口 + 10000） | 放行 16379-16384 |
+| `Cluster join failed: Cannot find master to join` | **集群总线端口没放行**（业务端口 + 10000） | **每台**放行 16379、16380 |
 | `We got a connection request from a server with our own ID` | ZK 的 `server.2` 填了本机 IP | 填对端真实 IP |
 | Kafka 客户端连不上，但 broker 在跑 | `advertised.listeners` 填了 `0.0.0.0` 或不可达地址 | 填客户端能到达的地址 |
 | Kafka 起来但堆比配置的大得多 | `Environment=KAFKA_HEAP_OPTS=...` 没加引号，第二个词被丢弃 | 加引号，用 `jinfo` 验证运行中的 `MaxHeapSize` |
@@ -2035,9 +2103,9 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 |---|---|---|
 | `cluster_state:fail` | `CLUSTER NODES` 里有没有 `fail`/`disconnected` 的节点 | 节点没起来 / 总线端口不通 / announce 地址不可达 |
 | `MOVED <slot> <host>:<port>` | 命令行**漏了 `-c`** | 加 `-c` 跟随重定向 |
-| `CLUSTERDOWN Hash slot not served` | `cluster_require_full_coverage` 是 `yes`，且有槽无主 | 改成 `no`（两机部署必须） |
+| `CLUSTERDOWN Hash slot not served` | `cluster_require_full_coverage` 是 `yes`，且有槽无主 | 改成 `no`（本方案必须） |
 | `NOAUTH` | 密码不一致 | `oms.password` ↔ `cluster_password` 逐字对齐 |
-| 副本没提升 | `cluster_size` / `known_nodes` | 挂掉的那台上有 ≥2 个 master ⇒ 达不到多数派（§2.5） |
+| 副本没提升 | `CLUSTER NODES` | 副本所在机器也挂了 / 副本根本没起来 ⇒ 没有可提升的副本（§2.5） |
 | 应用连的是单机 | 启动日志那行 | `oms:` 没写 `redisMode: cluster` |
 
 ### 7.2 ZooKeeper / Kafka
@@ -2072,24 +2140,25 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 |---|---|---|---|
 | 1 | **集群健康** | `redis-cli -h <node1> -p 6379 -a <集群密码> CLUSTER INFO` | `cluster_state:ok` · `cluster_size:3` · `cluster_known_nodes:6` |
 | 2 | **每个 master 都有副本** | `... CLUSTER NODES` | 3 个 master 各有 1 个 replica，**都在另一台机器上** |
-| 3 | **没有槽位无主** | `... CLUSTER SLOTS` | 覆盖 0-16383 |
-| 4 | **内存没顶到上限** | `redis-cli ... INFO memory` | `used_memory` 远小于 `maxmemory`（测试集群是 64mb，**生产按需调大**） |
-| 5 | **持久化没坏** | `redis-cli ... INFO persistence` | `rdb_last_bgsave_status:ok` |
-| 6 | **ZK 两个都在** | 两台各跑 `zkServer.sh status` | 一台 leader 一台 follower |
-| 7 | **Kafka 两个 broker 都在** | `zkCli.sh ... ls /brokers/ids` | `[755, 756]` |
-| 8 | **topic 没有 under-replicated** | `kafka-topics.sh --describe --under-replicated-partitions` | **空输出** |
-| 9 | **消费组 lag 在降** | `kafka-consumer-groups.sh --describe` | `LAG` 稳定或下降，**不持续增长** |
-| 10 | **应用连的是集群** | 每个 app 的启动日志 | `Using Redis Cluster with nodes:`（**双向断言**：还要确认**没有** Standalone 行） |
+| 3 | **三台机器都在** | 三台各跑 `redis-cli -h <本机IP> -p 6379` 与 `-p 6380` | 6 个实例都在（每台 1 master + 1 replica） |
+| 4 | **没有槽位无主** | `... CLUSTER SLOTS` | 覆盖 0-16383 |
+| 5 | **内存没顶到上限** | `redis-cli ... INFO memory` | `used_memory` 远小于 `maxmemory`（测试集群是 64mb，**生产按需调大**） |
+| 6 | **持久化没坏** | `redis-cli ... INFO persistence` | `rdb_last_bgsave_status:ok` |
+| 7 | **ZK 两个都在** | 两台各跑 `zkServer.sh status` | 一台 leader 一台 follower |
+| 8 | **Kafka 两个 broker 都在** | `zkCli.sh ... ls /brokers/ids` | `[755, 756]` |
+| 9 | **topic 没有 under-replicated** | `kafka-topics.sh --describe --under-replicated-partitions` | **空输出** |
+| 10 | **消费组 lag 在降** | `kafka-consumer-groups.sh --describe` | `LAG` 稳定或下降，**不持续增长** |
+| 11 | **应用连的是集群** | 每个 app 的启动日志 | `Using Redis Cluster with nodes:`（**双向断言**：还要确认**没有** Standalone 行） |
 
-> ⚠️ **第 4 条最容易踩**：测试集群的 `maxmemory` 是 **64mb**（`hd-redis-cluster.sh` 里的 `MAXMEM`），
+> ⚠️ **第 5 条最容易踩**：测试集群的 `maxmemory` 是 **64mb**（`hd-redis-cluster.sh` 里的 `MAXMEM`），
 > **生产上要按业务量调大** —— 不然 Redis 会在写满时**拒绝写入**，
 > 而 `maxmemory-policy` 是 `noeviction`（不淘汰）⇒ **写直接失败**。
 >
-> ⚠️ **第 10 条要看的是批次里跑的那几个 app**（web-controller / rtdata-consumer /
+> ⚠️ **第 11 条要看的是批次里跑的那几个 app**（web-controller / rtdata-consumer /
 > model-controller / realalarmconsumer）—— ⚠️ **只看「有 Cluster 行」不够**，
 > 万一日志里两种行都有，模式就是有歧义的。
 >
-> 📌 **第 10 条要在每次重启应用后看** —— 改了 Nacos 的 `oms:` 但没重启 = 没生效。
+> 📌 **第 11 条要在每次重启应用后看** —— 改了 Nacos 的 `oms:` 但没重启 = 没生效。
 
 ### 7.5 ⭐ 建议做一次故障演练（**改造完的头一个月内做**）
 
@@ -2097,11 +2166,10 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 
 | # | 演练什么 | 怎么做 | 期望 | ⚠️ 风险 |
 |---|---|---|---|---|
-| 1 | **挂掉「主数少」的那台** | 停掉那台的 Redis | 集群**仍可用**（降级），副本被提升 | **低** —— 但会掉一个 master |
-| 2 | **挂掉「主数多」的那台** | 停掉那台的 Redis | **集群停写**（§2.5 的数学结论） | ⛔ **会停写** ⇒ **必须先确认业务能接受**，或**先演练第 1 个** |
-| 3 | **Kafka 单 broker 挂** | 停一个 broker | ⛔ **2 voter 的 ZK 失去 quorum ⇒ 不可写**（§3.6） | ⛔ **必然停写** ⇒ **不要在业务时段做** |
+| 1 | **挂掉 Redis 的任意一台** | 停掉那台上的两个 Redis 实例 | 副本被提升 ⇒ 槽位被接管 ⇒ **全量可写**（§2.5） | **低** —— 但会掉一个 master，提升完成前那个 master 的槽位短暂不可写 |
+| 2 | **Kafka 单 broker 挂** | 停一个 broker | ⛔ **2 voter 的 ZK 失去 quorum ⇒ 不可写**（§3.6） | ⛔ **必然停写** ⇒ **不要在业务时段做** |
 
-> ⛔ **第 2、3 条演练本身就会造成停写** ⇒ **必须安排在业务低峰 + 提前通知**。
+> ⛔ **第 2 条演练本身就会造成停写** ⇒ **必须安排在业务低峰 + 提前通知**。
 >
 > 📌 **演练的价值不在于「演练成功」，而在于「验证你的判断」** ——
 > 演练前写下**预期**，演练后对照。**如果结果与预期不符，那才是演练的价值**：
@@ -2113,18 +2181,14 @@ redis-cli -c -h <nodeIP> -p 6379 -a <集群密码> HGETALL real_data:<otype>:<ob
 
 ### 8.1 端口表
 
-**扩容后**（两台机器）：
+**扩容后**（Redis **三台**机器；ZK / Kafka 仍是**两台**）：
 
 | 端口 | 组件 | 协议 | 备注 |
 |---|---|---|---|
 | 5432 | PostgreSQL | PG | 业务库 `napstar` / 平台库 `cpspg`（**只在 node1**） |
-| 6379 | Redis | RESP | **集群 master #1**（node1） |
-| 6380 | Redis | RESP | **集群 master #2**（node1） |
-| 6381 | Redis | RESP | **集群 master #3**（node1） |
-| 6382 | Redis | RESP | **集群 replica**（node2） |
-| 6383 | Redis | RESP | **集群 replica**（node2） |
-| 6384 | Redis | RESP | **集群 replica**（node2） |
-| **16379-16384** | Redis | RESP | ⚠️ **集群总线端口 = 业务端口 + 10000**，**最容易漏放行** |
+| 6379 | Redis | RESP | **集群 master**（三台各一个：node1 / node2 / node3） |
+| 6380 | Redis | RESP | **集群 replica**（三台各一个） |
+| **16379-16380** | Redis | RESP | ⚠️ **集群总线端口 = 业务端口 + 10000**，**最容易漏放行**（**每台**都要放行） |
 | 2181 | ZooKeeper | 客户端 | 两台都有 |
 | 2888 | ZooKeeper | 选举 | 两台都有 |
 | 3888 | ZooKeeper | 同步 | 两台都有 |
@@ -2215,12 +2279,12 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 |---|---|---|
 | 1 | 生产 Redis 有两个实例（6379 + 6389） | ⛔ **只有一个**（6379）—— `env/redis/` 下**只有 `redis.conf` 一份**，`1start_env.sh` 也只起一个（§2.1） |
 | 2 | 生产 Redis 已经是集群 | 是**一台机器上的一个独立单机**，`cluster-enabled` 是注释的 |
-| 3 | 生产已经是两台机器 | ⛔ **现在是单台**。`install.sh:6-13` 把两个 IP 都设成 `127.0.0.1` ⇒ **扩两台是这次要做的事** |
+| 3 | 生产已经是多台机器 | ⛔ **现在是单台**。`install.sh:6-13` 把两个 IP 都设成 `127.0.0.1` ⇒ **扩多台是这次要做的事**（Redis 三台、ZK / Kafka 两台） |
 | 4 | `2start_kafka.sh` 建了 6 个 topic | 只建 **5 个**；`COMMITDATAINCRE` 是 **auto-create** 来的（RF=1） |
 | 5 | ZK 和 Kafka 用同一个别名 | ZK 用 `node01` + **网卡 A 的 IP**，Kafka 用 `node1` + **网卡 B 的 IP** —— **两套别名，同一台机器** |
 | 6 | 集群总线端口就是业务端口 | 是 **业务端口 + 10000**（`6379` → `16379`） |
-| 7 | `cluster_require_full_coverage` 保持默认 | 两机部署必须 `no`，否则任一 master 挂 = 全集群停写 |
-| 8 | 两台机器能对称容错 | **不能**。主数多的那台挂 = 停写。要两头都活至少 **3 台** |
+| 7 | `cluster_require_full_coverage` 保持默认 | **必须 `no`** —— `yes` 时故障**被发现之后**到副本提升完成前**全集群停写**（§2.5） |
+| 8 | **两台**机器做 Redis 能对称容错 | **不能** —— 3 个 master 分到两台，必有一台承担 2 个，那台挂掉只剩 1 个 master，**不过多数派** ⇒ 副本无权提升 ⇒ 槽位无人接管。**三台（每台 1 主 1 从）挂掉任意一台都全量可写**（§2.5） |
 | 9 | 源码里的 `application.yml` 改了会生效 | **大段是注释**，不生效。真值在 **Nacos 导出包**里 |
 | 10 | 改 Nacos 就要重编 jar | **不用** —— 华盾交付树的 jar 里 `oms:` 是注释的 ⇒ Nacos 赢 |
 | 11 | `oms:` 和 `spring.redis:` 是一回事 | **两套契约**。集群化时**两个都要改** |
@@ -2286,7 +2350,7 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 ```
 【现状 → 目标】
   现在：一台机器（node1）。Redis 6379 一个独立单机、ZK 单节点、Kafka 单 broker
-  目标：两台机器。Redis 3master+3replica、ZK 2 voter、Kafka 2 broker
+  目标：Redis **三台**机器（3master+3replica，每台 6379+6380）、ZK 2 voter、Kafka 2 broker
 
 【配置在哪生效】
   命令行 > jar 内 application.yml > Nacos dataId
@@ -2298,12 +2362,12 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 【Redis 扩容成集群】
   1. ⛔ 先停掉 node1 上现有的 6379（只有一个实例）
      并注释掉 1start_env.sh 里起 Redis 的那行（否则重启会抢端口）
-  2. 端口规划：node1 = 6379/6380/6381（master），node2 = 6382/6383/6384（replica）
+  2. 端口规划：**三台都用 6379/6380**（6379=master、6380=replica）
      6379 复用为 master #1（清空数据目录后重建）
-  3. node2 还要先装 Redis 二进制 + 建 redis 用户
+  3. node2、node3 还要先装 Redis 二进制 + 建 redis 用户
   4. 清空旧数据目录（残留 nodes.conf ⇒ 节点带旧身份启动）
   5. cluster.conf：cluster_require_full_coverage = no（必须）
-  6. 放行业务端口 6379-6384 + 总线端口 16379-16384（最容易漏）
+  6. **每台**放行业务端口 6379,6380 + 总线端口 16379,16380（最容易漏）
   7. Nacos 里 4 个带 oms: 的 dataId 都要填（redisMode: cluster 小写 + clusters: 6 个节点）
      + commitDataIncreProducer 的 dataId 要「补」oms: 块
   8. 每个应用也要改 spring.redis:（cluster.nodes 写法，与 oms: 不同）
@@ -2321,8 +2385,9 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
   5. Nacos 4 个 dataId 的 spring.kafka.bootstrap-servers 加第二个 broker
   6. 判据：/brokers/ids = [755, 756]；每 topic PartitionCount=2 / RF=2
 
-【两个装不上集群的物理限制】
-  - 两台机器做 Redis：做不到对称容错（要 3 台）
+【物理限制与结论】
+  - Redis：**三台**（每台 1 主 1 从）⇒ 挂掉任意一台都**全量可写**（§2.5）
+          （少于三台做不到对称容错：3 个 master 挤在一起，必有一台承担 2 个）
   - 2 voter 的 ZK：任一节点挂 = Kafka 不可写（要 3 voter）
 
 【改造失败怎么退回去】
@@ -2334,6 +2399,6 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
 
 【改造后必做】
   1. maxmemory 按业务量调大（测试集群是 64mb，生产不够 ⇒ 写失败）
-  2. 每天巡检 10 项（§7.4）
+  2. 每天巡检 11 项（§7.4）
   3. 头一个月内做一次故障演练（§7.5，演练前先写下预期）
 ```
