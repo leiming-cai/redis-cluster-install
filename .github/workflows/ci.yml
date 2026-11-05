@@ -29,7 +29,7 @@ jobs:
         #
         # The list used to live here, which meant two lists had to be kept in
         # step: this one (6 named files + lib/*.sh = 15 files) and the one in
-        # tests/check_syntax.sh (28 files really checked with `bash -n`).
+        # tests/check_syntax.sh (30 files really checked with `bash -n`).
         # They had already drifted -- 14 scripts had no syntax check in CI at
         # all. tests/check_syntax.sh owns the list now, so a new script is
         # covered as soon as it is added there.

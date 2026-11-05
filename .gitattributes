@@ -4,3 +4,7 @@
 *.bats           text eol=lf
 *.template       text eol=lf
 *.md             text eol=lf
+# The config examples are parsed by lib/conf.sh, which strips a stray CR per
+# line, so they would survive CRLF — but they are text files like the rest,
+# and a CRLF in a file the operator copies and edits is a trap.
+*.example        text eol=lf
