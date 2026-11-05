@@ -303,3 +303,24 @@ EOF
     local warn_lines='\[WARN\].*host 10\.0\.0\.[123]: if it fails the cluster refuses every write once the failure is detected'
     [ "$(printf '%s\n' "$output" | grep -cE "$warn_lines" || true)" -eq 3 ]
 }
+
+# --- the shipped three-host example ----------------------------------------
+#
+# The example file is what the operator actually edits, so it has to stay in
+# sync with the script: a layout that does not parse, or a coverage setting
+# that stops the cluster from surviving a host failure, would only be found
+# during a production window.
+
+@test "cluster.conf.hd.example describes three hosts with two instances each" {
+    run bash "$REPO_ROOT/cluster-config.sh" --config "$REPO_ROOT/cluster.conf.hd.example" --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"3 node(s), 6 instance(s)"* ]]
+    [[ "$output" == *"192.168.1.10:6379"* ]]
+    [[ "$output" == *"192.168.1.12:6379"* ]]
+}
+
+@test "cluster.conf.hd.example keeps coverage off so a host failure does not stop all writes" {
+    run bash "$REPO_ROOT/cluster-config.sh" --config "$REPO_ROOT/cluster.conf.hd.example" --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"keeps serving (degraded)"* ]]
+}
