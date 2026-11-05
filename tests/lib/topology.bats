@@ -236,3 +236,48 @@ teardown() {
         *f*) false ;;
     esac
 }
+
+# --- the three-host layout (huading) ------------------------------------
+#
+# Three machines, two instances each, and the SAME port numbers on every
+# machine. The cluster identifies a node by IP:port, so repeating the ports
+# is safe (lib/cluster.sh matches on "host:port").
+#
+# This is the layout the huading deployment is moving to. It is the first one in
+# which losing ANY single host keeps the cluster serving: every host holds
+# exactly one master, and that master's replica lives on another host, so a
+# failure leaves a live replica to be promoted. The promotion mechanism is what
+# the Docker E2E measured (DoD5 "kill a master, expect its replica to be
+# promoted"), on the two-host layout.
+THREE="10.0.0.1:6379,6380 10.0.0.2:6379,6380 10.0.0.3:6379,6380"
+
+@test "topology_plan spreads three masters over three hosts, one each" {
+    topology_plan "$THREE"
+    [ "$TOPO_MASTER_COUNT" -eq 3 ]
+    [ "$TOPO_REPLICA_COUNT" -eq 3 ]
+    [ "$TOPO_TOTAL_INSTANCES" -eq 6 ]
+    # The name says "one each", so pin the spread itself: the counts above
+    # cannot see it. A layout with two masters on the first host and none on
+    # the third has the same three counts -- the "marks the host holding
+    # fewer masters" test above spells out exactly that trap for the
+    # two-host layout.
+    [ "${TOPO_MASTER[1]%%:*}" = "10.0.0.1" ]
+    [ "${TOPO_MASTER[2]%%:*}" = "10.0.0.2" ]
+    [ "${TOPO_MASTER[3]%%:*}" = "10.0.0.3" ]
+}
+
+@test "topology_plan gives every master a replica on another host" {
+    topology_plan "$THREE"
+    [ "$TOPO_UNPROTECTED_COUNT" -eq 0 ]
+    local i
+    for (( i = 1; i <= TOPO_REPLICA_COUNT; i++ )); do
+        [ "${TOPO_REPLICA[$i]%%:*}" != "${TOPO_REPLICA_MASTER[$i]%%:*}" ]
+    done
+}
+
+@test "topology_plan marks every host of the three-host layout as survivable" {
+    topology_plan "$THREE"
+    [ "${TOPO_SURVIVES[1]}" = "yes" ]
+    [ "${TOPO_SURVIVES[2]}" = "yes" ]
+    [ "${TOPO_SURVIVES[3]}" = "yes" ]
+}
