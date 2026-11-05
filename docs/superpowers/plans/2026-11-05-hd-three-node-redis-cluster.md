@@ -58,12 +58,25 @@ with open(path, "w", encoding="utf-8", newline="") as f:
 | Task 1 的 3 条表征测试 | **一次就绿**（`lib/topology.sh` 本来就支持三机） |
 | Task 2 的 5 条 verdict 测试 | 加实现前 **红**（`command not found`，status 127）→ 加实现后 **全绿** |
 | Task 3 的 2 条行为测试 | 改 `print_topology` 前 **红** → 改后 **全绿** |
-| 全量 bats | `bats tests/` → **51/51**（⚠️ **不递归** `tests/lib/`）· CI 等价的 `find tests -name '*.bats' \| xargs bats` → **211/211** |
-| `bash tests/check_syntax.sh` | `TOTAL=46 FAIL=0`（Task 4 后为 47） |
-| `bash tests/validate_libs.sh` | `SUMMARY: PASS=54 FAIL=0` |
 
 ⇒ **计划里的代码块是跑通过的，不是伪代码。** 实施时若出现不同的失败，
 先怀疑**行尾**（见上第 3 条），再怀疑代码。
+
+### 🔄 本轮**收尾时**的实测值（Task 8 实跑，2026-11-05）
+
+> ⚠️ **下面这张表才是「本轮结束时的真相」** ——
+> 上面那张是**写计划时**的数字，已被本轮收尾的实跑值取代。
+
+| 验证 | 命令 | 实测结果 |
+|---|---|---|
+| 语法 | `bash tests/check_syntax.sh` | `TOTAL=47 FAIL=0` |
+| 库函数 | `bash tests/validate_libs.sh` | `SUMMARY: PASS=54 FAIL=0` |
+| 定向 bats | `bats tests/lib/cluster.bats tests/lib/topology.bats tests/cluster_config.bats` | **72/72** |
+| 全量 bats（**不递归** `tests/lib/`） | `bats tests/` | **56/56** |
+| 全量 bats（CI 等价，**递归**） | `find tests -name '*.bats' -print0 \| xargs -0 bats` | **216/216** |
+| 三机拓扑 | `bash cluster-config.sh --config cluster.conf.hd.example --dry-run` | 3 master + 3 replica 循环映射；三台 `keeps serving (degraded)` |
+| 覆盖率措辞 | 样例改成 `cluster_require_full_coverage = yes` 再跑 | 三台 `refuses every write once the failure is detected`（**WARN** 级），**不再出现** `keeps serving` |
+| **Docker E2E** | `bash scripts/e2e-cluster-config.sh` | **PASSED**（退出码 0）—— 在 **WSL2 侧**的 Docker Engine 29.5.3 上实跑 |
 
 ---
 
@@ -1131,6 +1144,13 @@ Expected: 退出码 0，输出 `E2E PASSED`。
 > **不要伪造通过**。在提交信息 / 交接记录里如实写
 > 「E2E 断言已同步，**未在 Docker 里跑过**（Docker 不可用）」，
 > 并把「跑一次 Docker E2E」留成下一轮的待办。
+>
+> 📌 **【2026-11-05 补记 —— 这条的前提是错的】**
+> 本机的 `bash` 是 **WSL2**，**WSL2 侧的 Docker 是可用的**（Docker Engine 29.5.3）。
+> 从 PowerShell 跑 `docker version` 会失败，那是 **Windows 侧**没有 Docker Desktop ——
+> **不代表 WSL 侧没有** ⇒ **用 WSL 的 bash 跑 E2E**。
+> ⇒ 本轮 Task 8 已实跑：**`=== E2E PASSED ===`，退出码 0**（详见
+> `docs/superpowers/sessions/2026-11-05-hd-three-node-redis-cluster.md` §二·五）。
 
 - [ ] **Step 5: 提交**
 
@@ -1153,6 +1173,8 @@ bash tests/validate_libs.sh
 Expected:
 - `check_syntax.sh` → `TOTAL=47 FAIL=0`
 - bats → **全部通过**
+  （**实测**：定向 3 个文件 **72/72** · `bats tests/` **56/56**（⚠️ **不递归** `tests/lib/`）
+  · `find tests -name '*.bats' -print0 | xargs -0 bats` **216/216**）
 - `validate_libs.sh` → `SUMMARY: PASS=54 FAIL=0`
 
 - [ ] **Step 2: 跑三机干跑，肉眼核对拓扑**
@@ -1206,8 +1228,13 @@ Expected: `git status --short` 无输出；push 成功。
 | 1 | **实测证据** | 三机 `--dry-run` 的真实输出（主从映射逐字抄）、实例数矩阵、8.10.0 的版本核对、`cluster_role_of` 按 `host:port` 匹配的依据 | 
 | 2 | **规格被修正的那一处** | spec §6 初稿把「死掉的副本」当成「死掉的 master」⇒ 三机的容错结论应是**全量可写**，不是「降级」 |
 | 3 | **隐藏依赖** | `tests/cluster_config.bats` 那条 grep 文件文本的测试、`scripts/e2e-cluster-config.sh` 的 A3 断言、`tests/check_syntax.sh` 漏了 `cluster-config.sh`、`cluster.conf.example` 里那两行过期的样例输出（写的是 `keeps serving (degraded)`，而那份样例用的默认 `yes` 永远不会打印这句） |
-| 4 | **没做的事** | Docker E2E 未跑（Docker 不可用）、ZK/Kafka 未动、主线产品文档未动、没碰生产 Nacos、没建表、没写迁移脚本 |
-| 5 | **下一轮** | ① 跑一次 Docker E2E ② 现场装 Redis 8.10.0 + 建 `redis` 用户 ③ 现场数实例数（确认真的只有 1 个 6379）④ 抽查生产 Nacos 的 `oms:` 真值 ⑤ 迁数据的停机窗口与 `DBSIZE` 基线 |
+| 4 | **没做的事** | Docker E2E **已跑通**（WSL2 侧 Docker Engine 29.5.3，退出码 0）· ZK/Kafka 未动 · 主线产品文档未动 · 没碰生产 Nacos · 没建表 · 没写迁移脚本 |
+| 5 | **下一轮** | ① ~~跑一次 Docker E2E~~（**本轮已跑通**）② 现场装 Redis 8.10.0 + 建 `redis` 用户 ③ 现场数实例数（确认真的只有 1 个 6379）④ 抽查生产 Nacos 的 `oms:` 真值 ⑤ 迁数据的停机窗口与 `DBSIZE` 基线 |
+
+> 📌 **【2026-11-05 补记】** 存档的**实际**内容清单由这 **5 条**扩到了 **11 条**
+> （实测证据拆细 / 本轮真正修掉的那个缺陷 / **三轮审查各自翻出来的东西** /
+> 规格被自己推翻的那一处 / 隐藏依赖 / 手册改了什么 / 没做的事 / 最终状态 /
+> 下一轮照做 / 一句提醒）—— 详见存档本身。
 
 ```bash
 git add docs/superpowers/sessions/2026-11-05-hd-three-node-redis-cluster.md

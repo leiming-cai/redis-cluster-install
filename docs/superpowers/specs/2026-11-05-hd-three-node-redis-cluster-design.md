@@ -469,7 +469,7 @@ cluster can still look healthy and accept writes"*）。
 | 6 | 文档一致性 | 全树扫 `§N` 引用 | 每一处都能解析到真实章节 |
 | 7 | 手册无残留 | 扫 `docs/HD-OPERATIONS.md` 的「两台」 | 只剩 §3（ZK/Kafka）里的 |
 | 8 | 脱敏 | 扫真实内网 IP / 口令 | 样例里 **0 处**真实值 |
-| 9 | Docker E2E | `bash scripts/e2e-cluster-config.sh` | `E2E PASSED`（退出码 0）—— **需要 Docker**，本机 Docker Desktop 未启动时跳过并标注 |
+| 9 | Docker E2E | `bash scripts/e2e-cluster-config.sh` | **实跑通过**：`=== E2E PASSED ===`，退出码 **0**（2026-11-05，在 **WSL2 侧**的 Docker Engine 29.5.3 上）—— 主跑（默认 `yes`）两台分别打印 `STOPS serving` / `refuses every write once the failure is detected`；A5 打印 `CLUSTERDOWN The cluster is down`；A6（`no`）打印 `keeps serving (degraded)` 且计数 **39 writable / 21 refused of 60 keys** |
 
 ---
 
