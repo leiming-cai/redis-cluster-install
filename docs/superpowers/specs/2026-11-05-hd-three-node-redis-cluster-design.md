@@ -151,12 +151,13 @@ fi
   └─────────┘         └─────────┘         └─────────┘
 ```
 
-实际推导出的映射（`--dry-run` 实测输出，`replica X -> master Y` 表示 X 的副本跟随 Y）：
+实际推导出的映射（下面这 3 行**逐字取自** `cluster.conf.hd.example`；
+`master X <- replica Y` 表示 X 是 master、Y 是它的副本）：
 
 ```
-replica node1:6380 -> master node2:6379
-replica node2:6380 -> master node3:6379
-replica node3:6380 -> master node1:6379
+#   master  node1:6379   <- replica node2:6380
+#   master  node2:6379   <- replica node3:6380
+#   master  node3:6379   <- replica node1:6380
 ```
 
 按机器看：
@@ -292,13 +293,14 @@ A3 断言「protected 那台挂了集群 keeps serving」，而 **A5**（同一�
 ### 4.3 `cluster.conf.example`：加一段指路 + 修一处过期样例输出
 
 ⚠️ **一个配置样例文件只能放一套拓扑** —— `cluster.conf.example` 是「复制成 `cluster.conf` 就能用」的文件，
-塞两套样例（两台的 + 三台的）会变成**一台五机集群**，反而误导。
+塞两套样例（两台的 + 三台的）会变成**五机集群**，反而误导。
 
 ⇒ **主线的 `cluster.conf.example` 的拓扑不动**（README / USAGE 都在引用它的两台形态），
 只加一段注释指路：「三台机器的写法见 `cluster.conf.hd.example` 与 `docs/HD-OPERATIONS.md` §2.2」。
 
-⚠️ **另有一处过期内容要一起修**：那份样例**没有**设置 `cluster_require_full_coverage`
-⇒ 用的是默认 `yes` ⇒ 脚本打印的结论是
+⚠️ **另有一处过期内容要一起修**：那份样例把 `cluster_require_full_coverage`
+**显式设成了 `yes`**（`cluster.conf.example` 的 `cluster_require_full_coverage` 那行）
+⇒ 脚本打印的结论是
 `the cluster refuses every write once the failure is detected...`，
 **没有任何一台会打印 `keeps serving (degraded)`**
 ⇒ 样例里那两行「脚本每次运行会把这两行打印出来」是错的，改成实际会打印的样子
@@ -312,6 +314,11 @@ A3 断言「protected 那台挂了集群 keeps serving」，而 **A5**（同一�
 - 三个 `[node.X]` 段，每段 `ports = 6379,6380`
 - 注释里写清：端口可重复（按 `IP:port` 区分节点）、每台 1 主 1 从、6379 复用为 master #1、
   防火墙要放行的 4 个端口、以及 `cluster_require_full_coverage` 为什么必须是 `no`
+- 顶部一句「**这是模板**：IP 和 `cluster_password` 都要改成实际值」的提醒
+  （`CHANGE_ME` 不改 ⇒ 应用连不上）
+- 「跑之前」清单里含 `redis-server` **和** `redis-cli` 两个二进制 + `redis` 用户
+  （`cluster-config.sh` 的 preflight 就查这两个），以及「清空旧数据目录」
+  （残留 `nodes.conf` 会让新节点带着**旧集群的身份**启动 ⇒「节点认不出自己」）
 
 ### 4.5 `docs/HD-OPERATIONS.md`：Redis 相关的 14 节
 

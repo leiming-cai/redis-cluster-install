@@ -612,6 +612,9 @@ git commit -m "test(hd): put cluster-config.sh under the syntax check"
 # 用法：cp cluster.conf.hd.example cluster.conf，然后按实际情况修改。
 # cluster.conf 含集群密码，不应提交到版本库（已在 .gitignore 里）。
 #
+# ⚠️⚠️ 这是**模板**：IP **和** `cluster_password` **都**必须改成实际值
+#    （`CHANGE_ME` 保持不变的话应用连不上）。
+#
 # 解析器不会执行本文件中的任何内容，只做键值切分。
 # '#' 只能出现在一整行的开头，即只支持整行注释。值后面写 '# ...'
 # 会直接报错而不是被吞进值里 —— 密码里出现 '#' 是合法字符，静默截断比
@@ -717,18 +720,22 @@ ports    = 6379,6380
 #
 # 1) 三台机器都要有 Redis 二进制 + `redis` 用户（cluster-config.sh 会校验，
 #    缺了就指名报错）：
-#        ls /opt/software/redis-*/bin/redis-server
+#        ls /opt/software/redis-*/bin/redis-{server,cli}
 #        id redis
 #
 # 2) node1 上现有的那个单机 6379 **必须先停掉**，否则新节点抢不到端口。
 #    详见 docs/HD-OPERATIONS.md §2.3 第 0 步。
 #
-# 3) SSH 密码从环境变量来（每组节点一个前缀）：
+# 3) 停掉之后**清空它的数据目录** —— 里面残留的 `nodes.conf` 会让新节点带着
+#    **旧集群的身份**启动，表现为「节点认不出自己」。
+#    详见 docs/HD-OPERATIONS.md §2.3 第 1 步。
+#
+# 4) SSH 密码从环境变量来（每组节点一个前缀）：
 #        export NODE_NODE1_SSH_USER=root NODE_NODE1_SSH_PASS='...'
 #        export NODE_NODE2_SSH_USER=root NODE_NODE2_SSH_PASS='...'
 #        export NODE_NODE3_SSH_USER=root NODE_NODE3_SSH_PASS='...'
 #
-# 4) 先干跑看拓扑：
+# 5) 先干跑看拓扑：
 #        bash cluster-config.sh --config cluster.conf --dry-run
 ````
 
@@ -746,7 +753,7 @@ ports    = 6379,6380
 # `cluster.conf.hd.example`，细节见 `docs/HD-OPERATIONS.md` §2.2。
 #
 # 两者不能合在一个文件里 —— 一个样例文件只能放一套拓扑，
-# 两套写在一起会变成「一台五机集群」。
+# 两套写在一起会变成「五机集群」。
 ```
 
 ⚠️ **顺带修一处过期内容**（代码审查发现，本任务正好动这个文件）：
@@ -757,8 +764,9 @@ ports    = 6379,6380
 #   host 192.168.1.11: if it fails the cluster keeps serving (degraded)
 ```
 
-**这段现在是错的** —— 那份样例**没有**设置 `cluster_require_full_coverage`
-⇒ 用的是默认 `yes` ⇒ 受保护的那台打印的是
+**这段现在是错的** —— 那份样例把 `cluster_require_full_coverage`
+**显式设成了 `yes`**（`cluster.conf.example` 的 `cluster_require_full_coverage` 那行）
+⇒ 受保护的那台打印的是
 `refuses every write once the failure is detected...`，
 **没有任何一台会打印 "keeps serving (degraded)"**。
 
