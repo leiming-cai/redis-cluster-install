@@ -717,7 +717,7 @@ master node3:6379  <- replica node1:6380
 ⚠️ **`cluster-node-timeout 15000` 是「故障被发现」要花的时间，不是停写窗口的长度**
 （master 挂掉 → 被标记 FAIL 需要 15 秒）。**在这 15 秒里集群还「看起来健康」**，
 其它 master 照常接受写入 —— 仓库自己的 E2E 注释就是这么说的
-（`scripts/e2e-cluster-config.sh:556-558`：*"the masters are only marked fail
+（`scripts/e2e-cluster-config.sh:562-564`：*"the masters are only marked fail
 after cluster-node-timeout (15s in the template), and until then the
 cluster can still look healthy and accept writes"*）。
 **停写窗口从「被发现」开始，到「副本被提升、槽位重新被接管」为止**（通常远小于 15 秒）：
@@ -757,14 +757,15 @@ oms:
   redisMode: cluster
   clusters:
     - <node1IP>:6379
-    - <node1IP>:6380
     - <node2IP>:6379
-    - <node2IP>:6380
     - <node3IP>:6379
-    - <node3IP>:6380
   password: <集群密码>
   timeout: 5000
 ```
+
+> ⚠️ **副本地址不要填**：集群客户端只用这个列表做拓扑引导，
+> 主从关系它自己从 `CLUSTER SLOTS` 学 —— 详见 `docs/OPERATIONS.md` §4.5。
+> 本仓库的 E2E 脚本（`scripts/e2e-cpsweb-nodes.sh` 等）传的也**只有 master**。
 
 ⚠️ **四个必须同时满足的条件**（少一个就是静默降级）：
 
@@ -772,7 +773,7 @@ oms:
 |---|---|---|
 | 1 | **`redisMode: cluster` 必须**显式写出 | 不写 → `parseMode(null)` → 走 standalone → **连的是旧单机**（可能已经被停掉）→ 应用起不来或连错 |
 | 2 | **大小写敏感** | 写成 `CLUSTER` → **三个分支一个都不激活** → 报「找不到 RedisConnectionFactory」，完全指不到真正原因 |
-| 3 | `clusters:` 的列表**要含全部 6 个节点** | 少写 → Jedis 连不上 → 启动失败 |
+| 3 | `clusters:` 的列表**至少 1 个**（代码只检查非空）—— 但**建议只给 3 个 master** | 副本地址不要填：集群客户端只用这个列表做拓扑引导，真正的主从关系它自己从 `CLUSTER SLOTS` 学 |
 | 4 | `password:` 与 `cluster.conf` 的 `cluster_password` **逐字相同** | 不符 → `NOAUTH` |
 
 > ⚠️ **第 4 条还有个顺序陷阱**：`cluster.conf` 里的密码写在**节点自己的 `redis.conf`** 里，
@@ -790,7 +791,7 @@ oms:
 **唯一可靠的判据** —— 看**启动日志**里逐字打印的生效值：
 
 ```
-*** Using Redis Cluster with nodes: <node1IP>:6379,<node1IP>:6380,... (connectTimeout=5000ms, readTimeout=5000ms, maxWait=5000ms)
+*** Using Redis Cluster with nodes: <node1IP>:6379,<node2IP>:6379,<node3IP>:6379 (connectTimeout=5000ms, readTimeout=5000ms, maxWait=5000ms)
 *** Redis mode detected: CLUSTER ***
 ```
 
@@ -1469,11 +1470,8 @@ oms:
   redisMode: cluster
   clusters:
     - <node1IP>:6379
-    - <node1IP>:6380
     - <node2IP>:6379
-    - <node2IP>:6380
     - <node3IP>:6379
-    - <node3IP>:6380
   password: <集群密码>
   timeout: 5000
 
@@ -1482,6 +1480,9 @@ spring:
   kafka:
     bootstrap-servers: <node1IP>:9092,<node2IP>:9092
 ```
+
+> ⚠️ **副本地址不要填**：集群客户端只用这个列表做拓扑引导，
+> 主从关系它自己从 `CLUSTER SLOTS` 学 —— 详见 `docs/OPERATIONS.md` §4.5。
 
 > 📌 **`oms:` 与 `spring.redis:` 是两套不同的东西**，各管各的：
 >
@@ -1762,13 +1763,13 @@ spring:
     cluster:
       nodes:
         - <node1IP>:6379
-        - <node1IP>:6380
         - <node2IP>:6379
-        - <node2IP>:6380
         - <node3IP>:6379
-        - <node3IP>:6380
       max-redirects: 3
 ```
+
+> ⚠️ **副本地址不要填**：集群客户端只用这个列表做拓扑引导，
+> 主从关系它自己从 `CLUSTER SLOTS` 学 —— 详见 `docs/OPERATIONS.md` §4.5。
 
 > ⚠️ **`spring.redis:` 和 `oms:` 的写法不一样**：
 > `oms:` 用 `redisMode` + `clusters:`（本项目自己的契约），
@@ -1814,14 +1815,14 @@ oms:
   redisMode: cluster
   clusters:
     - <node1IP>:6379
-    - <node1IP>:6380
     - <node2IP>:6379
-    - <node2IP>:6380
     - <node3IP>:6379
-    - <node3IP>:6380
   password: <集群密码>
   timeout: 5000
 ```
+
+> ⚠️ **副本地址不要填**：集群客户端只用这个列表做拓扑引导，
+> 主从关系它自己从 `CLUSTER SLOTS` 学 —— 详见 `docs/OPERATIONS.md` §4.5。
 
 > 📌 **`database:` 保持 `0`** —— 现有 4 个 `oms:` 块**全是 `database: 0`**
 > （实测 4/4）⇒ 照抄 `0`，**不要**改成 `1`。
@@ -2371,7 +2372,7 @@ application/backend-gd/             → ⚠️ 同一批代码的**副本目录*
   4. 清空旧数据目录（残留 nodes.conf ⇒ 节点带旧身份启动）
   5. cluster.conf：cluster_require_full_coverage = no（必须）
   6. **每台**放行业务端口 6379,6380 + 总线端口 16379,16380（最容易漏）
-  7. Nacos 里 4 个带 oms: 的 dataId 都要填（redisMode: cluster 小写 + clusters: 6 个节点）
+  7. Nacos 里 4 个带 oms: 的 dataId 都要填（redisMode: cluster 小写 + clusters: 3 个 master）
      + commitDataIncreProducer 的 dataId 要「补」oms: 块
   8. 每个应用也要改 spring.redis:（cluster.nodes 写法，与 oms: 不同）
   9. 判据：启动日志 "*** Using Redis Cluster with nodes: ..." 且没有 Standalone 行

@@ -73,7 +73,8 @@ cluster_require_full_coverage = no
 # `Unable to connect to any of the peers`。
 #
 # ---------------------------------------------------------------------------
-# ⭐ 这套布局推出来的拓扑（`cluster-config.sh --dry-run` 的实测输出）
+# ⭐ 这套布局推出来的拓扑（`cluster-config.sh --dry-run` 输出的**拓扑部分**，
+#    地址这里写的是标签，实际输出里是 IP）
 # ---------------------------------------------------------------------------
 #
 #   master  node1:6379   <- replica node2:6380

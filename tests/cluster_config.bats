@@ -304,6 +304,40 @@ EOF
     [ "$(printf '%s\n' "$output" | grep -cE "$warn_lines" || true)" -eq 3 ]
 }
 
+# The WORST case has no severity pinned by the two tests above: `survives=no`
+# with coverage off. It is the case the manual's §2.5 is about -- the slots
+# of that host's masters are NEVER covered again -- and it is the one verdict
+# whose wording ("keeps serving the surviving masters' slots only") reads
+# like good news if it is not marked as a warning.
+
+@test "cluster-config.sh --dry-run warns when a host's slots are never covered, even with coverage off" {
+    cat > "$CONF_TMP/two-hosts-no.conf" <<'EOF'
+cluster_password = pw
+cluster_require_full_coverage = no
+[node.a]
+host  = 10.0.0.1
+ports = 6379,6380,6381
+[node.b]
+host  = 10.0.0.2
+ports = 6382,6383,6384
+EOF
+    run bash "$REPO_ROOT/cluster-config.sh" --config "$CONF_TMP/two-hosts-no.conf" --dry-run
+    [ "$status" -eq 0 ]
+    # This layout puts two of the three masters on host a: when it dies only
+    # one master is left -- fewer than the majority a replica needs to be
+    # promoted -- so host a's slots are never covered again. Host b keeps
+    # the quorum, so it is the degraded-but-recoverable case.
+    [[ "$output" == *"10.0.0.1: if it fails the cluster keeps serving the surviving masters' slots only"* ]]
+    # The LEVEL is what this test pins. A regression to "coverage off =>
+    # INFO" would print the worst verdict of the whole document as a routine
+    # note, and the two tests above would still be green.
+    local warn_lines='\[WARN\].*host 10\.0\.0\.1: if it fails the cluster keeps serving the surviving masters'
+    [ "$(printf '%s\n' "$output" | grep -cE "$warn_lines" || true)" -eq 1 ]
+    # ... and the very same line must NOT also be printed at INFO.
+    local info_lines='\[INFO\].*host 10\.0\.0\.1: if it fails the cluster keeps serving the surviving masters'
+    [ "$(printf '%s\n' "$output" | grep -cE "$info_lines" || true)" -eq 0 ]
+}
+
 # --- the shipped three-host example ----------------------------------------
 #
 # The example file is what the operator actually edits, so it has to stay in
