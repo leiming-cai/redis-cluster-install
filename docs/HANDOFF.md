@@ -6,13 +6,20 @@
 > `…-hd-cluster-test-round.md` = 集群全量回归轮 ·
 > `2026-11-04-hd-operations-manual.md` = 运维手册轮 ·
 > **`2026-11-04-hd-production-truth-upgrade.md` = 生产真值补全轮** ·
-> **`2026-11-09-local-docker-e2e.md` = 本地 Docker 固定轮（最新，2026-11-09）**）——
+> **`2026-11-09-local-docker-e2e.md` = 本地 Docker 固定轮** ·
+> **`2026-11-09-three-host-cluster-analysis.md` = 三机集群读写适配分析轮（最新）**）——
 > 下面这份交接文档**截止到 2026-10-30**，**没有**覆盖那几轮的工作。
 > 🔴 **【2026-11-09】Docker 一律用「本地 Docker Desktop」，不要用 WSL 里的 Docker** ——
 > 本机**两套引擎并存**（本地 29.9.2 / WSL 29.5.3），选错了不会报错，
 > 只会在**看不见的地方**多出一堆容器。
 > 跑 E2E 用 **`bash scripts/e2e-local-docker.sh`**（它会先校验引擎身份再动手）。
 > 详见「环境约束」章节与 `docs/superpowers/sessions/2026-11-09-local-docker-e2e.md`。
+> 📊 **【2026-11-09】三机集群能不能读写？** ——
+> **基线两棵树能**（代码就绪，只差改 Nacos 配置）；
+> **华盾两棵树不能**（缺口可数可修）。
+> ⭐ **基线的生产写路径已在真实 3 机集群上实测通过**
+> （`putAllHashes` 30/30、`poolFound=true` ⇒ 走按节点 pipeline、不是逐 key 退化）。
+> 详见 `docs/superpowers/specs/2026-11-09-three-host-cluster-read-write-analysis.md`。
 > 🌲 **三棵源码树的对照表（先看这个）：`docs/superpowers/sessions/2026-11-03-tree-map.md`**
 > 📖 **华盾环境的部署手册**：`docs/HD-OPERATIONS.md` ——
 > **单机改集群**的作业指导书（Redis / ZK / Kafka 集群化 + 四个后台程序的 YAML 配置）；
