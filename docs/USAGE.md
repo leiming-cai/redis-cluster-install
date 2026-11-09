@@ -332,9 +332,22 @@ redis 会因为无法穿越父目录而报
 
 ### 5.7.7 端到端测试
 
-```bash
-bash scripts/e2e-cluster-config.sh
-```
+> 🔴 **在 Windows 上用这个入口**：
+>
+> ```bash
+> bash scripts/e2e-local-docker.sh
+> ```
+>
+> 它把容器建在**本地 Docker Desktop** 引擎里，并**先校验引擎身份** ——
+> 本机还有一套 **WSL2 里的独立 Docker 引擎**（另一个 daemon、另一套容器清单），
+> 容器建在那里宿主机看不见、残留也无人察觉。
+> 引擎不是 `Docker Desktop` 时它**硬失败、不建任何容器**。
+>
+> 下面是它内部的等价命令（Linux 主机上直接跑即可）：
+>
+> ```bash
+> bash scripts/e2e-cluster-config.sh
+> ```
 
 需要 Docker。会在本地起两个容器模拟节点（真实 sshd + systemd），基于官方
 `redis:8` 镜像，然后跑完整流程并校验：6 实例 PING、16384 槽位覆盖、跨机读写、
@@ -351,6 +364,15 @@ bash scripts/e2e-cluster-config.sh
 ```bash
 E2E_REGISTRY=docker.1ms.run/library bash scripts/e2e-cluster-config.sh
 ```
+
+> 📌 **为什么在 Windows 上不能直接跑 `scripts/e2e-cluster-config.sh`**
+> （2026-11-09 实测）：**MSYS 路径转换在两处要求相反** ——
+> `docker build` 的上下文由 **CLI** 读（要转换**开**），
+> `docker run -v` 的源由 **daemon** 解析（要转换**关**，否则 `:目标` 被改写成
+> `D:/Program Files/Git/repo`）。两者互斥。
+> `e2e-local-docker.sh` 把脚本放进带 docker CLI 的 runner 容器里跑，
+> 容器内是 Linux 路径语义，靠 `REPO_ROOT`（给 CLI）与 `E2E_HOST_REPO`（给 daemon）
+> 两个变量分工解决。
 
 ---
 
@@ -827,6 +849,10 @@ bash scripts/check-bash-compat.sh
 bash scripts/smoke-test.sh
 
 # cluster-config.sh 的端到端（需要 docker；会拉取 redis:8）
+# Windows 上用 e2e-local-docker.sh：它把容器建在本地 Docker Desktop 引擎里，
+# 并先校验引擎身份（见 §5.7.7 的说明）
+bash scripts/e2e-local-docker.sh
+# Linux 主机上直接跑：
 bash scripts/e2e-cluster-config.sh
 
 # CPS Web 节点镜像的端到端（需要 docker + 已构建的 cpsweb-env:1.0）

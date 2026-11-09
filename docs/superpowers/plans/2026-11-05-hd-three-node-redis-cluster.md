@@ -1151,6 +1151,17 @@ Expected: 退出码 0，输出 `E2E PASSED`。
 > **不代表 WSL 侧没有** ⇒ **用 WSL 的 bash 跑 E2E**。
 > ⇒ 本轮 Task 8 已实跑：**`=== E2E PASSED ===`，退出码 0**（详见
 > `docs/superpowers/sessions/2026-11-05-hd-three-node-redis-cluster.md` §二·五）。
+>
+> 📌 **【2026-11-09 再更正 —— 现在必须用「本地 Docker」，不要用 WSL 的 Docker】**
+> Windows 侧**已有 Docker Desktop**（4.98.0 / Engine 29.9.2）。
+> WSL 侧那个引擎是**另一个 daemon、另一套容器清单** ⇒ 容器建在那里
+> 宿主机看不见、残留也无人察觉。**项目要求容器一律建在本地引擎。**
+> ⇒ 改用 **`bash scripts/e2e-local-docker.sh`**：它先用 `docker info` 校验引擎身份，
+> 不是 `Docker Desktop` 就**硬失败**（不建任何容器）。
+> 📌 在 Windows 上直接用 Git Bash 跑 `bash scripts/e2e-cluster-config.sh` 会失败 ——
+> **MSYS 路径转换在 `docker build`（CLI 解析）与 `docker run -v`（daemon 解析）两处要求相反**，
+> 两者互斥。`scripts/e2e-local-docker.sh` 用仓库既有的 `REPO_ROOT` / `E2E_HOST_REPO`
+> 变量分工把它解决掉。
 
 - [ ] **Step 5: 提交**
 

@@ -76,6 +76,7 @@ bash uninstall.sh --force     # 实际执行删除
 | `secrets/cluster_password.txt` | 集群密码(默认 `sac888`,可被 `CLUSTER_PASSWORD` 环境变量覆盖;权限 0600) |
 | `tests/` | bats 单元测试 |
 | `scripts/smoke-test.sh` | Docker 端到端集成测试 |
+| `scripts/e2e-local-docker.sh` | 跑 Docker E2E 的入口 —— 容器建在**本地 Docker Desktop** 引擎里，并先校验引擎身份 |
 | `scripts/e2e-cluster-config.sh` | `cluster-config.sh` 的 Docker 双节点端到端测试 |
 | `scripts/e2e-cpsweb-nodes.sh` | 在 **CPS Web 环境镜像**派生的节点上部署集群并跑消费者写入测试 |
 | `scripts/e2e-kafka-cluster.sh` | 在两个 CPS 节点上建 **2-voter ZooKeeper + 2-broker Kafka(RF=2)** 集群并验证副本 |
@@ -149,6 +150,9 @@ bats tests/
 bash scripts/smoke-test.sh
 
 # cluster-config.sh 端到端(需要 Docker)
+# Windows 上用这个:它把容器建在本地 Docker Desktop 引擎里,并先校验引擎身份
+bash scripts/e2e-local-docker.sh
+# Linux 主机上直接跑:
 bash scripts/e2e-cluster-config.sh
 
 # CPS Web 节点镜像端到端(需要 Docker + cpsweb-env:1.0)
@@ -187,7 +191,9 @@ systemd / sshd / `redis` 用户的节点镜像,再跑完整的 9 步组网,最�
 - 没装 Sentinel(Redis 集群自带故障切换,够用)
 - 没启 TLS / ACL
 - 没有监控告警(超出脚本范围)
-- 不原生支持 Windows,在 Windows 上需要用 WSL
+- 不原生支持 Windows,在 Windows 上需要用 WSL 或 Git Bash
+  （Docker E2E 请用 `bash scripts/e2e-local-docker.sh` —— 它会把容器建在
+  **本地 Docker Desktop** 引擎里,并先校验引擎身份）
 - 仅支持 SSH 密码登录;如需 SSH 密钥,改 `lib/ssh.sh` 去掉 `sshpass -e` 包装
 
 ## 设计文档

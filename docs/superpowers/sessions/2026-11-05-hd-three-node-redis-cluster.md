@@ -129,12 +129,40 @@ cluster_role_of() {
 
 ### 2.5 🔴 Docker E2E **真跑通了**
 
-> 📌 **本机的 `bash` 是 WSL2，WSL2 侧的 Docker 是可用的**（**Docker Engine 29.5.3**）。
-> 从 PowerShell 跑 `docker version` 会失败 —— 那是 **Windows 侧**没有 Docker Desktop，
-> **不代表 WSL 侧没有** ⇒ **必须用 WSL 的 bash 跑**。
+> 📌 **【2026-11-09 更正】这一段的前提已经变了 —— 现在用「本地 Docker」，不要用 WSL 的 Docker。**
+>
+> 本轮（2026-11-05）当时的机器状态是：**Windows 侧没有 Docker Desktop**，
+> 只有 **WSL2 侧的 Docker Engine 29.5.3** ⇒ 当时只能「用 WSL 的 bash 跑」。
+>
+> **2026-11-09 实测**：Windows 侧**已有 Docker Desktop**（**4.98.0 / Engine 29.9.2**，
+> context `desktop-linux`），且**项目明确要求容器一律建在本地引擎** ——
+> WSL 侧的引擎是**另一个 daemon、另一套容器清单**，容器建在那里
+> 宿主机看不见、残留也无人察觉。
+>
+> ⇒ **改用 `scripts/e2e-local-docker.sh`**（新增），它会**先校验引擎身份再动手**：
+> `docker info` 报的不是 `Docker Desktop` 就**硬失败**，不建任何容器。
+>
+> ```bash
+> bash scripts/e2e-local-docker.sh
+> ```
+>
+> 📌 **在 Windows 上直接用 Git Bash 跑 `bash scripts/e2e-cluster-config.sh` 会失败**，
+> 原因是 **MSYS 路径转换在两个地方要求相反**（**实测**，不是推断）：
+>
+> | 路径 | 谁解析 | 要求 |
+> |---|---|---|
+> | `docker build <上下文>` | **CLI**（Windows 原生程序） | 转换**开** → `/d/work/...` 变 `D:\work\...` |
+> | `docker run -v <源>:<目标>` | **daemon** | 转换**关** → 否则 `:目标` 被改写成 `D:/Program Files/Git/repo` |
+>
+> 两个设置**互斥**：为了救 `-v` 而设 `MSYS_NO_PATHCONV=1`，`docker build` 立刻报
+> `unable to prepare context: path "/d/work/rediscluterproject" not found`。
+>
+> **解法就是仓库本来就有的那两个变量**（`REPO_ROOT` 给 CLI 看，
+> `E2E_HOST_REPO` 给 daemon 看），把脚本放进一个带 docker CLI 的 runner 容器里跑，
+> 容器内是 Linux 路径语义，冲突消失。
 
 ```bash
-bash scripts/e2e-cluster-config.sh
+bash scripts/e2e-local-docker.sh
 ```
 
 **结果：`=== E2E PASSED ===`，退出码 0。**（实测日志见下）
@@ -369,6 +397,7 @@ done
 | **bats（`bats tests/`，**不递归** `tests/lib/`）** | **56/56** |
 | **bats（`find tests -name '*.bats' \| xargs bats`，CI 等价，**递归**）** | **216/216** |
 | **Docker E2E** | **`=== E2E PASSED ===`，退出码 0**（WSL2 侧 Docker Engine 29.5.3）；A5 实测 `CLUSTERDOWN The cluster is down`；A6 实测 **39 writable / 21 refused of 60 keys** |
+| **Docker E2E（2026-11-09 复跑）** | **`=== E2E PASSED ===`，退出码 0** —— 改在**本地 Docker Desktop**（Engine **29.9.2**）上跑；Redis **8.10.3**；A5 `CLUSTERDOWN The cluster is down`；A4 `the cluster kept serving`；DoD5 `promotion OK`；A6 **39 writable / 21 refused of 60 keys**；跑完**本地与 WSL 两侧均无残留容器** |
 | **独立复算** | 本轮所有数字都**重新算过一遍**：实例数矩阵（`lib/topology.sh` 实跑 4 组布局）· 8.10.0 指令核对（扫源码，缺失 0）· §3 的 md5 · 全树 `§N` 引用 · 样例脱敏 |
 | **文档交叉引用** | **stale refs: 0** |
 

@@ -1697,6 +1697,7 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 | `bash tests/validate_libs.sh` | `lib/` 里的纯函数单测（`PASS=54`） | bash |
 | `bash tests/validate_java_pipelines.sh <app-backend> [platform-backend]` | **静态守卫**：树里出现**集群不安全的 Redis 调用**（`executePipelined(...)` 或 `execute(cb, X, true)`）就失败（集群模式下 pipeline 必炸 → 实时数据静默丢失），见 §6.3 | bash |
 | `bash scripts/check-bash-compat.sh` | 在 **bash 4.3** 上跑整套 bats —— 唯一能看见那类 bug 的地方 | docker |
+| `bash scripts/e2e-local-docker.sh` | **跑 Docker E2E 的入口** —— 把容器建在**本地 Docker Desktop** 引擎里，并先校验引擎身份（见下方说明） | docker |
 | `bash scripts/e2e-cluster-config.sh` | `cluster-config.sh` 的 Docker 双节点 E2E（断言 A0–A6 + DoD1–DoD7） | docker |
 | `bash scripts/e2e-cpsweb-nodes.sh` | 在 **CPS Web 环境镜像**派生的节点上部署集群并跑消费者写入测试 | docker + `cpsweb-env:1.0` |
 | `bash scripts/e2e-kafka-cluster.sh` | 两 voter ZK + 两 broker Kafka（断言 A1–A7，见 §3.4） | docker |
@@ -1712,6 +1713,29 @@ bash add-node.sh <新IP> 6385 <已有IP> 6380
 > ⚠️ **`check-bash-compat.sh` 从容器里跑要设 `BASH_COMPAT_HOST_REPO`**，
 > `e2e-cluster-config.sh` 要设 `E2E_HOST_REPO` —— 否则容器内的 `/repo`
 > daemon 解析不到，现象是 `find: tests: No such file or directory`。
+
+> 🔴 **在 Windows 上跑 Docker E2E：用 `scripts/e2e-local-docker.sh`，
+> 不要直接跑 `scripts/e2e-cluster-config.sh`**（2026-11-09 实测）。
+>
+> 本机装了**两套 Docker**：**本地 Docker Desktop**（Engine 29.9.2）和
+> **WSL2 里的独立引擎**（Engine 29.5.3）。它们是**两个 daemon、两套容器清单** ——
+> 容器建在 WSL 那套里，宿主机看不见、残留也无人察觉。
+> ⇒ **容器一律建在本地引擎**，`e2e-local-docker.sh` 会先 `docker info` 校验引擎身份，
+> 不是 `Docker Desktop` 就**硬失败、不建任何容器**。
+>
+> 📌 **为什么不能直接用 Git Bash 跑** —— **MSYS 路径转换在两处要求相反**：
+>
+> | 路径 | 谁解析 | 要求 |
+> |---|---|---|
+> | `docker build <上下文>` | **CLI**（Windows 原生程序） | 转换**开** → `/d/work/...` ⇒ `D:\work\...` |
+> | `docker run -v <源>:<目标>` | **daemon** | 转换**关** → 否则 `:目标` 被改写成 `D:/Program Files/Git/repo`（不存在 ⇒ **挂载静默变空**） |
+>
+> 两个设置**互斥**：为救 `-v` 而设 `MSYS_NO_PATHCONV=1`，`docker build` 立刻报
+> `unable to prepare context: path "/d/work/rediscluterproject" not found`。
+>
+> **解法**：把脚本放进带 docker CLI 的 runner 容器里跑，容器内是 Linux 路径语义 ——
+> 靠仓库本来就有的两个变量分工：`REPO_ROOT`（`/repo`）给 **CLI**，
+> `E2E_HOST_REPO`（`D:/work/rediscluterproject`）给 **daemon**。
 
 > ⚠️ **`scripts/smoke-test.sh` 不调用 `install.sh`** —— 它在两个容器里手工复刻了一遍
 > 集群搭建流程。**它通过不代表 `install.sh` 本身可用**。

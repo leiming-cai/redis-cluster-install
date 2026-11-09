@@ -5,8 +5,14 @@
 > `…-monitor-runtime-coverage.md` = 树名更正 + 运行时覆盖轮 ·
 > `…-hd-cluster-test-round.md` = 集群全量回归轮 ·
 > `2026-11-04-hd-operations-manual.md` = 运维手册轮 ·
-> **`2026-11-04-hd-production-truth-upgrade.md` = 生产真值补全轮（最新）**）——
+> **`2026-11-04-hd-production-truth-upgrade.md` = 生产真值补全轮** ·
+> **`2026-11-09-local-docker-e2e.md` = 本地 Docker 固定轮（最新，2026-11-09）**）——
 > 下面这份交接文档**截止到 2026-10-30**，**没有**覆盖那几轮的工作。
+> 🔴 **【2026-11-09】Docker 一律用「本地 Docker Desktop」，不要用 WSL 里的 Docker** ——
+> 本机**两套引擎并存**（本地 29.9.2 / WSL 29.5.3），选错了不会报错，
+> 只会在**看不见的地方**多出一堆容器。
+> 跑 E2E 用 **`bash scripts/e2e-local-docker.sh`**（它会先校验引擎身份再动手）。
+> 详见「环境约束」章节与 `docs/superpowers/sessions/2026-11-09-local-docker-e2e.md`。
 > 🌲 **三棵源码树的对照表（先看这个）：`docs/superpowers/sessions/2026-11-03-tree-map.md`**
 > 📖 **华盾环境的部署手册**：`docs/HD-OPERATIONS.md` ——
 > **单机改集群**的作业指导书（Redis / ZK / Kafka 集群化 + 四个后台程序的 YAML 配置）；
@@ -2641,6 +2647,39 @@ DoD 全部达成，E2E 在 Redis 8 上端到端通过。
 
 ## 环境约束（换机器/换会话必读）
 
+### 🔴 Docker 一律用「本地 Docker Desktop」，不要用 WSL 里的 Docker
+
+**2026-11-09 实测**：Windows 侧已有 **Docker Desktop 4.98.0 / Engine 29.9.2**
+（context `desktop-linux`）。
+
+⚠️ **WSL2 里还装着一套独立的 Docker Engine 29.5.3** —— 那是**另一个 daemon、
+另一套容器清单**。容器建在那里，**宿主机（PowerShell / 本地 docker CLI）看不见，
+残留也没人察觉** ⇒ **本项目禁止在 WSL 侧建容器**。
+
+**跑 E2E 用这个**（它会先校验引擎身份再动手）：
+
+```bash
+bash scripts/e2e-local-docker.sh
+```
+
+它先 `docker info` 看引擎是谁，**不是 `Docker Desktop` 就硬失败、不建任何容器**。
+
+> 📌 **不要在 Windows 上直接用 Git Bash 跑 `bash scripts/e2e-cluster-config.sh`** ——
+> 会失败，原因是 **MSYS 路径转换在两个地方要求相反**（**实测**，不是推断）：
+>
+> | 路径 | 谁解析 | 要求 |
+> |---|---|---|
+> | `docker build <上下文>` | **CLI**（Windows 原生程序） | 转换**开** → `/d/work/...` ⇒ `D:\work\...` |
+> | `docker run -v <源>:<目标>` | **daemon** | 转换**关** → 否则 `:目标` 被改写成 `D:/Program Files/Git/repo`（不存在 ⇒ **挂载静默变空**） |
+>
+> 两个设置**互斥**：为救 `-v` 而设 `MSYS_NO_PATHCONV=1`，`docker build` 立刻报
+> `unable to prepare context: path "/d/work/rediscluterproject" not found`。
+>
+> **解法**（仓库本来就有的两个变量的分工）：把脚本放进带 docker CLI 的 runner 容器里跑 ——
+> 容器内是 Linux 路径语义，冲突消失：
+> - `REPO_ROOT`（`/repo`）→ 给 **CLI** 读，当 `docker build` 的上下文
+> - `E2E_HOST_REPO`（`D:/work/rediscluterproject`）→ 给 **daemon** 解析，当 `-v` 的源
+
 ### bash 必须走 Docker
 
 宿主机 `bash.exe` 是 WSL shim，会报 `Bash/Service/0x8007274c`。
@@ -2705,8 +2744,14 @@ docker run --rm -v "${wt}:/repo" -w /repo rc-control:bats bash -c "bats tests/cl
 
 ### 在这台机器上跑 E2E 的方式
 
-宿主机**没有可用 bash**（Git Bash 不存在，`bash.exe` 是坏的 WSL shim），
-而 E2E 是 bash 脚本且要用 `docker` 编排容器。必须套一层：
+**首选：`scripts/e2e-local-docker.sh`**（它会先校验引擎是本地 Docker Desktop，
+不是就硬失败）：
+
+```bash
+bash scripts/e2e-local-docker.sh
+```
+
+底层等价于：
 
 ```powershell
 $wt="D:\work\rediscluterproject"
@@ -2714,6 +2759,12 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock `
   -v "${wt}:/repo" -e E2E_HOST_REPO="${wt}" `
   rc-e2e-runner:local bash /repo/scripts/e2e-cluster-config.sh
 ```
+
+> 📌 **`E2E_HOST_REPO` 不能省** —— 它是**daemon 能解析的路径**。
+> 脚本容器内看到的 `/repo` 是**容器自己的**路径，daemon（Windows 侧）解析不了
+> ⇒ 省略它的现象是「`docker run -v` 挂载上来是空的」，
+> 接着报 `unable to prepare context: path "/repo" not found` —— **看起来像路径写错，
+> 其实是两个 daemon 视角没分开**。
 
 `rc-e2e-runner` 的 Dockerfile 不在仓库里（`%TEMP%\opencode\Dockerfile.e2erunner`）。
 镜像丢失时用阿里云静态 docker CLI 重建：
