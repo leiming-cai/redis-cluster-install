@@ -14,12 +14,15 @@
 ## 一、一句话结论
 
 **基线两棵树：能**（代码就绪，只差把 Nacos 配置改对）。
-**华盾两棵树：不能** —— 但缺口是**具体、可数、可修**的，不是「方案要重做」。
+**华盾两棵树：能**，但要改的是**配置**和**版本区间**，**不是集群代码**。
 
 **三机本身不是问题**：本轮用**真实 3 机集群**实测证明，基线的生产写路径
 （`RedisClusterHashPipeline`）在 3 台机器上**正常工作**（按节点 pipeline，不是逐 key 退化）。
 
----
+> 🔴 **【2026-11-09 更新】范围收窄**：按用户要求，**华盾树排除**
+> `hisDataSend`、`hisDataProducer`、`sche-viewer-server`、`backend-gd`。
+> 排除后**华盾的结论从「不能」变成「能」** —— 因为那 4 个模块本来就是缺口所在。
+> 但**排除 ≠ 它们不再有风险**，三条注意事项见报告 §3.5。
 
 ## 二、⭐ 本轮最有价值的实测：基线写路径在 3 机集群上正常
 
@@ -65,63 +68,86 @@ cluster_state:ok / cluster_slots_assigned:16384 / cluster_known_nodes:6 / cluste
 | 基线 platform | realserver / modelserver | ✅ 11+4 处全在 else 分支 | ✅ **能** |
 | 基线 APP | `napstarweb/monitor` | ✅ 6 class | ✅ **能** |
 | 基线 APP | `sche-viewer-server` | ❌ 8 class, helper=0 | ⛔ **不能**（**不参与构建**） |
-| 华盾 platform | realserver / modelserver/services | ✅ | ✅ **能**（靠外部 jar） |
-| 华盾 platform | `hisDataSend` | ❌ 8 处 | ⛔ **不能**（**classpath 上连 oms 都没有**） |
-| 华盾 platform | `hisDataProducer` | ❌ 3 处 | ⛔ **不能** |
+| 华盾 platform | realserver / modelserver/services | ✅（在产物里） | ✅ **能** |
+| 华盾 platform | `hisDataSend` | ❌ 8 处 | ⛔ **不能** —— **已排除** |
+| 华盾 platform | `hisDataProducer` | ❌ 3 处 | ⛔ **不能** —— **已排除** |
 | 华盾 APP | `napstarweb/monitor` | ✅ 4 class | ✅ **能** |
-| 华盾 APP | `sche-viewer-server` | ❌ 8 class, helper=0 | ⛔ **不能** |
-| 华盾 APP | `backend-gd` | ❌ 21 处 | ⛔ **不能**（**从未构建**） |
+| 华盾 APP | `sche-viewer-server` | ❌ 8 class, helper=0 | ⛔ **不能** —— **已排除** |
+| 华盾 APP | `backend-gd` | ❌ 21 处 | ⛔ **不能** —— **已排除**（从未构建） |
 
 ### 3.1 「已编译产物」证据（读 class 字节码，不只读源码）
 
 ```
-基线 monitor-1.0.14.jar      6 个 class  helper=2   ← 集群分支已编译进去
-基线 sche-viewer-server-1.0.10.jar   8 个 class  helper=0   ← 零集群感知
-华盾 monitor-3.0.0.jar       4 个 class  helper=2   ← 已编译进去
-华盾 sche-viewer-server-3.0.0.jar   8 个 class  helper=0   ← 零集群感知
+基线 monitor-1.0.14.jar                6 个 class  helper=2   ← 集群分支已编译进去
+基线 sche-viewer-server-1.0.10.jar     8 个 class  helper=0   ← 零集群感知
+华盾 monitor-3.0.0.jar                 4 个 class  helper=2   ← 已编译进去
+华盾 sche-viewer-server-3.0.0.jar      8 个 class  helper=0   ← 零集群感知
 ```
 
-### 3.2 华盾 platform 的结构性问题
+### 3.2 🔴 华盾的结构性问题：**改本地源码进不了包**
+
+| 事实 | 证据 |
+|---|---|
+| 华盾 reactor 版本是 **3.0.0** | `platform/backend/pom.xml:15` |
+| 但模块间互相依赖用**区间** `[1.0.0,2.0.0)` | `platform/backend/pom.xml:38` `<platform.version>` |
+| **3.0.0 ∉ [1.0.0,2.0.0)** | ⇒ Maven **不用** reactor 内的模块，去仓库拉外部件 |
+| 产物里装的是 **1.0.14** | `rtdata-consumer-3.0.0.jar` 的 `BOOT-INF/lib/`：**`rtdata-module-1.0.14.jar`**、`model-service-1.0.14.jar`、`realserver-oms-1.0.14.jar` |
+| 华盾树**没有** `rtdata-module-1.0.14.jar` 的本地产物 | 该路径下无 jar ⇒ 从仓库拉的 |
+
+⇒ **在华盾树上改 `rtdata-module` / `model-service` / `model-dao` / `model-interface` /
+`transnapstardata-dao` 的源码，对最终产物零影响。**
+
+> 📌 **但这反而是好消息**：产物用的是基线那套 **1.0.14**（已验证含完整集群适配）
+> ⇒ **华盾的集群能力是「白捡」的**，不用改集群代码。
+> ⇒ **真正要改的是「配置」和「版本区间」。**
+
+### 3.3 集群开关键名（`javap` 直接读产物里的 jar，权威）
 
 ```
-华盾 platform/backend/realserver/common/oms/   →  0 个文件（空目录，无 pom.xml）
-基线 platform/backend/realserver/common/oms/   →  91 个文件
+javap -p -c -cp realserver-oms-1.0.14.jar ...config.RedisConfigProperties
+  private java.lang.String redisMode;
+  private java.util.List<java.lang.String> clusters;
+
+javap -v -p -cp realserver-oms-1.0.14.jar ...config.b   （= RedisUtilConfig）
+  // String  Invalid oms.redisMode='
+  // String  '. Expected one of: standalone, cluster, sentinel
+  // String  Redis mode mismatch: oms.redisMode='
 ```
 
-⇒ 华盾的集群辅助类**全部来自外部 jar** ⇒ **本树既改不了它，也控制不了解析到哪个版本**
-⇒ 「怎么修集群代码」这个问题在华盾树上**没有落点**，除非先把 `oms` 收进本树。
+⇒ **键名是 `oms.redisMode` + `oms.clusters`，取值 `standalone` / `cluster` / `sentinel`。**
+⇒ **没有 `iscluster`**（那是 1.0.11 的老键）。
+⇒ 而且**模式不匹配会启动即失败** ⇒ **响亮失败，不是静默降级**。
 
-### 3.3 版本区间是颗雷
+`RedisClusterHelper` 是**运行时判定**（`getClusterConfiguration() != null`），
+但探测异常时 `Failed to detect redis cluster mode, fallback to standalone` ⇒
+**唯一的静默降级点** ⇒ 每次上线必须核对 `*** Redis mode detected: CLUSTER ***`。
 
-`platform.version = [1.0.0,2.0.0)` ⇒ 解析到本地仓库里最高的 1.x。
-华盾树的代码硬依赖 **1.0.14 才有的三个类**
-（`RedisClusterHelper` / `RedisClusterHashPipeline` / `RedisScanUtils`），
-1.0.11 **一个都没有** ⇒ **全新构建可能直接编译失败**，而且失败信息是
-`cannot find symbol`，不是版本声明错误。
-⇒ **必须钉成固定版本。**
+### 3.4 排除那 4 个模块之后，华盾还剩的三个配置问题
 
-### 3.4 配置层：四棵树**全部**没打开集群模式
-
-| 树 | Nacos 里的 `oms:` | `redisMode` | 生效模式 |
-|---|---|---|---|
-| 基线 | 4 个 dataId 有 | **缺失** | standalone |
-| 华盾 | 4–7 个 dataId 有 | 只有 1 处 `standalone`，其余缺失 | standalone |
-
-⇒ **好消息**：改成集群**不会「从能跑变成静默降级」**，只会有明确的启动失败。
-
----
-
-## 四、三个必须处理的配置坑
-
-| # | 坑 | 后果 |
+| 模块 | 活配置 | 问题 |
 |---|---|---|
-| 1 | **华盾 platform 的 `OmsConfig` 硬编码 `10.137.220.191` 且没有 `@ConfigurationProperties`** | **集群开关永远打不开**（Nacos 改不动，必须改代码） |
-| 2 | **源码 `application.yml` 里有活的 `oms:` 块，Nacos 里也有** | 谁覆盖谁**没实测**（那条「jar 赢」的结论是在另一棵树上测的）⇒ 最稳是把源码的 `oms:` 块整段注释掉 |
-| 3 | **`oms.clusters` 的地址形式必须与 `CLUSTER SLOTS` 回报的一致** | 不一致 ⇒ 静默退化成逐 key；`RedisScanUtils` 直接抛 `IllegalStateException` |
+| **`transformNapstarModel`** | `application.yml:197-203` **`oms: redisMode: standalone`** | **显式关闭集群**；`oms.clusters` 根本没有 ⇒ 模型缓存只写进 node1，**另 2 个 master 上的 key 全缺** |
+| **`commitDataIncreProducer`** | `bootstrap.yml:36-41` 活 `oms:`（**无 `redisMode`**） | 缺省 = standalone ⇒ 同上 |
+| **`realserver/controller`** | `config/OmsConfig.java:18-26` 硬编码 `10.137.220.191`，**无 `@ConfigurationProperties`** | **完全不读 Nacos** ⇒ 集群开关打不开；且与 oms jar 同名 bean 冲突，本模块又没开 `allow-bean-definition-overriding` |
+
+华盾 APP 侧：`plugins/realalarmconsumer/application.yml:46-52` 是**全树唯一的活 `oms:` 块**
+（`redisMode: standalone`）；`web-controller` 的 `oms:` 全被注释，
+实际来自 Nacos `napstarweb-controller.yaml`（`oms.hostname: localhost` ⇒ 单机）。
+
+### 3.5 ⚠️ 排除 ≠ 它们不再有风险（三条）
+
+1. **`sche-viewer-server` 在华盾 APP 根 pom 里是「活的 module」**（`<module>` 没被注释），
+   且 Nacos 有它的 dataId `scheviewer.yaml` ⇒ **仍在构建、仍在部署** ⇒
+   排除它只是「不改它」⇒ **它照样会连集群、照样会静默丢数据**。
+2. **`backend-gd` 从未被构建，但与 `backend` 共享同一 Nacos group 和同一份配置**
+   ⇒ 改一个就是改两个；误部署即全量丢数据。
+3. **`hisDataSend` 的 classpath 上根本没有 `realserver-oms`** ⇒
+   **永远无法进入集群模式** ⇒ 它会连 `spring.redis.*` 指向的单机 ⇒
+   在集群化的环境里它是**一个「连错 Redis」的活雷**。
 
 ---
 
-## 五、上线前必看的三条判据
+## 四、上线前必看的三条判据
 
 1. **启动日志有 `*** Redis mode detected: CLUSTER ***`**（不能是 `STANDALONE`）
 2. **日志里 `UnsupportedOperationException` / `Pipeline is currently not supported` 为 0 条**
@@ -134,33 +160,37 @@ cluster_state:ok / cluster_slots_assigned:16384 / cluster_known_nodes:6 / cluste
 
 ---
 
-## 六、方法论收获（三条）
+## 五、方法论收获（五条）
 
 > 📌 **一、「源码写了」≠「配置真的打开了」≠「产物里真的有」。**
 > 只读源码会得出「华盾两边都改好了」的错误结论；读 class 字节码才发现
 > `sche-viewer-server` 的 8 个 class **一个集群标记都没有**。
 
-> 📌 **二、「工具说没有」的时候，先怀疑工具。**
-> 我的第一个 jar 扫描器报「0 个集群标记」，是它自己坏了
-> （`[System.Text.Encoding]::Latin1` 在旧 PowerShell 不存在，异常被静默吞掉
-> ⇒ **全部 class 都被跳过**）。换成字节匹配后立刻正确。
+> 📌 **二、版本区间会决定「你改的东西到底进不进包」。**
+> 华盾 3.0.0 ∉ `[1.0.0,2.0.0)` ⇒ Maven 去仓库拉 1.0.14 ⇒ **改本地源码零影响**。
+> 这比「集群分支有没有」更根本：它决定了「改代码」这个动作本身有没有意义。
 
-> 📌 **三、探针报错时，先怀疑探针的管道。**
+> 📌 **三、我的第一个扫描器报「0 个集群标记」，是扫描器坏了，不是 jar 坏了。**
+> `[System.Text.Encoding]::Latin1` 在旧 PowerShell 不存在，异常被静默吞掉
+> ⇒ **全部 class 都被跳过**。换成字节匹配后立刻正确。
+> ⇒ **「工具说没有」的时候，先怀疑工具。**
+
+> 📌 **四、探针报错时，先怀疑探针的管道。**
 > 本轮探针连报三次 `No reachable node in cluster`，**三次全是探针的问题**：
-> ① 没加入 E2E 网络；② 没带密码；③ Java API 用错
-> （SDR 2.7.18 里 `JedisClientConfiguration.builder()` 返回嵌套的
-> `JedisClientConfigurationBuilder`，而**密码在 `RedisClusterConfiguration` 上**，
-> 不在 client configuration 上）。
-> ⇒ **在把「探针失败」当成「代码有缺陷」之前，先把探针自己的管道修对。**
+> 没加入 E2E 网络 / 没带密码 / SDR 2.7.18 的 builder 类型与密码位置都猜错了。
+
+> 📌 **五、配置键名要以「发布出去的 jar」为准，不要以「本机的另一份源码」为准。**
+> 两个审计对「集群开关叫什么」给出不同答案；用 `javap` 读**产物里那个 jar** 才定案：
+> **`oms.redisMode`**，没有 `iscluster`。本机另有一份同名源码用的是老键 —— **它不是发布的版本**。
 
 ---
 
-## 七、本轮**没有**做的事
+## 六、本轮**没有**做的事
 
 | # | 事 | 为什么 |
 |---|---|---|
 | 1 | **没有改任何 Java 代码** | 本轮是**分析**任务，不是实施任务 |
 | 2 | **没有改生产 Nacos** | 生产环境的动作 |
-| 3 | **没有删 `backend-gd`** | 那是交付形态的决策，不是本轮能定的 |
-| 4 | **探针脚本没有入库** | 它们是**一次性的取证工具**；可复现的命令与输出已写进分析报告 |
-| 5 | **没有把 `oms` 收进华盾 platform 树** | 那是**构建图变更**，需要单独一轮 |
+| 3 | **没有删 `backend-gd` / `sche-viewer-server`** | 那是交付形态的决策 |
+| 4 | **探针脚本没有入库** | 一次性取证工具；可复现的命令与输出已写进分析报告 |
+| 5 | **没有改华盾的 `platform.version` 区间** | 那是**构建图变更**，需要单独一轮 |

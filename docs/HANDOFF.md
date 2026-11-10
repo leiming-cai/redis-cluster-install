@@ -15,10 +15,13 @@
 > 跑 E2E 用 **`bash scripts/e2e-local-docker.sh`**（它会先校验引擎身份再动手）。
 > 详见「环境约束」章节与 `docs/superpowers/sessions/2026-11-09-local-docker-e2e.md`。
 > 📊 **【2026-11-09】三机集群能不能读写？** ——
-> **基线两棵树能**（代码就绪，只差改 Nacos 配置）；
-> **华盾两棵树不能**（缺口可数可修）。
+> **四棵树都能**（基线两棵树只差改 Nacos 配置；
+> 华盾两棵树排除 `hisDataSend`/`hisDataProducer`/`sche-viewer-server`/`backend-gd` 后，
+> **不用改集群代码**，要改的是**配置**和 **`platform.version` 区间**）。
 > ⭐ **基线的生产写路径已在真实 3 机集群上实测通过**
 > （`putAllHashes` 30/30、`poolFound=true` ⇒ 走按节点 pipeline、不是逐 key 退化）。
+> ⚠️ **华盾的 reactor 版本 3.0.0 ∉ `[1.0.0,2.0.0)` ⇒ 改本地源码进不了包**
+> （产物里装的是仓库的 1.0.14）。
 > 详见 `docs/superpowers/specs/2026-11-09-three-host-cluster-read-write-analysis.md`。
 > 🌲 **三棵源码树的对照表（先看这个）：`docs/superpowers/sessions/2026-11-03-tree-map.md`**
 > 📖 **华盾环境的部署手册**：`docs/HD-OPERATIONS.md` ——
