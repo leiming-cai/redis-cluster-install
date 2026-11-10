@@ -7,7 +7,8 @@
 > `2026-11-04-hd-operations-manual.md` = 运维手册轮 ·
 > **`2026-11-04-hd-production-truth-upgrade.md` = 生产真值补全轮** ·
 > **`2026-11-09-local-docker-e2e.md` = 本地 Docker 固定轮** ·
-> **`2026-11-09-three-host-cluster-analysis.md` = 三机集群读写适配分析轮（最新）**）——
+> **`2026-11-09-three-host-cluster-analysis.md` = 三机集群读写适配分析轮** ·
+> **`2026-11-10-session-wrapup.md` = 本会话收尾索引（最新，先读这个）**）——
 > 下面这份交接文档**截止到 2026-10-30**，**没有**覆盖那几轮的工作。
 > 🔴 **【2026-11-09】Docker 一律用「本地 Docker Desktop」，不要用 WSL 里的 Docker** ——
 > 本机**两套引擎并存**（本地 29.9.2 / WSL 29.5.3），选错了不会报错，
@@ -22,7 +23,8 @@
 > （`putAllHashes` 30/30、`poolFound=true` ⇒ 走按节点 pipeline、不是逐 key 退化）。
 > ⚠️ **华盾的 reactor 版本 3.0.0 ∉ `[1.0.0,2.0.0)` ⇒ 改本地源码进不了包**
 > （产物里装的是仓库的 1.0.14）。
-> 详见 `docs/superpowers/specs/2026-11-09-three-host-cluster-read-write-analysis.md`。
+> 详见 `docs/superpowers/specs/2026-11-09-three-host-cluster-read-write-analysis.md`
+> 与 `docs/superpowers/sessions/2026-11-10-session-wrapup.md`。
 > 🌲 **三棵源码树的对照表（先看这个）：`docs/superpowers/sessions/2026-11-03-tree-map.md`**
 > 📖 **华盾环境的部署手册**：`docs/HD-OPERATIONS.md` ——
 > **单机改集群**的作业指导书（Redis / ZK / Kafka 集群化 + 四个后台程序的 YAML 配置）；
@@ -2268,6 +2270,8 @@ docker network rm rc-cpsweb-net
 
 | 文档 | 路径 |
 |---|---|
+| ⭐**本会话收尾索引（先读这个）** | **`docs/superpowers/sessions/2026-11-10-session-wrapup.md`** |
+| ⭐**三机集群读写适配分析** | **`docs/superpowers/specs/2026-11-09-three-host-cluster-read-write-analysis.md`** |
 | ⭐**操作手册（照着做的那一份）** | **`docs/OPERATIONS.md`**（第十七轮新增，1297 行 / 8 章） |
 | 脚本逐参数参考 | `docs/USAGE.md` |
 | 验收清单 | `docs/VERIFICATION.md` |
@@ -2276,6 +2280,8 @@ docker network rm rc-cpsweb-net
 | 规格（E2E 迁 Redis 8） | `docs/superpowers/specs/2026-10-19-e2e-on-redis-8-design.md` |
 | 实施计划（Redis 8 迁移） | `docs/superpowers/plans/2026-10-19-e2e-on-redis-8.md` |
 | 设计（操作手册） | `docs/superpowers/specs/2026-10-30-operations-manual-design.md`（第十七轮） |
+| 规格（华盾三机集群） | `docs/superpowers/specs/2026-11-05-hd-three-node-redis-cluster-design.md` |
+| 实施计划（华盾三机集群） | `docs/superpowers/plans/2026-11-05-hd-three-node-redis-cluster.md` |
 
 第一轮的规格与计划均已按「脚本建目录、流程 9 步」的决策同步过
 （提交 `a68d7dd`、`75442ed`）；Redis 8 迁移这一轮的 spec / plan 见上表。
@@ -2284,6 +2290,24 @@ docker network rm rc-cpsweb-net
 > `OPERATIONS.md` = **按任务组织的端到端手册**（照着做）→
 > `USAGE.md` = **按参数组织的脚本参考**（查选项）→
 > `HANDOFF.md` = **本文件**，结论的来源与踩坑记录（查"为什么"）。
+
+---
+
+## 本会话（2026-11-09 ~ 11-10）的产出
+
+| 东西 | 位置 | 提交 |
+|---|---|---|
+| **本地 Docker 固定脚本** | `scripts/e2e-local-docker.sh` | `5a958c7` |
+| 它的回归测试（7 条，6 个变异检验） | `tests/e2e_local_docker.bats` | `5a958c7` |
+| **三机集群读写适配分析报告** | `docs/superpowers/specs/2026-11-09-three-host-cluster-read-write-analysis.md` | `ff09dc6` / `a43d8c1` |
+| 会话存档（本地 Docker 轮） | `docs/superpowers/sessions/2026-11-09-local-docker-e2e.md` | `5a958c7` |
+| 会话存档（三机集群分析轮） | `docs/superpowers/sessions/2026-11-09-three-host-cluster-analysis.md` | `ff09dc6` / `a43d8c1` |
+| **本会话收尾索引** | `docs/superpowers/sessions/2026-11-10-session-wrapup.md` | 本次提交 |
+
+> 📌 **本会话的验证基线**（下一轮对照）：
+> `check_syntax.sh` **TOTAL=49 FAIL=0** · `validate_libs.sh` **PASS=54 FAIL=0** ·
+> bats **224/0** · Docker E2E（**本地**引擎）**`=== E2E PASSED ===`** 退出码 0 ·
+> 3 机集群上的生产写路径 `putAllHashes` **30/30**、`poolFound=true` × 3。
 
 ---
 
